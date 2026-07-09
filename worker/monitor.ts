@@ -226,7 +226,8 @@ async function recomputeConsensus() {
       { onConflict: "token_mint" }
     );
 
-    if (  walletsCount >= MIN_WALLETS_FOR_ALERT &&
+    if (
+  walletsCount >= MIN_WALLETS_FOR_ALERT &&
   score >= 20 &&
   (market.liquidityUsd ?? 0) >= 10000
 ) {
