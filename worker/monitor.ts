@@ -288,7 +288,7 @@ async function runCycle() {
 
   for (const wallet of wallets) {
     await pollWallet(wallet);
-    await sleep(1500);
+    await sleep(1000);
   }
 
   await recomputeConsensus();
