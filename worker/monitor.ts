@@ -1,4 +1,4 @@
-oh import "dotenv/config";
+import "dotenv/config";
 import { getConnection, fetchNewSignatures, getParsedTx, extractTrade } from "../lib/solana";
 import { getSupabaseAdmin } from "../lib/supabase";
 import { fetchTokenMarketData } from "../lib/tokenData";
@@ -227,10 +227,9 @@ async function recomputeConsensus() {
     );
 
     if (
-  walletsCount >= MIN_WALLETS_FOR_ALERT &&
-  score >= 20 &&
-  (market.liquidityUsd ?? 0) >= 10000
-) {
+      walletsCount >= MIN_WALLETS_FOR_ALERT &&
+      score >= 20 &&
+      (market.liquidityUsd ?? 0) >= 10000
     ) {
       const { data: alreadyAlerted } = await supabase
         .from("alerts_sent")
@@ -289,7 +288,7 @@ async function runCycle() {
 
   for (const wallet of wallets) {
     await pollWallet(wallet);
-    await sleep(1000);
+    await sleep(1500);
   }
 
   await recomputeConsensus();
