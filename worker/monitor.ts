@@ -9,12 +9,12 @@ const POLL_INTERVAL_MINUTES = Number(process.env.POLL_INTERVAL_MINUTES ?? 5);
 const SCALP_WINDOW_MINUTES = Number(process.env.SCALP_WINDOW_MINUTES ?? 5);
 const ALERT_WINDOW_HOURS = Number(process.env.ALERT_WINDOW_HOURS ?? 24);
 
-const MIN_WALLETS_FOR_ALERT = 4;
-const MIN_SCORE_FOR_ALERT = 8;
-const MIN_LIQUIDITY_USD = 25_000;
-const MIN_MARKET_CAP = 50_000;
+const MIN_WALLETS_FOR_ALERT = 3;
+const MIN_SCORE_FOR_ALERT = 6;
+const MIN_LIQUIDITY_USD = 10_000;
+const MIN_MARKET_CAP = 10_000;
 const MAX_MARKET_CAP = 3_000_000;
-const MIN_TOTAL_SOL = 5;
+const MIN_TOTAL_SOL = 1;
 
 const supabase = getSupabaseAdmin();
 const connection = getConnection();
@@ -37,12 +37,10 @@ async function withRetry<T>(label: string, fn: () => Promise<T>, retries = 3): P
         await sleep(waitMs);
         continue;
       }
-
       console.error(`[error] ${label}:`, err);
       return null;
     }
   }
-
   return null;
 }
 
@@ -68,7 +66,6 @@ async function pollWallet(wallet: { address: string; last_signature: string | nu
 
     const trade = extractTrade(tx, wallet.address);
     newest = sigInfo.signature;
-
     if (!trade) continue;
 
     const windowStart = new Date(trade.txTime.getTime() - SCALP_WINDOW_MINUTES * 60_000);
@@ -101,17 +98,6 @@ async function pollWallet(wallet: { address: string; last_signature: string | nu
       { onConflict: "wallet_address,signature,token_mint,side" }
     );
 
-    if (isScalp) {
-      await supabase
-        .from("wallet_transactions")
-        .update({ is_scalp: true })
-        .eq("wallet_address", wallet.address)
-        .eq("token_mint", trade.tokenMint)
-        .eq("side", oppositeSide)
-        .gte("tx_time", windowStart.toISOString())
-        .lte("tx_time", windowEnd.toISOString());
-    }
-
     console.log(
       `[trade] ${wallet.address.slice(0, 6)}… ${trade.side.toUpperCase()} ${trade.tokenMint.slice(0, 6)}… ${trade.solAmount.toFixed(3)} SOL${isScalp ? " (SCALP)" : ""}`
     );
@@ -139,10 +125,7 @@ async function recomputeConsensus() {
 
   if (!buys?.length) return;
 
-  const byToken = new Map<
-    string,
-    { wallets: Set<string>; totalSol: number; first: Date; last: Date }
-  >();
+  const byToken = new Map<string, { wallets: Set<string>; totalSol: number; first: Date; last: Date }>();
 
   for (const b of buys) {
     const current = byToken.get(b.token_mint) ?? {
@@ -162,14 +145,6 @@ async function recomputeConsensus() {
     byToken.set(b.token_mint, current);
   }
 
-  const { data: scalpRows } = await supabase
-    .from("wallet_transactions")
-    .select("token_mint")
-    .eq("is_scalp", true)
-    .gte("tx_time", windowStart);
-
-  const scalpTokens = new Set((scalpRows ?? []).map((r) => r.token_mint));
-
   for (const [tokenMint, agg] of byToken.entries()) {
     await sleep(700);
 
@@ -182,13 +157,8 @@ async function recomputeConsensus() {
 
     if (!market) continue;
 
-    const { data: existing } = await supabase
-      .from("token_scores")
-      .select("holders")
-      .eq("token_mint", tokenMint)
-      .maybeSingle();
-
-    const holdersPrev = existing?.holders ?? null;
+    const marketCap = market.marketCap ?? 0;
+    const liquidity = market.liquidityUsd ?? 0;
 
     const { data: sellRows } = await supabase
       .from("wallet_transactions")
@@ -198,18 +168,16 @@ async function recomputeConsensus() {
       .gte("tx_time", windowStart);
 
     const sellingWallets = new Set((sellRows ?? []).map((r) => r.wallet_address));
-
     const dumpDetected = sellingWallets.size >= Math.max(2, Math.ceil(walletsCount / 2));
-    const scalpDetected = scalpTokens.has(tokenMint);
 
     const score = computeScore({
       walletsCount,
       liquidityUsd: market.liquidityUsd,
       marketCap: market.marketCap,
       holders: market.holders,
-      holdersPrev,
+      holdersPrev: null,
       dumpDetected,
-      scalpDetected,
+      scalpDetected: false,
     });
 
     await supabase.from("token_scores").upsert(
@@ -224,17 +192,23 @@ async function recomputeConsensus() {
         market_cap: market.marketCap,
         liquidity_usd: market.liquidityUsd,
         holders: market.holders,
-        holders_prev: holdersPrev,
         dump_flag: dumpDetected,
-        scalp_flag: scalpDetected,
+        scalp_flag: false,
         score,
         updated_at: new Date().toISOString(),
       },
       { onConflict: "token_mint" }
     );
 
-    const marketCap = market.marketCap ?? 0;
-    const liquidity = market.liquidityUsd ?? 0;
+    console.log({
+      token: market.symbol,
+      wallets: walletsCount,
+      score,
+      liquidity,
+      marketCap,
+      totalSol: agg.totalSol,
+      dumpDetected,
+    });
 
     const passesAlertFilter =
       walletsCount >= MIN_WALLETS_FOR_ALERT &&
@@ -242,9 +216,7 @@ async function recomputeConsensus() {
       liquidity >= MIN_LIQUIDITY_USD &&
       marketCap >= MIN_MARKET_CAP &&
       marketCap <= MAX_MARKET_CAP &&
-      agg.totalSol >= MIN_TOTAL_SOL &&
-      !dumpDetected &&
-      !scalpDetected;
+      agg.totalSol >= MIN_TOTAL_SOL;
 
     if (!passesAlertFilter) continue;
 
@@ -257,7 +229,7 @@ async function recomputeConsensus() {
 
     if (alreadyAlerted?.length) continue;
 
-    console.log("🚨 HIGH QUALITY consensus alert");
+    console.log("🚨 Wallet consensus alert");
     console.log(`Token: ${market.symbol}`);
     console.log(`Wallets buying: ${walletsCount}`);
     console.log(`Score: ${score}`);
@@ -310,7 +282,6 @@ async function runCycle() {
   }
 
   await recomputeConsensus();
-
   console.log("=== Cycle complete ===");
 }
 
