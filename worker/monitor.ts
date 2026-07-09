@@ -1,4 +1,4 @@
-import "dotenv/config";
+oh import "dotenv/config";
 import { getConnection, fetchNewSignatures, getParsedTx, extractTrade } from "../lib/solana";
 import { getSupabaseAdmin } from "../lib/supabase";
 import { fetchTokenMarketData } from "../lib/tokenData";
@@ -226,10 +226,10 @@ async function recomputeConsensus() {
       { onConflict: "token_mint" }
     );
 
-    if (
-      walletsCount >= MIN_WALLETS_FOR_ALERT &&
-      score >= 50 &&
-      (market.liquidityUsd ?? 0) >= 15000
+    if (  walletsCount >= MIN_WALLETS_FOR_ALERT &&
+  score >= 20 &&
+  (market.liquidityUsd ?? 0) >= 10000
+) {
     ) {
       const { data: alreadyAlerted } = await supabase
         .from("alerts_sent")
