@@ -1,54 +1,42 @@
 export interface ScoreInputs {
-  walletsCount: number;       // distinct smart wallets that bought (excluding scalps)
+  walletsCount: number;
   liquidityUsd: number | null;
   marketCap: number | null;
   holders: number | null;
   holdersPrev: number | null;
-  dumpDetected: boolean;      // dev/top holder dumping
-  scalpDetected: boolean;     // a buy+sell inside the scalp window was seen for this token
+  dumpDetected: boolean;
+  scalpDetected: boolean;
 }
 
-/**
- * Scoring rules, exactly as specified:
- *  +2 per smart wallet buying
- *  +1 if liquidity > $30K
- *  +1 if market cap is $100K–$5M
- *  +1 if holders are increasing
- *  -3 if dev/top holders are dumping
- *  -3 if buy/sell happened in under 5 minutes (scalp)
- */
 export function computeScore(inputs: ScoreInputs): number {
   let score = 0;
 
-  score += inputs.walletsCount * 2;
+  score += Math.min(inputs.walletsCount * 12, 45);
 
-  if (inputs.liquidityUsd !== null && inputs.liquidityUsd > 30_000) {
-    score += 1;
-  }
+  const liq = inputs.liquidityUsd ?? 0;
+  const mc = inputs.marketCap ?? 0;
 
-  if (
-    inputs.marketCap !== null &&
-    inputs.marketCap >= 100_000 &&
-    inputs.marketCap <= 5_000_000
-  ) {
-    score += 1;
-  }
+  if (liq >= 100_000) score += 20;
+  else if (liq >= 50_000) score += 15;
+  else if (liq >= 25_000) score += 10;
+  else if (liq >= 10_000) score += 5;
+  else score -= 15;
+
+  if (mc >= 50_000 && mc <= 300_000) score += 20;
+  else if (mc > 300_000 && mc <= 1_000_000) score += 12;
+  else if (mc > 1_000_000 && mc <= 5_000_000) score += 5;
+  else if (mc < 25_000) score -= 10;
 
   if (
     inputs.holders !== null &&
     inputs.holdersPrev !== null &&
     inputs.holders > inputs.holdersPrev
   ) {
-    score += 1;
+    score += 10;
   }
 
-  if (inputs.dumpDetected) {
-    score -= 3;
-  }
+  if (inputs.dumpDetected) score -= 30;
+  if (inputs.scalpDetected) score -= 25;
 
-  if (inputs.scalpDetected) {
-    score -= 3;
-  }
-
-  return score;
+  return Math.max(0, Math.min(100, Math.round(score)));
 }
