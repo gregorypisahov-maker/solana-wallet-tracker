@@ -7,8 +7,14 @@ import { sendTelegramAlert, formatConsensusAlert } from "../lib/telegram";
 
 const POLL_INTERVAL_MINUTES = Number(process.env.POLL_INTERVAL_MINUTES ?? 5);
 const SCALP_WINDOW_MINUTES = Number(process.env.SCALP_WINDOW_MINUTES ?? 5);
-const MIN_WALLETS_FOR_ALERT = Number(process.env.MIN_WALLETS_FOR_ALERT ?? 3);
 const ALERT_WINDOW_HOURS = Number(process.env.ALERT_WINDOW_HOURS ?? 24);
+
+const MIN_WALLETS_FOR_ALERT = 4;
+const MIN_SCORE_FOR_ALERT = 8;
+const MIN_LIQUIDITY_USD = 25_000;
+const MIN_MARKET_CAP = 50_000;
+const MAX_MARKET_CAP = 3_000_000;
+const MIN_TOTAL_SOL = 5;
 
 const supabase = getSupabaseAdmin();
 const connection = getConnection();
@@ -27,7 +33,7 @@ async function withRetry<T>(label: string, fn: () => Promise<T>, retries = 3): P
     } catch (err) {
       if (isRateLimitError(err)) {
         const waitMs = 3000 * (i + 1);
-        console.warn(`[429] ${label}. Waiting ${waitMs}ms before retry ${i + 1}/${retries}`);
+        console.warn(`[429] ${label}. Waiting ${waitMs}ms`);
         await sleep(waitMs);
         continue;
       }
@@ -37,7 +43,6 @@ async function withRetry<T>(label: string, fn: () => Promise<T>, retries = 3): P
     }
   }
 
-  console.error(`[failed] ${label} after retries`);
   return null;
 }
 
@@ -63,6 +68,7 @@ async function pollWallet(wallet: { address: string; last_signature: string | nu
 
     const trade = extractTrade(tx, wallet.address);
     newest = sigInfo.signature;
+
     if (!trade) continue;
 
     const windowStart = new Date(trade.txTime.getTime() - SCALP_WINDOW_MINUTES * 60_000);
@@ -79,7 +85,7 @@ async function pollWallet(wallet: { address: string; last_signature: string | nu
       .lte("tx_time", windowEnd.toISOString())
       .limit(1);
 
-    const isScalp = !!nearbyOpposite && nearbyOpposite.length > 0;
+    const isScalp = !!nearbyOpposite?.length;
 
     await supabase.from("wallet_transactions").upsert(
       {
@@ -127,7 +133,7 @@ async function recomputeConsensus() {
     .gte("tx_time", windowStart);
 
   if (error) {
-    console.error("Failed to load buys for consensus:", error);
+    console.error("Failed to load buys:", error);
     return;
   }
 
@@ -139,21 +145,21 @@ async function recomputeConsensus() {
   >();
 
   for (const b of buys) {
-    const t = byToken.get(b.token_mint) ?? {
+    const current = byToken.get(b.token_mint) ?? {
       wallets: new Set<string>(),
       totalSol: 0,
       first: new Date(b.tx_time),
       last: new Date(b.tx_time),
     };
 
-    t.wallets.add(b.wallet_address);
-    t.totalSol += Number(b.sol_amount);
+    current.wallets.add(b.wallet_address);
+    current.totalSol += Number(b.sol_amount);
 
     const txTime = new Date(b.tx_time);
-    if (txTime < t.first) t.first = txTime;
-    if (txTime > t.last) t.last = txTime;
+    if (txTime < current.first) current.first = txTime;
+    if (txTime > current.last) current.last = txTime;
 
-    byToken.set(b.token_mint, t);
+    byToken.set(b.token_mint, current);
   }
 
   const { data: scalpRows } = await supabase
@@ -192,6 +198,7 @@ async function recomputeConsensus() {
       .gte("tx_time", windowStart);
 
     const sellingWallets = new Set((sellRows ?? []).map((r) => r.wallet_address));
+
     const dumpDetected = sellingWallets.size >= Math.max(2, Math.ceil(walletsCount / 2));
     const scalpDetected = scalpTokens.has(tokenMint);
 
@@ -226,43 +233,54 @@ async function recomputeConsensus() {
       { onConflict: "token_mint" }
     );
 
-    if (
+    const marketCap = market.marketCap ?? 0;
+    const liquidity = market.liquidityUsd ?? 0;
+
+    const passesAlertFilter =
       walletsCount >= MIN_WALLETS_FOR_ALERT &&
-      score >= 20 &&
-      (market.liquidityUsd ?? 0) >= 10000
-    ) {
-      const { data: alreadyAlerted } = await supabase
-        .from("alerts_sent")
-        .select("id")
-        .eq("token_mint", tokenMint)
-        .gte("sent_at", windowStart)
-        .limit(1);
+      score >= MIN_SCORE_FOR_ALERT &&
+      liquidity >= MIN_LIQUIDITY_USD &&
+      marketCap >= MIN_MARKET_CAP &&
+      marketCap <= MAX_MARKET_CAP &&
+      agg.totalSol >= MIN_TOTAL_SOL &&
+      !dumpDetected &&
+      !scalpDetected;
 
-      if (!alreadyAlerted || alreadyAlerted.length === 0) {
-        console.log("🚨 Wallet consensus alert");
-        console.log(`Token: ${market.symbol}`);
-        console.log(`Wallets buying: ${walletsCount}`);
-        console.log(`Score: ${score}`);
-        console.log(`Total SOL bought: ${agg.totalSol.toFixed(2)}`);
+    if (!passesAlertFilter) continue;
 
-        await sendTelegramAlert(
-          formatConsensusAlert({
-            symbol: market.symbol,
-            tokenMint,
-            walletsCount,
-            totalSol: agg.totalSol,
-            marketCap: market.marketCap,
-            liquidityUsd: market.liquidityUsd,
-            score,
-          })
-        );
+    const { data: alreadyAlerted } = await supabase
+      .from("alerts_sent")
+      .select("id")
+      .eq("token_mint", tokenMint)
+      .gte("sent_at", windowStart)
+      .limit(1);
 
-        await supabase.from("alerts_sent").insert({
-          token_mint: tokenMint,
-          wallets_count: walletsCount,
-        });
-      }
-    }
+    if (alreadyAlerted?.length) continue;
+
+    console.log("🚨 HIGH QUALITY consensus alert");
+    console.log(`Token: ${market.symbol}`);
+    console.log(`Wallets buying: ${walletsCount}`);
+    console.log(`Score: ${score}`);
+    console.log(`Liquidity: ${liquidity}`);
+    console.log(`Market cap: ${marketCap}`);
+    console.log(`Total SOL bought: ${agg.totalSol.toFixed(2)}`);
+
+    await sendTelegramAlert(
+      formatConsensusAlert({
+        symbol: market.symbol,
+        tokenMint,
+        walletsCount,
+        totalSol: agg.totalSol,
+        marketCap: market.marketCap,
+        liquidityUsd: market.liquidityUsd,
+        score,
+      })
+    );
+
+    await supabase.from("alerts_sent").insert({
+      token_mint: tokenMint,
+      wallets_count: walletsCount,
+    });
   }
 }
 
@@ -292,6 +310,7 @@ async function runCycle() {
   }
 
   await recomputeConsensus();
+
   console.log("=== Cycle complete ===");
 }
 
