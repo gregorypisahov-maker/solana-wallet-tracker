@@ -95,6 +95,17 @@ async function pollWallet(wallet: { address: string; last_signature: string | nu
       { onConflict: "wallet_address,signature,token_mint,side" }
     );
 
+    if (isScalp) {
+      await supabase
+        .from("wallet_transactions")
+        .update({ is_scalp: true })
+        .eq("wallet_address", wallet.address)
+        .eq("token_mint", trade.tokenMint)
+        .eq("side", oppositeSide)
+        .gte("tx_time", windowStart.toISOString())
+        .lte("tx_time", windowEnd.toISOString());
+    }
+
     console.log(
       `[trade] ${wallet.address.slice(0, 6)}… ${trade.side.toUpperCase()} ${trade.tokenMint.slice(0, 6)}… ${trade.solAmount.toFixed(3)} SOL${isScalp ? " (SCALP)" : ""}`
     );
@@ -115,9 +126,17 @@ async function recomputeConsensus() {
     .eq("is_scalp", false)
     .gte("tx_time", windowStart);
 
-  if (error || !buys?.length) return;
+  if (error) {
+    console.error("Failed to load buys for consensus:", error);
+    return;
+  }
 
-  const byToken = new Map<string, { wallets: Set<string>; totalSol: number; first: Date; last: Date }>();
+  if (!buys?.length) return;
+
+  const byToken = new Map<
+    string,
+    { wallets: Set<string>; totalSol: number; first: Date; last: Date }
+  >();
 
   for (const b of buys) {
     const t = byToken.get(b.token_mint) ?? {
@@ -137,8 +156,18 @@ async function recomputeConsensus() {
     byToken.set(b.token_mint, t);
   }
 
+  const { data: scalpRows } = await supabase
+    .from("wallet_transactions")
+    .select("token_mint")
+    .eq("is_scalp", true)
+    .gte("tx_time", windowStart);
+
+  const scalpTokens = new Set((scalpRows ?? []).map((r) => r.token_mint));
+
   for (const [tokenMint, agg] of byToken.entries()) {
     await sleep(700);
+
+    const walletsCount = agg.wallets.size;
 
     const market = await withRetry(
       `market data ${tokenMint.slice(0, 6)}`,
@@ -147,16 +176,33 @@ async function recomputeConsensus() {
 
     if (!market) continue;
 
-    const walletsCount = agg.wallets.size;
+    const { data: existing } = await supabase
+      .from("token_scores")
+      .select("holders")
+      .eq("token_mint", tokenMint)
+      .maybeSingle();
+
+    const holdersPrev = existing?.holders ?? null;
+
+    const { data: sellRows } = await supabase
+      .from("wallet_transactions")
+      .select("wallet_address")
+      .eq("token_mint", tokenMint)
+      .eq("side", "sell")
+      .gte("tx_time", windowStart);
+
+    const sellingWallets = new Set((sellRows ?? []).map((r) => r.wallet_address));
+    const dumpDetected = sellingWallets.size >= Math.max(2, Math.ceil(walletsCount / 2));
+    const scalpDetected = scalpTokens.has(tokenMint);
 
     const score = computeScore({
       walletsCount,
       liquidityUsd: market.liquidityUsd,
       marketCap: market.marketCap,
       holders: market.holders,
-      holdersPrev: null,
-      dumpDetected: false,
-      scalpDetected: false,
+      holdersPrev,
+      dumpDetected,
+      scalpDetected,
     });
 
     await supabase.from("token_scores").upsert(
@@ -171,13 +217,20 @@ async function recomputeConsensus() {
         market_cap: market.marketCap,
         liquidity_usd: market.liquidityUsd,
         holders: market.holders,
+        holders_prev: holdersPrev,
+        dump_flag: dumpDetected,
+        scalp_flag: scalpDetected,
         score,
         updated_at: new Date().toISOString(),
       },
       { onConflict: "token_mint" }
     );
 
-    if (walletsCount >= MIN_WALLETS_FOR_ALERT) {
+    if (
+      walletsCount >= MIN_WALLETS_FOR_ALERT &&
+      score >= 50 &&
+      (market.liquidityUsd ?? 0) >= 15000
+    ) {
       const { data: alreadyAlerted } = await supabase
         .from("alerts_sent")
         .select("id")
@@ -189,6 +242,7 @@ async function recomputeConsensus() {
         console.log("🚨 Wallet consensus alert");
         console.log(`Token: ${market.symbol}`);
         console.log(`Wallets buying: ${walletsCount}`);
+        console.log(`Score: ${score}`);
         console.log(`Total SOL bought: ${agg.totalSol.toFixed(2)}`);
 
         await sendTelegramAlert(
