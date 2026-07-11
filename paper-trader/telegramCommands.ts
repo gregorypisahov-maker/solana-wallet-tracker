@@ -8,7 +8,7 @@
 
 import { config } from './config';
 import { computeAnalytics } from './analytics';
-import { loadState, saveState } from './storage';
+import { loadState, loadOpenPositions, saveState } from './storage';
 import { getTopWallets, getBottomWallets, WalletPerformanceRow } from './walletPerformance';
 
 function signedSol(value: number): string {
@@ -136,4 +136,36 @@ export async function handleScoreStats(): Promise<string> {
   }
 
   return lines.join('\n');
+}
+export async function handleResume(): Promise<string> {
+  const state = await loadState();
+
+  if (!state.halted) {
+    return [
+      '✅ Paper trader is already active.',
+      '',
+      `Consecutive losses: ${state.consecutiveLosses}`,
+      `Bankroll: ${state.bankrollSol.toFixed(4)} SOL`,
+    ].join('\n');
+  }
+
+  const previousLosses = state.consecutiveLosses;
+  const previousReason = state.haltReason;
+
+  state.halted = false;
+  state.consecutiveLosses = 0;
+  state.haltReason = null;
+
+  await saveState(state);
+
+  return [
+    '▶️ PAPER TRADING RESUMED',
+    '',
+    `Previous losses: ${previousLosses}`,
+    `Previous reason: ${previousReason ?? 'Not recorded'}`,
+    `Bankroll: ${state.bankrollSol.toFixed(4)} SOL`,
+    '',
+    'Monitoring: ACTIVE',
+    'New paper entries: ENABLED',
+  ].join('\n');
 }
