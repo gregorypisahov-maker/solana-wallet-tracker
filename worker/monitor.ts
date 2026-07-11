@@ -19,6 +19,13 @@ import {
 import {
   sendDailyPaperReportIfDue,
 } from "../paper-trader/statsReporter";
+import {
+  getTrustScoresForWallets,
+  computeAndStoreWalletPerformance,
+} from "../paper-trader/walletPerformance";
+import {
+  computeWeightedWalletScore,
+} from "../paper-trader/trustScore";
 
 const POLL_INTERVAL_MINUTES = Number(
   process.env.POLL_INTERVAL_MINUTES ?? 5
@@ -279,6 +286,7 @@ async function recomputeConsensus(): Promise<void> {
     string,
     {
       wallets: Set<string>;
+      walletSol: Map<string, number>;
       totalSol: number;
       first: Date;
       last: Date;
@@ -292,6 +300,8 @@ async function recomputeConsensus(): Promise<void> {
       ) ?? {
         wallets:
           new Set<string>(),
+        walletSol:
+          new Map<string, number>(),
         totalSol: 0,
         first:
           new Date(buy.tx_time),
@@ -301,6 +311,12 @@ async function recomputeConsensus(): Promise<void> {
 
     current.wallets.add(
       buy.wallet_address
+    );
+
+    current.walletSol.set(
+      buy.wallet_address,
+      (current.walletSol.get(buy.wallet_address) ?? 0) +
+        Number(buy.sol_amount)
     );
 
     current.totalSol += Number(
@@ -519,6 +535,42 @@ async function recomputeConsensus(): Promise<void> {
       )}`
     );
 
+    // --- Phase 3: trust-weighted scoring ---
+    // This is purely additive — it never changes passesAlertFilter above,
+    // so the existing minimum-wallet-count / minimum-score gate and
+    // "no single wallet can trigger an alert alone" rule are untouched.
+    // It only refines the confidence context shown alongside an alert
+    // that already passed the real gate on its own.
+    const participantAddresses = Array.from(agg.wallets);
+    const trustScoreMap = await getTrustScoresForWallets(
+      participantAddresses
+    );
+
+    const walletContributions = participantAddresses.map((address) => ({
+      address,
+      // Wallets with no wallet_performance row yet (new/unseen) are
+      // treated as neutral (50), same as a brand-new wallet would score
+      // from computeTrustScore() itself.
+      trustScore: trustScoreMap.get(address) ?? 50,
+    }));
+
+    const weighted = computeWeightedWalletScore(walletContributions);
+
+    console.log(
+      `[trust] ${market.symbol} confidence ${weighted.confidenceGrade} | ` +
+        `weighted score ${weighted.weightedWalletScore} (raw ${walletsCount}) | ` +
+        `avg trust ${weighted.averageTrustScore}`
+    );
+    console.log(
+      "[trust] Per-wallet contribution:",
+      weighted.perWalletContribution
+        .map(
+          (c) =>
+            `${c.address.slice(0, 6)}…=trust:${c.trustScore},weight:${c.weight}`
+        )
+        .join(" | ")
+    );
+
     await sendTelegramAlert(
       formatConsensusAlert({
         symbol:
@@ -532,6 +584,9 @@ async function recomputeConsensus(): Promise<void> {
         liquidityUsd:
           market.liquidityUsd,
         score,
+        weightedWalletScore: weighted.weightedWalletScore,
+        averageTrustScore: weighted.averageTrustScore,
+        confidenceGrade: weighted.confidenceGrade,
       })
     );
 
@@ -549,12 +604,19 @@ async function recomputeConsensus(): Promise<void> {
         market.marketCap,
       liquidityUsd:
         market.liquidityUsd,
+      weightedWalletScore: weighted.weightedWalletScore,
+      averageTrustScore: weighted.averageTrustScore,
+      confidenceGrade: weighted.confidenceGrade,
     }).catch((err) =>
       console.error(
         "[paper-trader] onAlert failed:",
         err
       )
     );
+
+    // Single timestamp shared by alerts_sent and alert_participants so
+    // Phase 2's wallet-performance matching lines up exactly.
+    const alertTimestamp = new Date().toISOString();
 
     await supabase
       .from("alerts_sent")
@@ -563,7 +625,32 @@ async function recomputeConsensus(): Promise<void> {
           tokenMint,
         wallets_count:
           walletsCount,
+        sent_at: alertTimestamp,
       });
+
+    // Phase 2: record which wallets participated in this alert, for
+    // wallet-performance tracking going forward.
+    const participantRows = participantAddresses.map((address) => ({
+      token_mint: tokenMint,
+      wallet_address: address,
+      alert_sent_at: alertTimestamp,
+      sol_amount: agg.walletSol.get(address) ?? 0,
+    }));
+
+    if (participantRows.length > 0) {
+      const { error: participantsError } = await supabase
+        .from("alert_participants")
+        .upsert(participantRows, {
+          onConflict: "token_mint,wallet_address,alert_sent_at",
+        });
+
+      if (participantsError) {
+        console.error(
+          "[paper-trader] Failed to record alert_participants:",
+          participantsError
+        );
+      }
+    }
   }
 }
 
@@ -653,7 +740,21 @@ async function main(): Promise<void> {
     );
   }, 60_000);
 
+  // Phase 2: recompute wallet_performance every 30 minutes. Trust
+  // scores used for Phase 3 weighting are only as fresh as this run.
+  setInterval(() => {
+    computeAndStoreWalletPerformance().catch((err) =>
+      console.error(
+        "[wallet-performance] Periodic recompute failed:",
+        err
+      )
+    );
+  }, 30 * 60_000);
+
   await sendDailyPaperReportIfDue();
+  await computeAndStoreWalletPerformance().catch((err) =>
+    console.error("[wallet-performance] Initial recompute failed:", err)
+  );
   await runCycle();
 
   setInterval(
