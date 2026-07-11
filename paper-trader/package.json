@@ -1,0 +1,14 @@
+{
+  "name": "solana-wallet-tracker-paper-trader",
+  "version": "1.0.0",
+  "description": "Paper-trading simulator that plugs into solana-wallet-tracker's Smart Wallet Consensus alerts. No real funds move — every trade is logged and scored so you can validate the strategy before connecting a wallet.",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "stats": "node statsReporter.js",
+    "test": "node test/testWithSampleAlerts.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
