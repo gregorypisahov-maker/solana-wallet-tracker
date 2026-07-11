@@ -1,22 +1,13 @@
 // worker/telegramBot.ts
 //
-// NEW FILE — there was no inbound Telegram command listener anywhere in
-// the project before this (lib/telegram.ts's sendTelegramAlert is
-// outbound only). This uses Telegram's getUpdates long-polling API,
-// which needs no public URL/webhook — it fits your existing
-// worker-process model (Railway running a long-lived Node process) with
-// no infra changes.
+// Inbound Telegram command listener using Telegram getUpdates long polling.
+// Run as a separate Railway process from worker/monitor.ts.
 //
-// Run this as a SEPARATE process from worker/monitor.ts (see deployment
-// steps). It only reads state via analytics/walletPerformance/storage
-// and replies to Telegram — it never touches the wallet-tracking or
-// paper-trading logic itself.
-//
-// SECURITY: only responds to messages from TELEGRAM_CHAT_ID (the same
-// chat ID your alerts already go to). Messages from any other chat are
-// ignored and logged.
+// Security: commands are accepted only from TELEGRAM_CHAT_ID.
 
 import 'dotenv/config';
+
+import { sendTelegramAlert } from '../lib/telegram';
 import {
   handlePaperStats,
   handleWalletStats,
@@ -28,7 +19,8 @@ import {
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 
-const POLL_TIMEOUT_SECONDS = 30; // long-poll timeout per Telegram getUpdates call
+const POLL_TIMEOUT_SECONDS = 30;
+const RETRY_DELAY_MS = 5_000;
 
 if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
   console.error(
@@ -42,24 +34,44 @@ let lastUpdateId = 0;
 interface TelegramUpdate {
   update_id: number;
   message?: {
-    chat: { id: number };
+    chat: {
+      id: number;
+    };
     text?: string;
   };
+}
+
+interface TelegramUpdatesResponse {
+  ok: boolean;
+  result?: TelegramUpdate[];
+  description?: string;
 }
 
 async function getUpdates(): Promise<TelegramUpdate[]> {
   const url =
     `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getUpdates` +
-    `?offset=${lastUpdateId + 1}&timeout=${POLL_TIMEOUT_SECONDS}`;
+    `?offset=${lastUpdateId + 1}` +
+    `&timeout=${POLL_TIMEOUT_SECONDS}` +
+    `&allowed_updates=${encodeURIComponent(JSON.stringify(['message']))}`;
 
-  const res = await fetch(url);
+  const response = await fetch(url);
 
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`getUpdates failed: ${res.status} ${text}`);
+  if (!response.ok) {
+    const text = await response.text();
+
+    throw new Error(
+      `Telegram getUpdates failed: ${response.status} ${text}`
+    );
   }
 
-  const body = await res.json();
+  const body = (await response.json()) as TelegramUpdatesResponse;
+
+  if (!body.ok) {
+    throw new Error(
+      body.description ?? 'Telegram getUpdates returned an unknown error'
+    );
+  }
+
   return body.result ?? [];
 }
 
@@ -68,64 +80,85 @@ const COMMAND_HANDLERS: Record<string, () => Promise<string>> = {
   '/walletstats': handleWalletStats,
   '/exitstats': handleExitStats,
   '/scorestats': handleScoreStats,
-  case '/resume':
-  reply = await handleResume();
+  '/resume': handleResume,
 };
+
+function normalizeCommand(text: string): string {
+  return text
+    .trim()
+    .split(/\s+/)[0]
+    .split('@')[0]
+    .toLowerCase();
+}
 
 async function handleUpdate(update: TelegramUpdate): Promise<void> {
   lastUpdateId = Math.max(lastUpdateId, update.update_id);
 
   const message = update.message;
-  if (!message?.text) return;
 
-  const chatIdStr = String(message.chat.id);
-  if (chatIdStr !== TELEGRAM_CHAT_ID) {
+  if (!message?.text) {
+    return;
+  }
+
+  const incomingChatId = String(message.chat.id);
+
+  if (incomingChatId !== TELEGRAM_CHAT_ID) {
     console.warn(
-      `[telegram-bot] Ignored message from unauthorized chat ${chatIdStr}`
+      `[telegram-bot] Ignored message from unauthorized chat ${incomingChatId}`
     );
     return;
   }
 
-  // Commands may arrive as "/paperstats" or "/paperstats@YourBotName" —
-  // strip any @botname suffix before matching.
-  const command = message.text.trim().split(' ')[0].split('@')[0].toLowerCase();
-
+  const command = normalizeCommand(message.text);
   const handler = COMMAND_HANDLERS[command];
-  if (!handler) return; // not a recognized command, ignore silently
+
+  if (!handler) {
+    return;
+  }
 
   console.log(`[telegram-bot] Handling command: ${command}`);
 
   try {
     const response = await handler();
     await sendTelegramAlert(response);
-  } catch (err) {
-    console.error(`[telegram-bot] Command ${command} failed:`, err);
+  } catch (error) {
+    console.error(`[telegram-bot] Command ${command} failed:`, error);
+
+    const errorMessage =
+      error instanceof Error ? error.message : String(error);
+
     await sendTelegramAlert(
-      `❌ <b>Command failed</b>\n\nCommand: ${command}\nError: ${
-        err instanceof Error ? err.message : String(err)
-      }`
+      [
+        '❌ <b>Command failed</b>',
+        '',
+        `Command: ${command}`,
+        `Error: ${errorMessage}`,
+      ].join('\n')
     );
   }
 }
 
 async function pollLoop(): Promise<void> {
+  console.log('[telegram-bot] Starting inbound command listener...');
+
   while (true) {
     try {
       const updates = await getUpdates();
+
       for (const update of updates) {
         await handleUpdate(update);
       }
-    } catch (err) {
-      console.error('[telegram-bot] Poll cycle failed:', err);
-      // Back off briefly before retrying so a persistent network issue
-      // doesn't spin in a tight loop.
-      await new Promise((resolve) => setTimeout(resolve, 5000));
+    } catch (error) {
+      console.error('[telegram-bot] Poll cycle failed:', error);
+
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, RETRY_DELAY_MS);
+      });
     }
   }
 }
 
-console.log('[telegram-bot] Starting inbound command listener...');
-pollLoop().catch((err) => {
-  console.error('[telegram-bot] Fatal error:', err);
+pollLoop().catch((error) => {
+  console.error('[telegram-bot] Fatal error:', error);
   process.exit(1);
 });
