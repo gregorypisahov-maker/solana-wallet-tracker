@@ -4,17 +4,17 @@
 
 export const config = {
   entry: {
-    minScore: 8,                  // matches your real 0-10ish scoring scale (MIN_SCORE_FOR_ALERT=6 in monitor.ts)
+    minScore: 8,
     minWalletCount: 3,
-    minAvgBuyPerWallet: 2,         // SOL, per wallet — not total
-    minLiquidityToMcapRatio: 0.10, // liquidity must be >=25% of mcap
-    maxMarketCapUsd: 50000,        // don't chase — already-pumped tokens are late entries
-    minLiquidityUsd: 15000,
+    minAvgBuyPerWallet: 2,
+    minLiquidityToMcapRatio: 0.08,
+    maxMarketCapUsd: 1_000_000,
+    minLiquidityUsd: 15_000,
   },
 
   position: {
     simulatedBankrollSol: 10,
-    sizePctPerTrade: 0.03,         // 3% of bankroll per trade, fixed
+    sizePctPerTrade: 0.03,
     maxConcurrentPositions: 5,
   },
 
@@ -35,12 +35,14 @@ export const config = {
 
   polling: {
     intervalMs: 5000,
-    dexscreenerBase: 'https://api.dexscreener.com/latest/dex/tokens/',
+    dexscreenerBase:
+      "https://api.dexscreener.com/latest/dex/tokens/",
   },
 
   telegram: {
     notifyOnEntry: true,
     notifyOnExit: true,
-    dailySummaryHourUTC: 6, // ~9am Israel time (UTC+3), adjust if needed
+    notifyOnReject: true,
+    dailySummaryHourUTC: 6,
   },
 };
