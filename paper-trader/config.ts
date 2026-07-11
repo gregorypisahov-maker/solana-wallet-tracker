@@ -5,10 +5,10 @@
 export const config = {
   entry: {
     minScore: 8,                  // matches your real 0-10ish scoring scale (MIN_SCORE_FOR_ALERT=6 in monitor.ts)
-    minWalletCount: 4,
-    minAvgBuyPerWallet: 3,         // SOL, per wallet — not total
-    minLiquidityToMcapRatio: 0.25, // liquidity must be >=25% of mcap
-    maxMarketCapUsd: 60000,        // don't chase — already-pumped tokens are late entries
+    minWalletCount: 3,
+    minAvgBuyPerWallet: 2,         // SOL, per wallet — not total
+    minLiquidityToMcapRatio: 0.10, // liquidity must be >=25% of mcap
+    maxMarketCapUsd: 50000,        // don't chase — already-pumped tokens are late entries
     minLiquidityUsd: 15000,
   },
 
