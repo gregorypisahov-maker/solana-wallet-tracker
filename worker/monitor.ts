@@ -4,6 +4,7 @@ import { getSupabaseAdmin } from "../lib/supabase";
 import { fetchTokenMarketData } from "../lib/tokenData";
 import { computeScore } from "../lib/scoring";
 import { sendTelegramAlert, formatConsensusAlert } from "../lib/telegram";
+import { onAlert, checkPositions } from "../paper-trader/engine";
 
 const POLL_INTERVAL_MINUTES = Number(process.env.POLL_INTERVAL_MINUTES ?? 5);
 const SCALP_WINDOW_MINUTES = Number(process.env.SCALP_WINDOW_MINUTES ?? 5);
@@ -247,7 +248,33 @@ async function recomputeConsensus() {
         liquidityUsd: market.liquidityUsd,
         score,
       })
+    );await sendTelegramAlert(
+      formatConsensusAlert({
+        symbol: market.symbol,
+        tokenMint,
+        walletsCount,
+        totalSol: agg.totalSol,
+        marketCap: market.marketCap,
+        liquidityUsd: market.liquidityUsd,
+        score,
+      })
     );
+
+    // --- Paper trading: feed the same alert data into the simulator ---
+    await onAlert({
+      tokenSymbol: market.symbol,
+      mint: tokenMint,
+      score,
+      walletCount: walletsCount,
+      totalBoughtSol: agg.totalSol,
+      marketCapUsd: market.marketCap,
+      liquidityUsd: market.liquidityUsd,
+    }).catch((err) => console.error("[paper-trader] onAlert failed:", err));
+
+    await supabase.from("alerts_sent").insert({
+      token_mint: tokenMint,
+      wallets_count: walletsCount,
+    });
 
     await supabase.from("alerts_sent").insert({
       token_mint: tokenMint,
