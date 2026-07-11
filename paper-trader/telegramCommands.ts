@@ -8,7 +8,7 @@
 
 import { config } from './config';
 import { computeAnalytics } from './analytics';
-import { loadState, loadOpenPositions } from './storage';
+import { loadState, saveState } from './storage';
 import { getTopWallets, getBottomWallets, WalletPerformanceRow } from './walletPerformance';
 
 function signedSol(value: number): string {
