@@ -70,7 +70,6 @@ const COMMAND_HANDLERS: Record<string, () => Promise<string>> = {
   '/scorestats': handleScoreStats,
   case '/resume':
   reply = await handleResume();
-  break;
 };
 
 async function handleUpdate(update: TelegramUpdate): Promise<void> {
