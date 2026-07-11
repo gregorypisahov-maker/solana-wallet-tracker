@@ -1,8 +1,10 @@
 // paper-trader/storage.ts
 // Persists to Supabase instead of local JSON — Railway's filesystem is
 // ephemeral and wipes on every redeploy, so local files would silently
-// lose all trade history. Run the migration in
-// supabase/migrations/xxxx_paper_trader.sql before using this.
+// lose all trade history. Run the migrations in sql/ before using this.
+//
+// CHANGE FROM PREVIOUS VERSION: position_id is now read/written on
+// paper_positions and paper_trades. Everything else is unchanged.
 
 import { getSupabaseAdmin } from '../lib/supabase';
 import { config } from './config';
@@ -82,6 +84,7 @@ export async function appendTrade(trade: TradeRecord): Promise<void> {
     hold_minutes: trade.holdMinutes,
     happened_at: trade.timestamp,
     entry_alert: trade.entryAlert,
+    position_id: trade.positionId,
   });
 }
 
@@ -106,6 +109,7 @@ export async function loadTrades(sinceIso?: string): Promise<TradeRecord[]> {
     holdMinutes: Number(r.hold_minutes),
     timestamp: r.happened_at,
     entryAlert: r.entry_alert,
+    positionId: r.position_id ?? null,
   }));
 }
 
@@ -123,6 +127,7 @@ export async function loadOpenPositions(): Promise<Map<string, OpenPosition>> {
       peakMultiple: Number(r.peak_multiple),
       ladderHits: r.ladder_hits ?? [],
       entryAlert: r.entry_alert,
+      positionId: r.position_id,
     });
   }
   return map;
@@ -140,6 +145,7 @@ export async function saveOpenPosition(pos: OpenPosition): Promise<void> {
       peak_multiple: pos.peakMultiple,
       ladder_hits: pos.ladderHits,
       entry_alert: pos.entryAlert,
+      position_id: pos.positionId,
     },
     { onConflict: 'mint' }
   );
@@ -147,4 +153,20 @@ export async function saveOpenPosition(pos: OpenPosition): Promise<void> {
 
 export async function deleteOpenPosition(mint: string): Promise<void> {
   await supabase.from('paper_positions').delete().eq('mint', mint);
+}
+
+// New helper for analytics.ts — reads every trade row, unfiltered, so
+// analytics can group by position without paginating manually.
+// (Kept separate from loadTrades so nothing existing changes shape.)
+export async function loadAllTradesRaw(): Promise<any[]> {
+  const { data, error } = await supabase
+    .from('paper_trades')
+    .select('*')
+    .order('happened_at', { ascending: true });
+
+  if (error) {
+    throw new Error(`Failed to load paper_trades: ${error.message}`);
+  }
+
+  return data ?? [];
 }
