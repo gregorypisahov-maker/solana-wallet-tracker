@@ -1,11 +1,10 @@
 // paper-trader/engine.ts
-// Core simulator. No real funds move — every "buy"/"sell" here is a logged
-// number in Supabase. Sends Telegram notifications on entry and exit so you
-// can see it working in the same chat as your real alerts.
+// Paper-trading simulator.
+// No real funds are moved. All positions and trades are simulated.
 
-import { config } from './config';
-import { evaluateEntry } from './entryFilter';
-import { getPriceUsd } from './priceFeed';
+import { config } from "./config";
+import { evaluateEntry } from "./entryFilter";
+import { getPriceUsd } from "./priceFeed";
 import {
   loadState,
   saveState,
@@ -13,231 +12,544 @@ import {
   loadOpenPositions,
   saveOpenPosition,
   deleteOpenPosition,
-} from './storage';
-import { AlertInput, OpenPosition, PaperState, TradeRecord } from './types';
-import { sendTelegramAlert } from '../lib/telegram';
+} from "./storage";
+import {
+  AlertInput,
+  OpenPosition,
+  PaperState,
+  TradeRecord,
+} from "./types";
+import { sendTelegramAlert } from "../lib/telegram";
 
 function resetDailyIfNeeded(state: PaperState): PaperState {
   const today = new Date().toDateString();
+
   if (state.dailyResetDate !== today) {
     state.dailyResetDate = today;
     state.dailyStartBankrollSol = state.bankrollSol;
+    state.consecutiveLosses = 0;
     state.halted = false;
     state.haltReason = null;
   }
+
   return state;
 }
 
-function isHalted(state: PaperState): { halted: boolean; reason: string | null } {
-  const lossLimit = state.dailyStartBankrollSol * config.risk.dailyLossLimitPct;
-  const currentLoss = state.dailyStartBankrollSol - state.bankrollSol;
-  if (currentLoss >= lossLimit) {
-    return { halted: true, reason: `daily loss limit hit (-${currentLoss.toFixed(3)} SOL)` };
+/**
+ * Calculates available bankroll plus the original cost basis still committed
+ * to open positions.
+ *
+ * This prevents an opened position from being incorrectly counted as a loss.
+ */
+function calculateCostBasisEquity(
+  state: PaperState,
+  openPositions: Map<string, OpenPosition>
+): number {
+  let committedCapitalSol = 0;
+
+  for (const position of openPositions.values()) {
+    committedCapitalSol += position.sizeSol * position.remainingPct;
   }
-  if (state.consecutiveLosses >= config.risk.maxLossesInARow) {
-    return { halted: true, reason: `${state.consecutiveLosses} consecutive losses` };
+
+  return state.bankrollSol + committedCapitalSol;
+}
+
+function isHalted(
+  state: PaperState,
+  openPositions: Map<string, OpenPosition>
+): { halted: boolean; reason: string | null } {
+  const currentEquitySol = calculateCostBasisEquity(state, openPositions);
+  const lossLimitSol =
+    state.dailyStartBankrollSol * config.risk.dailyLossLimitPct;
+
+  const currentLossSol =
+    state.dailyStartBankrollSol - currentEquitySol;
+
+  if (currentLossSol >= lossLimitSol) {
+    return {
+      halted: true,
+      reason:
+        `daily loss limit reached ` +
+        `(-${currentLossSol.toFixed(3)} SOL)`,
+    };
   }
-  return { halted: false, reason: null };
+
+  if (
+    state.consecutiveLosses >=
+    config.risk.maxLossesInARow
+  ) {
+    return {
+      halted: true,
+      reason:
+        `${state.consecutiveLosses} consecutive losses`,
+    };
+  }
+
+  return {
+    halted: false,
+    reason: null,
+  };
 }
 
 async function notify(message: string): Promise<void> {
   try {
     await sendTelegramAlert(message);
   } catch (err) {
-    console.error('[paper-trader] Telegram notify failed:', err);
+    console.error(
+      "[paper-trader] Telegram notification failed:",
+      err
+    );
   }
 }
 
-// Call this every time your worker would have sent a real alert.
-export async function onAlert(alert: AlertInput): Promise<void> {
+async function notifySkipped(
+  alert: AlertInput,
+  reason: string
+): Promise<void> {
+  console.log(
+    `[PAPER SKIP] ${alert.tokenSymbol}: ${reason}`
+  );
+
+  if (config.telegram.notifyOnReject) {
+    await notify(
+      `⏭️ <b>[PAPER] Trade skipped</b>\n\n` +
+        `Token: <b>${alert.tokenSymbol}</b>\n` +
+        `Reason: ${reason}`
+    );
+  }
+}
+
+async function notifyRejected(
+  alert: AlertInput,
+  reasons: string[]
+): Promise<void> {
+  const reasonText = reasons.join("\n• ");
+
+  console.log(
+    `[PAPER REJECT] ${alert.tokenSymbol}: ` +
+      reasons.join("; ")
+  );
+
+  if (config.telegram.notifyOnReject) {
+    await notify(
+      `🟠 <b>[PAPER] Entry rejected</b>\n\n` +
+        `Token: <b>${alert.tokenSymbol}</b>\n` +
+        `Score: ${alert.score}\n` +
+        `Wallets: ${alert.walletCount}\n\n` +
+        `<b>Reasons:</b>\n• ${reasonText}`
+    );
+  }
+}
+
+// Called by worker/monitor.ts after a consensus alert is generated.
+export async function onAlert(
+  alert: AlertInput
+): Promise<void> {
   let state = await loadState();
   state = resetDailyIfNeeded(state);
-  const haltCheck = isHalted(state);
-  if (haltCheck.halted) {
-    console.log(`[SKIP] ${alert.tokenSymbol}: trading halted — ${haltCheck.reason}`);
-    await saveState({ ...state, halted: true, haltReason: haltCheck.reason });
-    return;
-  }
 
   const openPositions = await loadOpenPositions();
+  const haltCheck = isHalted(state, openPositions);
 
-  if (openPositions.size >= config.position.maxConcurrentPositions) {
-    console.log(`[SKIP] ${alert.tokenSymbol}: max concurrent positions reached`);
+  if (haltCheck.halted) {
+    state.halted = true;
+    state.haltReason = haltCheck.reason;
+
+    await saveState(state);
+
+    await notifySkipped(
+      alert,
+      `paper trading is halted: ${haltCheck.reason}`
+    );
+
     return;
   }
+
+  if (state.halted || state.haltReason) {
+    state.halted = false;
+    state.haltReason = null;
+    await saveState(state);
+  }
+
+  if (
+    openPositions.size >=
+    config.position.maxConcurrentPositions
+  ) {
+    await notifySkipped(
+      alert,
+      `maximum of ${config.position.maxConcurrentPositions} open positions reached`
+    );
+
+    return;
+  }
+
   if (openPositions.has(alert.mint)) {
-    console.log(`[SKIP] ${alert.tokenSymbol}: already in a position for this mint`);
+    await notifySkipped(
+      alert,
+      "a paper position for this token is already open"
+    );
+
     return;
   }
 
   const evaluation = evaluateEntry(alert);
+
   if (!evaluation.pass) {
-    console.log(`[REJECT] ${alert.tokenSymbol}: ${evaluation.reasons.join('; ')}`);
+    await notifyRejected(
+      alert,
+      evaluation.reasons
+    );
+
     return;
   }
 
   let entryPrice: number;
+
   try {
     const priceData = await getPriceUsd(alert.mint);
     entryPrice = priceData.priceUsd;
+
+    if (
+      !Number.isFinite(entryPrice) ||
+      entryPrice <= 0
+    ) {
+      throw new Error(
+        `invalid price returned: ${entryPrice}`
+      );
+    }
   } catch (err: any) {
-    console.log(`[SKIP] ${alert.tokenSymbol}: price fetch failed — ${err.message}`);
+    const message =
+      err instanceof Error
+        ? err.message
+        : String(err);
+
+    await notifySkipped(
+      alert,
+      `price fetch failed: ${message}`
+    );
+
     return;
   }
 
-  const sizeSol = state.bankrollSol * config.position.sizePctPerTrade;
+  const sizeSol =
+    state.bankrollSol *
+    config.position.sizePctPerTrade;
+
+  if (!Number.isFinite(sizeSol) || sizeSol <= 0) {
+    await notifySkipped(
+      alert,
+      "calculated position size is zero or invalid"
+    );
+
+    return;
+  }
+
+  if (sizeSol > state.bankrollSol) {
+    await notifySkipped(
+      alert,
+      "not enough simulated bankroll"
+    );
+
+    return;
+  }
+
   const position: OpenPosition = {
     mint: alert.mint,
     tokenSymbol: alert.tokenSymbol,
     entryPrice,
     entryTime: Date.now(),
     sizeSol,
-    remainingPct: 1.0,
-    peakMultiple: 1.0,
+    remainingPct: 1,
+    peakMultiple: 1,
     ladderHits: [],
     entryAlert: alert,
   };
 
   await saveOpenPosition(position);
+
   state.bankrollSol -= sizeSol;
   await saveState(state);
 
   console.log(
-    `[ENTER] ${alert.tokenSymbol} @ $${entryPrice} | size ${sizeSol.toFixed(3)} SOL | score ${alert.score}`
+    `[PAPER ENTER] ${alert.tokenSymbol} ` +
+      `@ $${entryPrice} | ` +
+      `size ${sizeSol.toFixed(3)} SOL | ` +
+      `score ${alert.score}`
   );
 
   if (config.telegram.notifyOnEntry) {
     await notify(
-      `📝 [PAPER] Entered ${alert.tokenSymbol}\n` +
-        `Size: ${sizeSol.toFixed(3)} SOL @ $${entryPrice}\n` +
-        `Score: ${alert.score} | Wallets: ${alert.walletCount}\n` +
-        `Mcap: $${alert.marketCapUsd.toLocaleString()} | Liq: $${alert.liquidityUsd.toLocaleString()}`
+      `📝 <b>[PAPER] Position opened</b>\n\n` +
+        `Token: <b>${alert.tokenSymbol}</b>\n` +
+        `Size: ${sizeSol.toFixed(3)} SOL\n` +
+        `Entry: $${entryPrice}\n` +
+        `Score: ${alert.score}\n` +
+        `Wallets: ${alert.walletCount}\n` +
+        `Average buy: ${evaluation.avgBuyPerWallet.toFixed(2)} SOL\n` +
+        `Market cap: $${Number(
+          alert.marketCapUsd ?? 0
+        ).toLocaleString()}\n` +
+        `Liquidity: $${Number(
+          alert.liquidityUsd ?? 0
+        ).toLocaleString()}\n` +
+        `Liq/MCap: ${(
+          evaluation.liqToMcap * 100
+        ).toFixed(1)}%`
     );
   }
 }
 
-// Call this on a timer to check open positions against current price and
-// apply exit rules (take-profit ladder, trailing stop, hard stop, max hold).
+// Checks all open paper positions for exits.
 export async function checkPositions(): Promise<void> {
   const state = await loadState();
   const openPositions = await loadOpenPositions();
 
-  for (const [mint, pos] of openPositions.entries()) {
-    let priceData;
+  for (const [mint, position] of openPositions.entries()) {
+    let currentPrice: number;
+
     try {
-      priceData = await getPriceUsd(mint);
+      const priceData = await getPriceUsd(mint);
+      currentPrice = priceData.priceUsd;
+
+      if (
+        !Number.isFinite(currentPrice) ||
+        currentPrice <= 0
+      ) {
+        throw new Error(
+          `invalid price returned: ${currentPrice}`
+        );
+      }
     } catch (err: any) {
-      console.log(`[WARN] ${pos.tokenSymbol}: price check failed — ${err.message}`);
+      const message =
+        err instanceof Error
+          ? err.message
+          : String(err);
+
+      console.log(
+        `[PAPER WARN] ${position.tokenSymbol}: ` +
+          `price check failed — ${message}`
+      );
+
       continue;
     }
 
-    const currentMultiple = priceData.priceUsd / pos.entryPrice;
-    pos.peakMultiple = Math.max(pos.peakMultiple, currentMultiple);
-    const holdMinutes = (Date.now() - pos.entryTime) / 60000;
+    const currentMultiple =
+      currentPrice / position.entryPrice;
 
-    if (currentMultiple <= 1 - config.exit.hardStopLossPct) {
-      await closePosition(pos, priceData.priceUsd, pos.remainingPct, 'hard_stop_loss', state);
+    position.peakMultiple = Math.max(
+      position.peakMultiple,
+      currentMultiple
+    );
+
+    const holdMinutes =
+      (Date.now() - position.entryTime) / 60_000;
+
+    if (
+      currentMultiple <=
+      1 - config.exit.hardStopLossPct
+    ) {
+      await closePosition(
+        position,
+        currentPrice,
+        position.remainingPct,
+        "hard_stop_loss",
+        state
+      );
+
       continue;
     }
 
-    if (holdMinutes >= config.exit.maxHoldMinutes) {
-      await closePosition(pos, priceData.priceUsd, pos.remainingPct, 'max_hold_time', state);
+    if (
+      holdMinutes >=
+      config.exit.maxHoldMinutes
+    ) {
+      await closePosition(
+        position,
+        currentPrice,
+        position.remainingPct,
+        "max_hold_time",
+        state
+      );
+
       continue;
     }
 
-    if (pos.peakMultiple > 1.0) {
-      const trailFloor = pos.peakMultiple * (1 - config.exit.trailingStopPct);
-      if (currentMultiple <= trailFloor) {
-        await closePosition(pos, priceData.priceUsd, pos.remainingPct, 'trailing_stop', state);
+    if (position.peakMultiple > 1) {
+      const trailingFloor =
+        position.peakMultiple *
+        (1 - config.exit.trailingStopPct);
+
+      if (currentMultiple <= trailingFloor) {
+        await closePosition(
+          position,
+          currentPrice,
+          position.remainingPct,
+          "trailing_stop",
+          state
+        );
+
         continue;
       }
     }
 
-    let touched = false;
+    let positionChanged = false;
+
     for (const rung of config.exit.takeProfitLadder) {
-      const alreadyHit = pos.ladderHits.includes(rung.atMultiple);
-      if (!alreadyHit && currentMultiple >= rung.atMultiple) {
-        const sellPct = pos.remainingPct * rung.sellPct;
-        pos.remainingPct -= sellPct;
-        pos.ladderHits.push(rung.atMultiple);
-        await partialSell(pos, priceData.priceUsd, sellPct, `ladder_${rung.atMultiple}x`, state);
-        touched = true;
+      const alreadyHit =
+        position.ladderHits.includes(
+          rung.atMultiple
+        );
+
+      if (
+        !alreadyHit &&
+        currentMultiple >= rung.atMultiple
+      ) {
+        const sellPct =
+          position.remainingPct *
+          rung.sellPct;
+
+        position.remainingPct -= sellPct;
+        position.ladderHits.push(
+          rung.atMultiple
+        );
+
+        await partialSell(
+          position,
+          currentPrice,
+          sellPct,
+          `ladder_${rung.atMultiple}x`,
+          state
+        );
+
+        positionChanged = true;
       }
     }
 
-    if (pos.remainingPct <= 0.001) {
+    if (position.remainingPct <= 0.001) {
       await deleteOpenPosition(mint);
-    } else if (touched) {
-      await saveOpenPosition(pos);
     } else {
-      // persist updated peakMultiple even if no sell happened
-      await saveOpenPosition(pos);
+      // Saves remaining percentage, ladder hits and peak price.
+      await saveOpenPosition(position);
+    }
+
+    if (positionChanged) {
+      console.log(
+        `[PAPER UPDATE] ${position.tokenSymbol}: ` +
+          `${(
+            position.remainingPct * 100
+          ).toFixed(1)}% remaining`
+      );
     }
   }
 }
 
 async function partialSell(
-  pos: OpenPosition,
+  position: OpenPosition,
   exitPrice: number,
   soldPct: number,
   reason: string,
   state: PaperState
 ): Promise<void> {
-  const soldSizeSol = pos.sizeSol * soldPct;
-  const multiple = exitPrice / pos.entryPrice;
-  const proceedsSol = soldSizeSol * multiple;
-  state.bankrollSol += proceedsSol;
+  if (soldPct <= 0) {
+    return;
+  }
 
-  const pnlSol = proceedsSol - soldSizeSol;
+  const soldSizeSol =
+    position.sizeSol * soldPct;
+
+  const multiple =
+    exitPrice / position.entryPrice;
+
+  const proceedsSol =
+    soldSizeSol * multiple;
+
+  const pnlSol =
+    proceedsSol - soldSizeSol;
+
+  state.bankrollSol += proceedsSol;
   updateStreak(state, pnlSol);
 
   const trade: TradeRecord = {
-    tokenSymbol: pos.tokenSymbol,
-    mint: pos.mint,
-    type: 'partial_sell',
+    tokenSymbol: position.tokenSymbol,
+    mint: position.mint,
+    type: "partial_sell",
     reason,
-    entryPrice: pos.entryPrice,
+    entryPrice: position.entryPrice,
     exitPrice,
-    multiple: Number(multiple.toFixed(4)),
-    soldPct: Number(soldPct.toFixed(4)),
-    soldSizeSol: Number(soldSizeSol.toFixed(4)),
-    proceedsSol: Number(proceedsSol.toFixed(4)),
-    pnlSol: Number(pnlSol.toFixed(4)),
-    holdMinutes: Number(((Date.now() - pos.entryTime) / 60000).toFixed(1)),
+    multiple: Number(
+      multiple.toFixed(4)
+    ),
+    soldPct: Number(
+      soldPct.toFixed(4)
+    ),
+    soldSizeSol: Number(
+      soldSizeSol.toFixed(4)
+    ),
+    proceedsSol: Number(
+      proceedsSol.toFixed(4)
+    ),
+    pnlSol: Number(
+      pnlSol.toFixed(4)
+    ),
+    holdMinutes: Number(
+      (
+        (Date.now() - position.entryTime) /
+        60_000
+      ).toFixed(1)
+    ),
     timestamp: new Date().toISOString(),
-    entryAlert: pos.entryAlert,
+    entryAlert: position.entryAlert,
   };
 
   await appendTrade(trade);
   await saveState(state);
 
   console.log(
-    `[SELL ${(soldPct * 100).toFixed(0)}%] ${pos.tokenSymbol} @ ${multiple.toFixed(2)}x (${reason}) | pnl ${pnlSol.toFixed(3)} SOL`
+    `[PAPER SELL ${(soldPct * 100).toFixed(0)}%] ` +
+      `${position.tokenSymbol} @ ` +
+      `${multiple.toFixed(2)}x (${reason}) | ` +
+      `PnL ${pnlSol.toFixed(3)} SOL`
   );
 
   if (config.telegram.notifyOnExit) {
-    const emoji = pnlSol >= 0 ? '✅' : '🔻';
+    const emoji =
+      pnlSol >= 0 ? "✅" : "🔻";
+
     await notify(
-      `${emoji} [PAPER] Sold ${(soldPct * 100).toFixed(0)}% of ${pos.tokenSymbol}\n` +
-        `Reason: ${reason} | ${multiple.toFixed(2)}x\n` +
-        `PnL: ${pnlSol >= 0 ? '+' : ''}${pnlSol.toFixed(3)} SOL\n` +
-        `Held: ${trade.holdMinutes} min | Bankroll: ${state.bankrollSol.toFixed(3)} SOL`
+      `${emoji} <b>[PAPER] Position sold</b>\n\n` +
+        `Token: <b>${position.tokenSymbol}</b>\n` +
+        `Sold: ${(soldPct * 100).toFixed(0)}%\n` +
+        `Reason: ${reason}\n` +
+        `Result: ${multiple.toFixed(2)}x\n` +
+        `PnL: ${pnlSol >= 0 ? "+" : ""}${pnlSol.toFixed(3)} SOL\n` +
+        `Held: ${trade.holdMinutes} minutes\n` +
+        `Bankroll: ${state.bankrollSol.toFixed(3)} SOL`
     );
   }
 }
 
 async function closePosition(
-  pos: OpenPosition,
+  position: OpenPosition,
   exitPrice: number,
   remainingPct: number,
   reason: string,
   state: PaperState
 ): Promise<void> {
-  await partialSell(pos, exitPrice, remainingPct, reason, state);
-  await deleteOpenPosition(pos.mint);
+  await partialSell(
+    position,
+    exitPrice,
+    remainingPct,
+    reason,
+    state
+  );
+
+  await deleteOpenPosition(position.mint);
 }
 
-function updateStreak(state: PaperState, pnlSol: number): void {
+function updateStreak(
+  state: PaperState,
+  pnlSol: number
+): void {
   if (pnlSol < 0) {
     state.consecutiveLosses += 1;
   } else {
@@ -245,7 +557,9 @@ function updateStreak(state: PaperState, pnlSol: number): void {
   }
 }
 
-export async function getOpenPositions(): Promise<OpenPosition[]> {
-  const map = await loadOpenPositions();
-  return Array.from(map.values());
+export async function getOpenPositions(): Promise<
+  OpenPosition[]
+> {
+  const positions = await loadOpenPositions();
+  return Array.from(positions.values());
 }
