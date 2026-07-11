@@ -7,7 +7,8 @@
     "build": "next build",
     "start": "next start",
     "worker": "tsx worker/monitor.ts",
-    "worker:dev": "tsx watch worker/monitor.ts"
+    "worker:dev": "tsx watch worker/monitor.ts",
+    "paper-trader": "node paper-trader/index.js"
   },
   "dependencies": {
     "@solana/web3.js": "^1.95.3",
