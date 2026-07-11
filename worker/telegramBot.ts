@@ -17,12 +17,12 @@
 // ignored and logged.
 
 import 'dotenv/config';
-import { sendTelegramAlert } from '../lib/telegram';
 import {
   handlePaperStats,
   handleWalletStats,
   handleExitStats,
   handleScoreStats,
+  handleResume,
 } from '../paper-trader/telegramCommands';
 
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
@@ -68,6 +68,9 @@ const COMMAND_HANDLERS: Record<string, () => Promise<string>> = {
   '/walletstats': handleWalletStats,
   '/exitstats': handleExitStats,
   '/scorestats': handleScoreStats,
+  case '/resume':
+  reply = await handleResume();
+  break;
 };
 
 async function handleUpdate(update: TelegramUpdate): Promise<void> {
