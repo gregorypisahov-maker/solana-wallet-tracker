@@ -7,6 +7,14 @@
 // 2. Entry accepted, rejected, or skipped
 // 3. Position opened
 // 4. Position partially or fully sold
+//
+// CHANGE FROM PREVIOUS VERSION: positions now carry a stable positionId,
+// generated once when the position opens, and every TradeRecord written
+// for that position (partial sells and the final close) carries the same
+// positionId. This lets analytics correctly group partial sells into one
+// logical trade instead of counting each sell as a separate trade. No
+// other behavior changed: halt logic, sizing, ladder/trailing/stop-loss
+// exits, and all Telegram message text are unchanged from before.
 
 import { config } from "./config";
 import { evaluateEntry } from "./entryFilter";
@@ -33,6 +41,10 @@ async function notify(message: string): Promise<void> {
   } catch (err) {
     console.error("[paper-trader] Telegram notification failed:", err);
   }
+}
+
+function makePositionId(mint: string, entryTime: number): string {
+  return `${mint}_${entryTime}`;
 }
 
 function calculateCostBasisEquity(
@@ -320,16 +332,19 @@ export async function onAlert(
     return;
   }
 
+  const entryTime = Date.now();
+
   const position: OpenPosition = {
     mint: alert.mint,
     tokenSymbol: alert.tokenSymbol,
     entryPrice,
-    entryTime: Date.now(),
+    entryTime,
     sizeSol,
     remainingPct: 1,
     peakMultiple: 1,
     ladderHits: [],
     entryAlert: alert,
+    positionId: makePositionId(alert.mint, entryTime),
   };
 
   try {
@@ -570,6 +585,7 @@ async function partialSell(
     ),
     timestamp: new Date().toISOString(),
     entryAlert: position.entryAlert,
+    positionId: position.positionId,
   };
 
   await appendTrade(trade);
