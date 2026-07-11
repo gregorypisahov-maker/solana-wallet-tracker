@@ -1,13 +1,19 @@
+// lib/telegram.ts
+//
+// CHANGE FROM PREVIOUS VERSION: formatConsensusAlert() now accepts
+// optional trust/confidence fields (Phase 3). All new fields are
+// optional, so any existing call site that doesn't pass them keeps
+// working exactly as before, with the new message lines simply omitted.
+// sendTelegramAlert() is completely unchanged.
+
 export async function sendTelegramAlert(message: string) {
   const token = process.env.TELEGRAM_BOT_TOKEN;
   const chatId = process.env.TELEGRAM_CHAT_ID;
-
   if (!token || !chatId) {
     console.log("Telegram not configured. Alert skipped:");
     console.log(message);
     return;
   }
-
   const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -18,7 +24,6 @@ export async function sendTelegramAlert(message: string) {
       disable_web_page_preview: false,
     }),
   });
-
   if (!res.ok) {
     const text = await res.text();
     console.error("Telegram send failed:", res.status, text);
@@ -33,11 +38,15 @@ export function formatConsensusAlert(data: {
   marketCap?: number | null;
   liquidityUsd?: number | null;
   score: number;
+  // Phase 3 — all optional, backward compatible with existing callers.
+  weightedWalletScore?: number;
+  averageTrustScore?: number;
+  confidenceGrade?: 'A' | 'B' | 'C' | 'D';
 }) {
   const dex = `https://dexscreener.com/solana/${data.tokenMint}`;
   const gmgn = `https://gmgn.ai/sol/token/${data.tokenMint}`;
 
-  return [
+  const lines = [
     "🚨 <b>Smart Wallet Consensus</b>",
     "",
     `🪙 <b>${data.symbol ?? "Unknown"}</b>`,
@@ -47,6 +56,28 @@ export function formatConsensusAlert(data: {
     `◎ Total Bought: <b>${data.totalSol.toFixed(2)} SOL</b>`,
     `💰 Market Cap: <b>$${Math.round(data.marketCap ?? 0).toLocaleString()}</b>`,
     `💧 Liquidity: <b>$${Math.round(data.liquidityUsd ?? 0).toLocaleString()}</b>`,
+  ];
+
+  const hasTrustData =
+    data.weightedWalletScore !== undefined ||
+    data.averageTrustScore !== undefined ||
+    data.confidenceGrade !== undefined;
+
+  if (hasTrustData) {
+    lines.push("");
+    if (data.weightedWalletScore !== undefined) {
+      lines.push(`⚖️ Weighted Score: <b>${data.weightedWalletScore.toFixed(2)}</b> (raw ${data.walletsCount})`);
+    }
+    if (data.averageTrustScore !== undefined) {
+      lines.push(`🛡️ Avg Wallet Trust: <b>${data.averageTrustScore.toFixed(1)}/100</b>`);
+    }
+    if (data.confidenceGrade !== undefined) {
+      const gradeEmoji = { A: '🟢', B: '🟡', C: '🟠', D: '🔴' }[data.confidenceGrade];
+      lines.push(`${gradeEmoji} Confidence Grade: <b>${data.confidenceGrade}</b>`);
+    }
+  }
+
+  lines.push(
     "",
     "🧬 Mint",
     `<code>${data.tokenMint}</code>`,
@@ -54,5 +85,7 @@ export function formatConsensusAlert(data: {
     `📈 DexScreener\n${dex}`,
     "",
     `⚡ GMGN\n${gmgn}`,
-  ].join("\n");
+  );
+
+  return lines.join("\n");
 }
