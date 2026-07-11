@@ -248,16 +248,6 @@ async function recomputeConsensus() {
         liquidityUsd: market.liquidityUsd,
         score,
       })
-    );await sendTelegramAlert(
-      formatConsensusAlert({
-        symbol: market.symbol,
-        tokenMint,
-        walletsCount,
-        totalSol: agg.totalSol,
-        marketCap: market.marketCap,
-        liquidityUsd: market.liquidityUsd,
-        score,
-      })
     );
 
     // --- Paper trading: feed the same alert data into the simulator ---
@@ -270,11 +260,6 @@ async function recomputeConsensus() {
       marketCapUsd: market.marketCap,
       liquidityUsd: market.liquidityUsd,
     }).catch((err) => console.error("[paper-trader] onAlert failed:", err));
-
-    await supabase.from("alerts_sent").insert({
-      token_mint: tokenMint,
-      wallets_count: walletsCount,
-    });
 
     await supabase.from("alerts_sent").insert({
       token_mint: tokenMint,
@@ -320,6 +305,11 @@ async function main() {
   } else {
     console.log("Telegram not configured.");
   }
+
+  // Paper trader: check open simulated positions every 5s for take-profit / stop-loss
+  setInterval(() => {
+    checkPositions().catch((err) => console.error("[paper-trader] checkPositions failed:", err));
+  }, 5000);
 
   await runCycle();
   setInterval(runCycle, POLL_INTERVAL_MINUTES * 60_000);
