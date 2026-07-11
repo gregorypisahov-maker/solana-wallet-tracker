@@ -6,7 +6,7 @@ export const config = {
   entry: {
     minScore: 8,
     minWalletCount: 3,
-    minAvgBuyPerWallet: 2,
+    minAvgBuyPerWallet: 1.5,
     minLiquidityToMcapRatio: 0.08,
     maxMarketCapUsd: 1_000_000,
     minLiquidityUsd: 15_000,
