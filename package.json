@@ -7,6 +7,7 @@
     "build": "next build",
     "start": "next start",
     "worker": "tsx worker/monitor.ts",
+    "paper-trader": "tsx worker/monitor.ts",
     "worker:dev": "tsx watch worker/monitor.ts",
     "telegram-bot": "tsx worker/telegramBot.ts",
     "typecheck": "tsc --noEmit"

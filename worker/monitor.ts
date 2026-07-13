@@ -40,7 +40,7 @@ const ALERT_WINDOW_HOURS = Number(
 );
 
 const MIN_WALLETS_FOR_ALERT = 3;
-const MIN_SCORE_FOR_ALERT = Number(process.env.MIN_SCORE_FOR_ALERT ?? 50);
+const MIN_SCORE_FOR_ALERT = Number(process.env.MIN_SCORE_FOR_ALERT ?? 8);
 const WALLET_POLL_CONCURRENCY = Math.max(1, Number(process.env.WALLET_POLL_CONCURRENCY ?? 4));
 const MIN_LIQUIDITY_USD = 10_000;
 const MIN_MARKET_CAP = 10_000;
