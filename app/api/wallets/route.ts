@@ -1,11 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
+import { hasAdminAccess, hasViewerAccess, unauthorized } from "@/lib/dashboardAuth";
 
 export const dynamic = "force-dynamic";
 
 const MAX_WALLETS = 20;
 
-export async function GET() {
+export async function GET(req: NextRequest) {
+  if (!hasViewerAccess(req)) return unauthorized();
   const supabase = getSupabaseAdmin();
   const { data, error } = await supabase
     .from("wallets")
@@ -17,6 +19,7 @@ export async function GET() {
 }
 
 export async function POST(req: NextRequest) {
+  if (!hasAdminAccess(req)) return unauthorized("Admin authentication required");
   const supabase = getSupabaseAdmin();
   const body = await req.json();
 
@@ -46,6 +49,7 @@ export async function POST(req: NextRequest) {
 }
 
 export async function DELETE(req: NextRequest) {
+  if (!hasAdminAccess(req)) return unauthorized("Admin authentication required");
   const supabase = getSupabaseAdmin();
   const { address } = await req.json();
   if (!address) return NextResponse.json({ error: "address required" }, { status: 400 });

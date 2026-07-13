@@ -1,4 +1,4 @@
-import { Connection, PublicKey, ParsedTransactionWithMeta } from "@solana/web3.js";
+import { Connection, PublicKey, ParsedTransactionWithMeta, ConfirmedSignatureInfo } from "@solana/web3.js";
 
 const WSOL_MINT = "So11111111111111111111111111111111111111112";
 
@@ -25,14 +25,24 @@ export async function fetchNewSignatures(
   connection: Connection,
   address: string,
   untilSignature: string | null,
-  limit = 25
+  maxSignatures = 250
 ) {
   const pubkey = new PublicKey(address);
-  const sigs = await connection.getSignaturesForAddress(
-    pubkey,
-    { limit, until: untilSignature ?? undefined },
-    "confirmed"
-  );
+  const sigs: ConfirmedSignatureInfo[] = [];
+  let before: string | undefined;
+
+  while (sigs.length < maxSignatures) {
+    const pageSize = Math.min(100, maxSignatures - sigs.length);
+    const page = await connection.getSignaturesForAddress(
+      pubkey,
+      { limit: pageSize, before, until: untilSignature ?? undefined },
+      "confirmed"
+    );
+    sigs.push(...page);
+    if (page.length < pageSize) break;
+    before = page[page.length - 1]?.signature;
+    if (!before) break;
+  }
   // getSignaturesForAddress returns newest-first; reverse for chronological processing
   return sigs.filter((s) => !s.err).reverse();
 }

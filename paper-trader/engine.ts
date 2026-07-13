@@ -345,6 +345,7 @@ export async function onAlert(
     ladderHits: [],
     entryAlert: alert,
     positionId: makePositionId(alert.mint, entryTime),
+    realizedPnlSol: 0,
   };
 
   try {
@@ -553,7 +554,7 @@ async function partialSell(
     proceedsSol - soldSizeSol;
 
   state.bankrollSol += proceedsSol;
-  updateStreak(state, pnlSol);
+  position.realizedPnlSol += pnlSol;
 
   const trade: TradeRecord = {
     tokenSymbol: position.tokenSymbol,
@@ -629,6 +630,9 @@ async function closePosition(
     reason,
     state
   );
+
+  updateStreak(state, position.realizedPnlSol);
+  await saveState(state);
 
   await deleteOpenPosition(position.mint);
 }

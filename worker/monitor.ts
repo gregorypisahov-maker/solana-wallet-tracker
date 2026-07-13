@@ -1,5 +1,4 @@
 import "dotenv/config";
-import "./telegramBot";
 import {
   getConnection,
   fetchNewSignatures,
@@ -41,7 +40,8 @@ const ALERT_WINDOW_HOURS = Number(
 );
 
 const MIN_WALLETS_FOR_ALERT = 3;
-const MIN_SCORE_FOR_ALERT = 6;
+const MIN_SCORE_FOR_ALERT = Number(process.env.MIN_SCORE_FOR_ALERT ?? 50);
+const WALLET_POLL_CONCURRENCY = Math.max(1, Number(process.env.WALLET_POLL_CONCURRENCY ?? 4));
 const MIN_LIQUIDITY_USD = 10_000;
 const MIN_MARKET_CAP = 10_000;
 const MAX_MARKET_CAP = 3_000_000;
@@ -54,6 +54,25 @@ const sleep = (ms: number) =>
   new Promise((resolve) =>
     setTimeout(resolve, ms)
   );
+
+function throwIfError(label: string, error: { message: string } | null): void {
+  if (error) throw new Error(`${label}: ${error.message}`);
+}
+
+async function mapWithConcurrency<T>(
+  values: T[],
+  concurrency: number,
+  task: (value: T) => Promise<void>
+): Promise<void> {
+  let next = 0;
+  async function worker(): Promise<void> {
+    while (next < values.length) {
+      const index = next++;
+      await task(values[index]);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(concurrency, values.length) }, worker));
+}
 
 function isRateLimitError(err: any): boolean {
   const msg = String(
@@ -114,7 +133,7 @@ async function pollWallet(wallet: {
         connection,
         wallet.address,
         wallet.last_signature,
-        10
+        250
       )
   );
 
@@ -167,7 +186,7 @@ async function pollWallet(wallet: {
         ? "sell"
         : "buy";
 
-    const { data: nearbyOpposite } =
+    const { data: nearbyOpposite, error: nearbyError } =
       await supabase
         .from("wallet_transactions")
         .select("id")
@@ -189,11 +208,12 @@ async function pollWallet(wallet: {
           windowEnd.toISOString()
         )
         .limit(1);
+    throwIfError("Failed to check scalp window", nearbyError);
 
     const isScalp =
       !!nearbyOpposite?.length;
 
-    await supabase
+    const { error: tradeError } = await supabase
       .from("wallet_transactions")
       .upsert(
         {
@@ -219,6 +239,7 @@ async function pollWallet(wallet: {
             "wallet_address,signature,token_mint,side",
         }
       );
+    throwIfError("Failed to store wallet transaction", tradeError);
 
     console.log(
       `[trade] ${wallet.address.slice(
@@ -239,7 +260,7 @@ async function pollWallet(wallet: {
     newest &&
     newest !== wallet.last_signature
   ) {
-    await supabase
+    const { error: cursorError } = await supabase
       .from("wallets")
       .update({
         last_signature: newest,
@@ -248,6 +269,7 @@ async function pollWallet(wallet: {
         "address",
         wallet.address
       );
+    throwIfError("Failed to update wallet cursor", cursorError);
   }
 }
 
@@ -372,7 +394,7 @@ async function recomputeConsensus(): Promise<void> {
     const liquidity =
       market.liquidityUsd ?? 0;
 
-    const { data: sellRows } =
+    const { data: sellRows, error: sellError } =
       await supabase
         .from("wallet_transactions")
         .select("wallet_address")
@@ -385,6 +407,7 @@ async function recomputeConsensus(): Promise<void> {
           "tx_time",
           windowStart
         );
+    throwIfError("Failed to load token sells", sellError);
 
     const sellingWallets =
       new Set(
@@ -418,7 +441,7 @@ async function recomputeConsensus(): Promise<void> {
         false,
     });
 
-    await supabase
+    const { error: scoreError } = await supabase
       .from("token_scores")
       .upsert(
         {
@@ -455,6 +478,7 @@ async function recomputeConsensus(): Promise<void> {
             "token_mint",
         }
       );
+    throwIfError("Failed to store token score", scoreError);
 
     console.log({
       token:
@@ -487,9 +511,7 @@ async function recomputeConsensus(): Promise<void> {
       continue;
     }
 
-    const {
-      data: alreadyAlerted,
-    } = await supabase
+    const { data: alreadyAlerted, error: alertLookupError } = await supabase
       .from("alerts_sent")
       .select("id")
       .eq(
@@ -501,6 +523,7 @@ async function recomputeConsensus(): Promise<void> {
         windowStart
       )
       .limit(1);
+    throwIfError("Failed to check alert deduplication", alertLookupError);
 
     if (alreadyAlerted?.length) {
       continue;
@@ -619,7 +642,7 @@ async function recomputeConsensus(): Promise<void> {
     // Phase 2's wallet-performance matching lines up exactly.
     const alertTimestamp = new Date().toISOString();
 
-    await supabase
+    const { error: alertInsertError } = await supabase
       .from("alerts_sent")
       .insert({
         token_mint:
@@ -628,6 +651,7 @@ async function recomputeConsensus(): Promise<void> {
           walletsCount,
         sent_at: alertTimestamp,
       });
+    throwIfError("Failed to record sent alert", alertInsertError);
 
     // Phase 2: record which wallets participated in this alert, for
     // wallet-performance tracking going forward.
@@ -689,10 +713,13 @@ async function runCycle(): Promise<void> {
     `Monitoring ${wallets.length} wallets`
   );
 
-  for (const wallet of wallets) {
-    await pollWallet(wallet);
-    await sleep(1500);
-  }
+  await mapWithConcurrency(wallets, WALLET_POLL_CONCURRENCY, async (wallet) => {
+    try {
+      await pollWallet(wallet);
+    } catch (error) {
+      console.error(`[wallet] ${wallet.address.slice(0, 6)}… poll failed:`, error);
+    }
+  });
 
   await recomputeConsensus();
 
@@ -721,14 +748,17 @@ async function main(): Promise<void> {
     );
   }
 
-  setInterval(() => {
-    checkPositions().catch(
-      (err) =>
-        console.error(
-          "[paper-trader] checkPositions failed:",
-          err
-        )
-    );
+  let checkingPositions = false;
+  setInterval(async () => {
+    if (checkingPositions) return;
+    checkingPositions = true;
+    try {
+      await checkPositions();
+    } catch (err) {
+      console.error("[paper-trader] checkPositions failed:", err);
+    } finally {
+      checkingPositions = false;
+    }
   }, 5000);
 
   setInterval(() => {
@@ -756,13 +786,13 @@ async function main(): Promise<void> {
   await computeAndStoreWalletPerformance().catch((err) =>
     console.error("[wallet-performance] Initial recompute failed:", err)
   );
-  await runCycle();
-
-  setInterval(
-    runCycle,
-    POLL_INTERVAL_MINUTES *
-      60_000
-  );
+  while (true) {
+    const startedAt = Date.now();
+    await runCycle().catch((error) => console.error("[monitor] Cycle failed:", error));
+    const elapsed = Date.now() - startedAt;
+    const interval = POLL_INTERVAL_MINUTES * 60_000;
+    await sleep(Math.max(1_000, interval - elapsed));
+  }
 }
 
 main().catch((err) => {

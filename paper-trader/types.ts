@@ -28,6 +28,9 @@ export interface OpenPosition {
   // time. Lets analytics correctly group every partial sell belonging
   // to this position instead of double-counting them as separate trades.
   positionId: string;
+  // Accumulated across ladder sells. The loss streak is updated only
+  // when the complete logical position closes.
+  realizedPnlSol: number;
 }
 export interface TradeRecord {
   tokenSymbol: string;
