@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import WalletManager from "./WalletManager";
 
 type DashboardData = {
   generatedAt: string;
@@ -97,6 +98,8 @@ export default function Dashboard() {
         <Metric label="Positions" value={`${data.summary.openPositions} open`} sub={`${data.summary.completedPositions} completed`} />
         <Metric label="Wallets online" value={`${data.summary.activeWallets}`} sub={`${data.summary.configuredWallets} configured`} />
       </section>
+
+      <WalletManager onChanged={refresh} />
 
       <section className="grid two">
         <Panel title="Open paper positions" badge={`${data.positions.length} LIVE`}>
