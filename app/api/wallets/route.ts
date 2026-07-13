@@ -19,13 +19,28 @@ function validAddress(address: string): boolean {
 export async function GET(req: NextRequest) {
   if (!hasAdminAccess(req)) return unauthorized("Admin authentication required");
   const supabase = getSupabaseAdmin();
-  const { data, error } = await supabase
-    .from("wallets")
-    .select("address, label, active, created_at")
-    .order("created_at", { ascending: true });
+  const [{ data, error }, { data: performance, error: performanceError }] = await Promise.all([
+    supabase
+      .from("wallets")
+      .select("address, label, active, created_at")
+      .order("created_at", { ascending: true }),
+    supabase
+      .from("wallet_performance")
+      .select("wallet_address,trust_score,completed_trades,win_rate,average_return"),
+  ]);
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-  return NextResponse.json({ wallets: data });
+  if (performanceError) return NextResponse.json({ error: performanceError.message }, { status: 500 });
+
+  const performanceByAddress = new Map(
+    (performance ?? []).map((row) => [row.wallet_address, row])
+  );
+  return NextResponse.json({
+    wallets: (data ?? []).map((wallet) => ({
+      ...wallet,
+      performance: performanceByAddress.get(wallet.address) ?? null,
+    })),
+  });
 }
 
 export async function POST(req: NextRequest) {
