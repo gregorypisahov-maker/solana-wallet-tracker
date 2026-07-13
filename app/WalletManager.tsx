@@ -7,6 +7,12 @@ type Wallet = {
   label: string | null;
   active: boolean;
   created_at: string;
+  performance: {
+    trust_score: number;
+    completed_trades: number;
+    win_rate: number;
+    average_return: number;
+  } | null;
 };
 
 type Props = {
@@ -155,6 +161,11 @@ export default function WalletManager({ onChanged }: Props) {
                     <div>
                       <strong>{wallet.label || "Unlabelled wallet"}</strong>
                       <code>{wallet.address}</code>
+                      <small>
+                        {wallet.performance
+                          ? `Trust ${Number(wallet.performance.trust_score).toFixed(0)} · ${wallet.performance.completed_trades} trades · ${(Number(wallet.performance.win_rate) * 100).toFixed(0)}% win · ${(Number(wallet.performance.average_return) * 100).toFixed(1)}% avg`
+                          : "No matched performance history yet"}
+                      </small>
                     </div>
                     <span>{wallet.active ? "ACTIVE" : "INACTIVE"}</span>
                     <button
