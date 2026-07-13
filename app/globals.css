@@ -13,7 +13,7 @@ h1 { font-size:clamp(25px,4vw,42px); line-height:1; margin:10px 0 8px; letter-sp
 .status.live { color:var(--green); background:#092219; border-color:#145c42; }.status.halted{color:var(--red);background:#281017;border-color:#692433}
 .updated { color:var(--muted); font-size:11px; }
 .errorBanner,.haltBanner { margin-top:16px; padding:12px 14px; border-radius:9px; font-size:13px; }.errorBanner{background:#29121a;color:#ff8292}.haltBanner{background:#2a1e09;color:#ffd47a}.haltBanner code{font-weight:800}
-.metrics { display:grid; grid-template-columns:repeat(6,1fr); gap:12px; margin:18px 0; }
+.metrics { display:grid; grid-template-columns:repeat(4,1fr); gap:12px; margin:18px 0; }
 .metric,.panel { background:linear-gradient(145deg,rgba(15,22,30,.96),rgba(8,12,17,.98)); border:1px solid var(--line); box-shadow:0 16px 45px rgba(0,0,0,.18); }
 .metric { min-height:112px; padding:17px; border-radius:12px; display:flex; flex-direction:column; justify-content:center; }
 .metric span,.metric small { color:var(--muted); font-size:11px; }.metric span{text-transform:uppercase;letter-spacing:.09em}.metric strong{font-size:22px;margin:9px 0 3px;white-space:nowrap}.cyan{color:var(--cyan)}.green{color:var(--green)}.red{color:var(--red)}
