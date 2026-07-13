@@ -6,6 +6,7 @@ Paper-trading-only Solana wallet monitor with Telegram alerts and a protected, v
 
 - **Web service (Vercel or Railway):** `npm run build` then `npm start`
 - **Monitor service (Railway):** `npm run worker`
+- **Legacy monitor command:** `npm run paper-trader` (kept as an alias so existing Railway services continue to start the same TypeScript monitor)
 - **Telegram command service (Railway):** `npm run telegram-bot`
 
 Run exactly one Telegram command service. The monitor deliberately does not start the long-polling Telegram listener, preventing duplicate `getUpdates` consumers and unreliable `/resume` commands. The TypeScript paper trader is integrated into the monitor; the old standalone JavaScript trader is not a deployment service.
@@ -80,7 +81,7 @@ The token is exchanged for an HTTP-only cookie and removed from the URL. A frien
 - The monitor uses paginated signature reads, bounded concurrent wallet polling, and non-overlapping monitor/position loops.
 - Supabase failures throw instead of silently pretending state was saved.
 - Partial sells contribute to one logical position; the consecutive-loss counter changes only when that full position closes.
-- The alert score is 0–100, so the corrected default gate is `MIN_SCORE_FOR_ALERT=50`. Override it explicitly only after reviewing paper results.
+- The default alert gate is `MIN_SCORE_FOR_ALERT=8`, matching the paper trader’s validated entry filter. Override it explicitly only after reviewing paper results.
 
 ## Telegram commands
 
