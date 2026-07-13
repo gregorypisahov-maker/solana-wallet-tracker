@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { hasViewerAccess, unauthorized } from "@/lib/dashboardAuth";
+import { getPriceUsd } from "@/paper-trader/priceFeed";
 
 export const dynamic = "force-dynamic";
 
@@ -45,10 +46,79 @@ export async function GET(request: NextRequest) {
   const grossProfit = closed.filter((item) => item.pnl > 0).reduce((sum, item) => sum + item.pnl, 0);
   const grossLoss = Math.abs(closed.filter((item) => item.pnl < 0).reduce((sum, item) => sum + item.pnl, 0));
 
+  // Mark every open position to its current market price. Position sizes are
+  // denominated in SOL, while DexScreener prices are USD, so the price ratio
+  // converts the remaining SOL cost basis into its current simulated SOL value.
+  // A temporary price failure falls back to cost basis without breaking the
+  // whole dashboard, and the response tells the UI that equity is estimated.
+  const rawPositions = positions.data ?? [];
+  const pricedPositions = await Promise.all(
+    rawPositions.map(async (position) => {
+      const sizeSol = Number(position.size_sol);
+      const remainingPct = Number(position.remaining_pct);
+      const entryPriceUsd = Number(position.entry_price);
+      const remainingCostSol =
+        (Number.isFinite(sizeSol) ? Math.max(0, sizeSol) : 0) *
+        (Number.isFinite(remainingPct) ? Math.max(0, remainingPct) : 0);
+
+      try {
+        if (!Number.isFinite(entryPriceUsd) || entryPriceUsd <= 0) {
+          throw new Error(`Invalid entry price: ${position.entry_price}`);
+        }
+
+        const price = await getPriceUsd(position.mint);
+        if (!Number.isFinite(price.priceUsd) || price.priceUsd <= 0) {
+          throw new Error(`Invalid current price: ${price.priceUsd}`);
+        }
+
+        const currentMultiple = price.priceUsd / entryPriceUsd;
+        const currentValueSol = remainingCostSol * currentMultiple;
+
+        return {
+          ...position,
+          current_price_usd: price.priceUsd,
+          current_multiple: currentMultiple,
+          current_value_sol: currentValueSol,
+          unrealized_pnl_sol: currentValueSol - remainingCostSol,
+          price_status: "live",
+        };
+      } catch (error) {
+        console.warn(
+          `[dashboard] Live price unavailable for ${position.mint}:`,
+          error
+        );
+
+        return {
+          ...position,
+          current_price_usd: null,
+          current_multiple: null,
+          current_value_sol: remainingCostSol,
+          unrealized_pnl_sol: null,
+          price_status: "unavailable",
+        };
+      }
+    })
+  );
+
+  const cashSol = Number(state.data?.bankroll_sol ?? 0);
+  const openPositionValueSol = pricedPositions.reduce(
+    (sum, position) => sum + Number(position.current_value_sol),
+    0
+  );
+  const unrealizedPnlSol = pricedPositions.reduce(
+    (sum, position) => sum + Number(position.unrealized_pnl_sol ?? 0),
+    0
+  );
+  const livePricesUnavailable = pricedPositions.filter(
+    (position) => position.price_status !== "live"
+  ).length;
+  const liveEquitySol =
+    (Number.isFinite(cashSol) ? cashSol : 0) + openPositionValueSol;
+
   return NextResponse.json({
     generatedAt: new Date().toISOString(),
     state: state.data,
-    positions: positions.data ?? [],
+    positions: pricedPositions,
     trades: tradeRows.slice(0, 100),
     tokens: tokens.data ?? [],
     summary: {
@@ -58,7 +128,12 @@ export async function GET(request: NextRequest) {
       winRate: closed.length ? wins / closed.length : 0,
       totalPnlSol: closed.reduce((sum, item) => sum + item.pnl, 0),
       profitFactor: grossLoss > 0 ? grossProfit / grossLoss : null,
-      openPositions: positions.data?.length ?? 0,
+      liveEquitySol,
+      cashSol: Number.isFinite(cashSol) ? cashSol : 0,
+      openPositionValueSol,
+      unrealizedPnlSol,
+      livePricesUnavailable,
+      openPositions: pricedPositions.length,
       activeWallets: (wallets.data ?? []).filter((wallet) => wallet.active).length,
       configuredWallets: wallets.data?.length ?? 0,
     },
