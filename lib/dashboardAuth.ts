@@ -16,7 +16,7 @@ export function hasViewerAccess(request: NextRequest): boolean {
 }
 
 export function hasAdminAccess(request: NextRequest): boolean {
-  const expected = process.env.DASHBOARD_ADMIN_PASSWORD;
+  const expected = process.env.DASHBOARD_ADMIN_PASSWORD?.trim();
   const authorization = request.headers.get("authorization");
   if (!expected || !authorization?.startsWith("Basic ")) return false;
 
