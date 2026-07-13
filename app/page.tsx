@@ -90,13 +90,23 @@ export default function Dashboard() {
 
       <section className="metrics">
         <Metric
-          label="Live equity"
-          value={`${data.summary.liveEquitySol.toFixed(3)} SOL`}
+          label="Cash balance"
+          value={`${data.summary.cashSol.toFixed(3)} SOL`}
+          sub="Available simulated cash"
+        />
+        <Metric
+          label="Open position value"
+          value={`${data.summary.openPositionValueSol.toFixed(3)} SOL`}
           sub={
             data.summary.livePricesUnavailable > 0
               ? `${data.summary.livePricesUnavailable} live price${data.summary.livePricesUnavailable === 1 ? "" : "s"} unavailable • estimated`
               : `Unrealized ${sol(data.summary.unrealizedPnlSol)}`
           }
+        />
+        <Metric
+          label="Live equity"
+          value={`${data.summary.liveEquitySol.toFixed(3)} SOL`}
+          sub="Cash + open position value"
           tone="cyan"
         />
         <Metric label="Realized PnL" value={sol(data.summary.totalPnlSol)} tone={data.summary.totalPnlSol >= 0 ? "green" : "red"} />
