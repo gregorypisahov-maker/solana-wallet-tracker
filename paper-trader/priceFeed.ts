@@ -9,7 +9,7 @@ export interface PriceData {
 
 export async function getPriceUsd(mint: string): Promise<PriceData> {
   const url = `${config.polling.dexscreenerBase}${mint}`;
-  const res = await fetch(url);
+  const res = await fetch(url, { cache: "no-store" });
   if (!res.ok) {
     throw new Error(`DexScreener request failed: ${res.status}`);
   }
