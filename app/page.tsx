@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import WalletManager from "./WalletManager";
 
 type DashboardData = {
@@ -13,6 +13,11 @@ type DashboardData = {
     winRate: number;
     totalPnlSol: number;
     profitFactor: number | null;
+    liveEquitySol: number;
+    cashSol: number;
+    openPositionValueSol: number;
+    unrealizedPnlSol: number;
+    livePricesUnavailable: number;
     openPositions: number;
     activeWallets: number;
     configuredWallets: number;
@@ -59,13 +64,6 @@ export default function Dashboard() {
     return () => window.clearInterval(timer);
   }, [refresh]);
 
-  const equity = useMemo(() => {
-    if (!data?.state) return 0;
-    return Number(data.state.bankroll_sol) + data.positions.reduce(
-      (sum, position) => sum + Number(position.size_sol) * Number(position.remaining_pct), 0
-    );
-  }, [data]);
-
   if (!data) {
     return <main className="shell"><div className="loading">{error ?? "Connecting to live bot data…"}</div></main>;
   }
@@ -91,7 +89,26 @@ export default function Dashboard() {
       {halted && <div className="haltBanner">Paper entries are paused: {state.halt_reason ?? "risk limit reached"}. Use <code>/resume</code> in the authorized Telegram chat.</div>}
 
       <section className="metrics">
-        <Metric label="Simulated equity" value={`${equity.toFixed(3)} SOL`} tone="cyan" />
+        <Metric
+          label="Cash balance"
+          value={`${data.summary.cashSol.toFixed(3)} SOL`}
+          sub="Available simulated cash"
+        />
+        <Metric
+          label="Open position value"
+          value={`${data.summary.openPositionValueSol.toFixed(3)} SOL`}
+          sub={
+            data.summary.livePricesUnavailable > 0
+              ? `${data.summary.livePricesUnavailable} live price${data.summary.livePricesUnavailable === 1 ? "" : "s"} unavailable • estimated`
+              : `Unrealized ${sol(data.summary.unrealizedPnlSol)}`
+          }
+        />
+        <Metric
+          label="Live equity"
+          value={`${data.summary.liveEquitySol.toFixed(3)} SOL`}
+          sub="Cash + open position value"
+          tone="cyan"
+        />
         <Metric label="Realized PnL" value={sol(data.summary.totalPnlSol)} tone={data.summary.totalPnlSol >= 0 ? "green" : "red"} />
         <Metric label="Win rate" value={`${(data.summary.winRate * 100).toFixed(1)}%`} sub={`${data.summary.wins}W / ${data.summary.losses}L`} />
         <Metric label="Profit factor" value={data.summary.profitFactor == null ? "—" : data.summary.profitFactor.toFixed(2)} />
