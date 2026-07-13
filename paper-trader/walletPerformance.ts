@@ -277,33 +277,39 @@ export interface WalletPerformanceRow {
 }
 
 export async function getWalletPerformance(walletAddress: string): Promise<WalletPerformanceRow | null> {
-  const { data } = await supabase
+  const { data, error } = await supabase
     .from('wallet_performance')
     .select('*')
     .eq('wallet_address', walletAddress)
     .limit(1);
 
+  if (error) throw new Error(`Failed to load wallet performance: ${error.message}`);
+
   return data?.[0] ?? null;
 }
 
 export async function getTopWallets(limit: number): Promise<WalletPerformanceRow[]> {
-  const { data } = await supabase
+  const { data, error } = await supabase
     .from('wallet_performance')
     .select('*')
     .gt('completed_trades', 0)
     .order('trust_score', { ascending: false })
     .limit(limit);
 
+  if (error) throw new Error(`Failed to load top wallets: ${error.message}`);
+
   return data ?? [];
 }
 
 export async function getBottomWallets(limit: number): Promise<WalletPerformanceRow[]> {
-  const { data } = await supabase
+  const { data, error } = await supabase
     .from('wallet_performance')
     .select('*')
     .gt('completed_trades', 0)
     .order('trust_score', { ascending: true })
     .limit(limit);
+
+  if (error) throw new Error(`Failed to load bottom wallets: ${error.message}`);
 
   return data ?? [];
 }

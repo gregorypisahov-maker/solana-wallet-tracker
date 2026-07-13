@@ -140,17 +140,9 @@ export async function handleScoreStats(): Promise<string> {
 export async function handleResume(): Promise<string> {
   const state = await loadState();
 
-  if (!state.halted) {
-    return [
-      '✅ Paper trader is already active.',
-      '',
-      `Consecutive losses: ${state.consecutiveLosses}`,
-      `Bankroll: ${state.bankrollSol.toFixed(4)} SOL`,
-    ].join('\n');
-  }
-
   const previousLosses = state.consecutiveLosses;
   const previousReason = state.haltReason;
+  const wasHalted = state.halted || Boolean(state.haltReason) || state.consecutiveLosses > 0;
 
   state.halted = false;
   state.consecutiveLosses = 0;
@@ -159,7 +151,7 @@ export async function handleResume(): Promise<string> {
   await saveState(state);
 
   return [
-    '▶️ PAPER TRADING RESUMED',
+    wasHalted ? '▶️ PAPER TRADING RESUMED' : '✅ PAPER TRADER IS ACTIVE',
     '',
     `Previous losses: ${previousLosses}`,
     `Previous reason: ${previousReason ?? 'Not recorded'}`,

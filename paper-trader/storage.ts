@@ -14,12 +14,17 @@ const supabase = getSupabaseAdmin();
 
 const STATE_ROW_ID = 1; // single-row table, always id=1
 
+function assertSuccess(label: string, error: { message: string } | null): void {
+  if (error) throw new Error(`${label}: ${error.message}`);
+}
+
 export async function loadState(): Promise<PaperState> {
-  const { data } = await supabase
+  const { data, error } = await supabase
     .from('paper_state')
     .select('*')
     .eq('id', STATE_ROW_ID)
     .limit(1);
+  assertSuccess('Failed to load paper state', error);
 
   const row = data?.[0];
   if (!row) {
@@ -31,7 +36,7 @@ export async function loadState(): Promise<PaperState> {
       halted: false,
       haltReason: null,
     };
-    await supabase.from('paper_state').insert({
+    const { error: insertError } = await supabase.from('paper_state').insert({
       id: STATE_ROW_ID,
       bankroll_sol: fresh.bankrollSol,
       daily_start_bankroll_sol: fresh.dailyStartBankrollSol,
@@ -40,6 +45,7 @@ export async function loadState(): Promise<PaperState> {
       halted: fresh.halted,
       halt_reason: fresh.haltReason,
     });
+    assertSuccess('Failed to create paper state', insertError);
     return fresh;
   }
 
@@ -54,7 +60,7 @@ export async function loadState(): Promise<PaperState> {
 }
 
 export async function saveState(state: PaperState): Promise<void> {
-  await supabase.from('paper_state').upsert(
+  const { error } = await supabase.from('paper_state').upsert(
     {
       id: STATE_ROW_ID,
       bankroll_sol: state.bankrollSol,
@@ -66,10 +72,11 @@ export async function saveState(state: PaperState): Promise<void> {
     },
     { onConflict: 'id' }
   );
+  assertSuccess('Failed to save paper state', error);
 }
 
 export async function appendTrade(trade: TradeRecord): Promise<void> {
-  await supabase.from('paper_trades').insert({
+  const { error } = await supabase.from('paper_trades').insert({
     token_symbol: trade.tokenSymbol,
     mint: trade.mint,
     type: trade.type,
@@ -86,6 +93,7 @@ export async function appendTrade(trade: TradeRecord): Promise<void> {
     entry_alert: trade.entryAlert,
     position_id: trade.positionId,
   });
+  assertSuccess('Failed to append paper trade', error);
 }
 
 export async function loadTrades(sinceIso?: string): Promise<TradeRecord[]> {
@@ -93,7 +101,8 @@ export async function loadTrades(sinceIso?: string): Promise<TradeRecord[]> {
   if (sinceIso) {
     query = query.gte('happened_at', sinceIso);
   }
-  const { data } = await query;
+  const { data, error } = await query;
+  assertSuccess('Failed to load paper trades', error);
   return (data ?? []).map((r: any) => ({
     tokenSymbol: r.token_symbol,
     mint: r.mint,
@@ -114,7 +123,8 @@ export async function loadTrades(sinceIso?: string): Promise<TradeRecord[]> {
 }
 
 export async function loadOpenPositions(): Promise<Map<string, OpenPosition>> {
-  const { data } = await supabase.from('paper_positions').select('*');
+  const { data, error } = await supabase.from('paper_positions').select('*');
+  assertSuccess('Failed to load open paper positions', error);
   const map = new Map<string, OpenPosition>();
   for (const r of data ?? []) {
     map.set(r.mint, {
@@ -128,13 +138,14 @@ export async function loadOpenPositions(): Promise<Map<string, OpenPosition>> {
       ladderHits: r.ladder_hits ?? [],
       entryAlert: r.entry_alert,
       positionId: r.position_id,
+      realizedPnlSol: Number(r.realized_pnl_sol ?? 0),
     });
   }
   return map;
 }
 
 export async function saveOpenPosition(pos: OpenPosition): Promise<void> {
-  await supabase.from('paper_positions').upsert(
+  const { error } = await supabase.from('paper_positions').upsert(
     {
       mint: pos.mint,
       token_symbol: pos.tokenSymbol,
@@ -146,13 +157,16 @@ export async function saveOpenPosition(pos: OpenPosition): Promise<void> {
       ladder_hits: pos.ladderHits,
       entry_alert: pos.entryAlert,
       position_id: pos.positionId,
+      realized_pnl_sol: pos.realizedPnlSol,
     },
     { onConflict: 'mint' }
   );
+  assertSuccess('Failed to save open paper position', error);
 }
 
 export async function deleteOpenPosition(mint: string): Promise<void> {
-  await supabase.from('paper_positions').delete().eq('mint', mint);
+  const { error } = await supabase.from('paper_positions').delete().eq('mint', mint);
+  assertSuccess('Failed to delete open paper position', error);
 }
 
 // New helper for analytics.ts — reads every trade row, unfiltered, so
