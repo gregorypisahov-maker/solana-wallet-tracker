@@ -4,12 +4,16 @@
 
 export const config = {
   entry: {
+    // Keep the paper engine aligned with the monitor's consensus gate.
+    // Previously the monitor accepted a signal and sent an alert, but the
+    // simulator silently rejected many of the same tokens because these
+    // limits were stricter and inconsistent.
     minScore: 8,
     minWalletCount: 3,
-    minAvgBuyPerWallet: 1.5,
-    minLiquidityToMcapRatio: 0.08,
-    maxMarketCapUsd: 1_000_000,
-    minLiquidityUsd: 15_000,
+    minAvgBuyPerWallet: 0.5,
+    minLiquidityToMcapRatio: 0.05,
+    maxMarketCapUsd: 3_000_000,
+    minLiquidityUsd: 10_000,
   },
 
   position: {
