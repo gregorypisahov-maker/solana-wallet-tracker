@@ -4,13 +4,15 @@ import { hasViewerAccess, unauthorized } from "@/lib/dashboardAuth";
 import { getPriceUsd } from "@/paper-trader/priceFeed";
 
 export const dynamic = "force-dynamic";
+export const revalidate = 0;
+export const fetchCache = "force-no-store";
 
 const maskAddress = (value: string) => `${value.slice(0, 4)}…${value.slice(-4)}`;
 
 export async function GET(request: NextRequest) {
   if (!hasViewerAccess(request)) return unauthorized();
 
-  const supabase = getSupabaseAdmin();
+  const supabase = getSupabaseAdmin({ noStore: true });
   const [state, positions, trades, tokens, wallets, performance, transactions] =
     await Promise.all([
       supabase.from("paper_state").select("*").eq("id", 1).maybeSingle(),
