@@ -364,10 +364,43 @@ async function recomputeConsensus(): Promise<void> {
     );
   }
 
+  const { data: recentAlerts, error: recentAlertsError } =
+    await supabase
+      .from("alerts_sent")
+      .select("token_mint")
+      .gte("sent_at", windowStart);
+
+  if (recentAlertsError) {
+    console.error(
+      "Failed to load recent alert deduplication state:",
+      recentAlertsError
+    );
+    return;
+  }
+
+  const recentlyAlertedMints = new Set(
+    (recentAlerts ?? []).map((row) => row.token_mint)
+  );
+
+  // Do not spend external API calls rescoring every token bought during the
+  // whole 24-hour window. Only new raw consensus candidates need market data.
+  // This keeps each monitor cycle short as transaction history grows.
+  const candidates = Array.from(byToken.entries()).filter(
+    ([tokenMint, agg]) =>
+      agg.wallets.size >= MIN_WALLETS_FOR_ALERT &&
+      agg.totalSol >= MIN_TOTAL_SOL &&
+      !recentlyAlertedMints.has(tokenMint)
+  );
+
+  console.log(
+    `[consensus] ${byToken.size} tokens in window; ` +
+      `${candidates.length} new raw candidates`
+  );
+
   for (const [
     tokenMint,
     agg,
-  ] of byToken.entries()) {
+  ] of candidates) {
     await sleep(700);
 
     const walletsCount =
@@ -595,25 +628,6 @@ async function recomputeConsensus(): Promise<void> {
         .join(" | ")
     );
 
-    await sendTelegramAlert(
-      formatConsensusAlert({
-        symbol:
-          market.symbol,
-        tokenMint,
-        walletsCount,
-        totalSol:
-          agg.totalSol,
-        marketCap:
-          market.marketCap,
-        liquidityUsd:
-          market.liquidityUsd,
-        score,
-        weightedWalletScore: weighted.weightedWalletScore,
-        averageTrustScore: weighted.averageTrustScore,
-        confidenceGrade: weighted.confidenceGrade,
-      })
-    );
-
     await onAlert({
       tokenSymbol:
         market.symbol,
@@ -636,6 +650,25 @@ async function recomputeConsensus(): Promise<void> {
         "[paper-trader] onAlert failed:",
         err
       )
+    );
+
+    await sendTelegramAlert(
+      formatConsensusAlert({
+        symbol:
+          market.symbol,
+        tokenMint,
+        walletsCount,
+        totalSol:
+          agg.totalSol,
+        marketCap:
+          market.marketCap,
+        liquidityUsd:
+          market.liquidityUsd,
+        score,
+        weightedWalletScore: weighted.weightedWalletScore,
+        averageTrustScore: weighted.averageTrustScore,
+        confidenceGrade: weighted.confidenceGrade,
+      })
     );
 
     // Single timestamp shared by alerts_sent and alert_participants so
@@ -782,8 +815,12 @@ async function main(): Promise<void> {
     );
   }, 30 * 60_000);
 
-  await sendDailyPaperReportIfDue();
-  await computeAndStoreWalletPerformance().catch((err) =>
+  // Reporting and analytics are maintenance work. Never delay the first
+  // wallet-polling cycle (and therefore paper trading) while they run.
+  void sendDailyPaperReportIfDue().catch((err) =>
+    console.error("[paper-trader] Initial daily report check failed:", err)
+  );
+  void computeAndStoreWalletPerformance().catch((err) =>
     console.error("[wallet-performance] Initial recompute failed:", err)
   );
   while (true) {
@@ -803,3 +840,4 @@ main().catch((err) => {
 
   process.exit(1);
 });
+
