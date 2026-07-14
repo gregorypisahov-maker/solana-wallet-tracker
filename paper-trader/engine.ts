@@ -35,6 +35,29 @@ import {
 } from "./types";
 import { sendTelegramAlert } from "../lib/telegram";
 
+// onAlert() and checkPositions() are started by different timers. Without a
+// shared lock they can both load the same cash balance, modify it, and then
+// overwrite each other's save. Keep every read/modify/write cycle serialized
+// so paper_state and paper_positions always move forward in one order.
+let engineOperationTail: Promise<void> = Promise.resolve();
+
+async function runEngineOperation<T>(operation: () => Promise<T>): Promise<T> {
+  const previousOperation = engineOperationTail;
+  let releaseCurrentOperation!: () => void;
+
+  engineOperationTail = new Promise<void>((resolve) => {
+    releaseCurrentOperation = resolve;
+  });
+
+  await previousOperation;
+
+  try {
+    return await operation();
+  } finally {
+    releaseCurrentOperation();
+  }
+}
+
 async function notify(message: string): Promise<void> {
   try {
     await sendTelegramAlert(message);
@@ -136,6 +159,12 @@ function getErrorMessage(error: unknown): string {
 
 // Called by worker/monitor.ts after a new consensus alert.
 export async function onAlert(
+  alert: AlertInput
+): Promise<void> {
+  return runEngineOperation(() => processAlert(alert));
+}
+
+async function processAlert(
   alert: AlertInput
 ): Promise<void> {
   console.log(
@@ -395,6 +424,10 @@ export async function onAlert(
 
 // Called every five seconds by worker/monitor.ts.
 export async function checkPositions(): Promise<void> {
+  return runEngineOperation(processOpenPositions);
+}
+
+async function processOpenPositions(): Promise<void> {
   const state = await loadState();
   const openPositions = await loadOpenPositions();
 
