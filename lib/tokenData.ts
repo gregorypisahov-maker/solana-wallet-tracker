@@ -1,5 +1,32 @@
 import fetch from "node-fetch";
 
+const configuredTokenDataTimeoutMs = Number(
+  process.env.TOKEN_DATA_TIMEOUT_MS ?? 12_000
+);
+const TOKEN_DATA_TIMEOUT_MS = Number.isFinite(configuredTokenDataTimeoutMs)
+  ? Math.max(3_000, configuredTokenDataTimeoutMs)
+  : 12_000;
+
+async function fetchWithTimeout(
+  url: string,
+  init: NonNullable<Parameters<typeof fetch>[1]> = {}
+) {
+  const controller = new AbortController();
+  const timeout = setTimeout(
+    () => controller.abort(),
+    TOKEN_DATA_TIMEOUT_MS
+  );
+
+  try {
+    return await fetch(url, {
+      ...init,
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 export interface TokenMarketData {
   symbol: string | null;
   name: string | null;
@@ -14,7 +41,7 @@ export interface TokenMarketData {
  */
 export async function fetchDexScreenerData(tokenMint: string): Promise<TokenMarketData> {
   try {
-    const res = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${tokenMint}`);
+    const res = await fetchWithTimeout(`https://api.dexscreener.com/latest/dex/tokens/${tokenMint}`);
     if (!res.ok) throw new Error(`DexScreener ${res.status}`);
     const data: any = await res.json();
     const pairs = data?.pairs ?? [];
@@ -46,7 +73,7 @@ export async function fetchBirdeyeHolders(tokenMint: string): Promise<number | n
   const apiKey = process.env.BIRDEYE_API_KEY;
   if (!apiKey) return null;
   try {
-    const res = await fetch(
+    const res = await fetchWithTimeout(
       `https://public-api.birdeye.so/defi/token_overview?address=${tokenMint}`,
       { headers: { "X-API-KEY": apiKey, "x-chain": "solana" } }
     );

@@ -4,9 +4,16 @@
 // optional trust/confidence fields (Phase 3). All new fields are
 // optional, so any existing call site that doesn't pass them keeps
 // working exactly as before, with the new message lines simply omitted.
-// sendTelegramAlert() is completely unchanged.
+// Telegram delivery is bounded so a network problem cannot freeze the worker.
 
-export async function sendTelegramAlert(message: string) {
+const configuredTelegramTimeoutMs = Number(
+  process.env.TELEGRAM_TIMEOUT_MS ?? 10_000
+);
+const TELEGRAM_TIMEOUT_MS = Number.isFinite(configuredTelegramTimeoutMs)
+  ? Math.max(3_000, configuredTelegramTimeoutMs)
+  : 10_000;
+
+export async function sendTelegramAlert(message: string): Promise<void> {
   const token = process.env.TELEGRAM_BOT_TOKEN;
   const chatId = process.env.TELEGRAM_CHAT_ID;
   if (!token || !chatId) {
@@ -14,19 +21,41 @@ export async function sendTelegramAlert(message: string) {
     console.log(message);
     return;
   }
-  const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      chat_id: chatId,
-      text: message,
-      parse_mode: "HTML",
-      disable_web_page_preview: false,
-    }),
-  });
-  if (!res.ok) {
-    const text = await res.text();
-    console.error("Telegram send failed:", res.status, text);
+  const controller = new AbortController();
+  const timeout = setTimeout(
+    () => controller.abort(),
+    TELEGRAM_TIMEOUT_MS
+  );
+
+  try {
+    const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        chat_id: chatId,
+        text: message,
+        parse_mode: "HTML",
+        disable_web_page_preview: false,
+      }),
+      signal: controller.signal,
+    });
+
+    if (!res.ok) {
+      const text = await res.text();
+      console.error("Telegram send failed:", res.status, text);
+    }
+  } catch (error) {
+    const reason =
+      error instanceof Error && error.name === "AbortError"
+        ? `timed out after ${TELEGRAM_TIMEOUT_MS}ms`
+        : error instanceof Error
+          ? error.message
+          : String(error);
+
+    // Telegram notifications must never stop wallet monitoring or paper entry.
+    console.error("Telegram send failed:", reason);
+  } finally {
+    clearTimeout(timeout);
   }
 }
 
