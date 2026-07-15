@@ -10,9 +10,29 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
-const MAX_TRADE_AGE_MS = 10 * 60_000;
-const MIN_TRACKED_TRADE_SOL = 0.01;
-const SCALP_WINDOW_MINUTES = 5;
+function boundedNumber(
+  value: string | undefined,
+  fallback: number,
+  minimum: number,
+  maximum: number
+): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed)
+    ? Math.min(maximum, Math.max(minimum, parsed))
+    : fallback;
+}
+
+const MAX_TRADE_AGE_MS =
+  boundedNumber(process.env.MAX_TRADE_AGE_SECONDS, 120, 30, 3_600) * 1_000;
+const MIN_TRACKED_TRADE_SOL = boundedNumber(
+  process.env.MIN_TRACKED_TRADE_SOL,
+  0.01,
+  0,
+  100
+);
+const SCALP_WINDOW_MINUTES = Math.floor(
+  boundedNumber(process.env.SCALP_WINDOW_MINUTES, 5, 1, 60)
+);
 
 export async function POST(request: NextRequest) {
   const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
