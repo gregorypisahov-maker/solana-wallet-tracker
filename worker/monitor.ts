@@ -46,6 +46,7 @@ import {
 } from "./heliusUsage";
 import { ensureHeliusSwapWebhook } from "./heliusWebhookManager";
 import { selectHeliusWallets } from "./heliusWalletSelection";
+import { reduceWalletLimitForMonthlyBudget } from "./heliusBudget";
 
 const RECONCILE_INTERVAL_SECONDS = readBoundedNumber(
   process.env.RECONCILE_INTERVAL_SECONDS,
@@ -82,6 +83,16 @@ const HELIUS_ROTATION_HOURS = readBoundedNumber(
   1,
   24
 );
+const HELIUS_MONTHLY_CREDIT_TARGET = Math.floor(
+  readBoundedNumber(
+    process.env.HELIUS_MONTHLY_CREDIT_TARGET,
+    700_000,
+    200_000,
+    900_000
+  )
+);
+const HELIUS_BUDGET_CHECK_INTERVAL_MS = 15 * 60_000;
+const HELIUS_BUDGET_SAMPLE_HOURS = 6;
 
 const WALLET_REFRESH_INTERVAL_SECONDS = readBoundedNumber(
   process.env.WALLET_REFRESH_INTERVAL_SECONDS,
@@ -182,6 +193,11 @@ const walletSubscriptions = new Map<string, number>();
 let webhookMode = false;
 let lastWebhookAddressKey = "";
 let lastWebhookCheckAt = 0;
+let adaptiveHeliusWalletLimit = MAX_HELIUS_WALLETS;
+let lastHeliusBudgetCheckAt = 0;
+const heliusBudgetTelemetryCutoffMs =
+  Math.ceil(Date.now() / HELIUS_BUDGET_CHECK_INTERVAL_MS) *
+  HELIUS_BUDGET_CHECK_INTERVAL_MS;
 
 const sleep = (ms: number) =>
   new Promise<void>((resolve) =>
@@ -1170,6 +1186,89 @@ function handleWalletLogs(walletAddress: string, logs: Logs): void {
   }
 }
 
+async function refreshHeliusBudgetLimit(): Promise<number> {
+  const now = Date.now();
+  if (
+    now < heliusBudgetTelemetryCutoffMs + HELIUS_BUDGET_CHECK_INTERVAL_MS ||
+    now - lastHeliusBudgetCheckAt < HELIUS_BUDGET_CHECK_INTERVAL_MS
+  ) {
+    return adaptiveHeliusWalletLimit;
+  }
+
+  lastHeliusBudgetCheckAt = now;
+  const sampleStartMs = Math.max(
+    heliusBudgetTelemetryCutoffMs,
+    now - HELIUS_BUDGET_SAMPLE_HOURS * 3_600_000
+  );
+  const { data, error } = await supabase
+    .from("monitor_usage_samples")
+    .select(
+      "period_started_at, recorded_at, signature_requests, transaction_requests, webhook_events, websocket_bytes"
+    )
+    .gte("period_started_at", new Date(sampleStartMs).toISOString())
+    .order("recorded_at", { ascending: true });
+
+  if (error) {
+    console.error("[helius-budget] Failed to load usage telemetry:", error);
+    return adaptiveHeliusWalletLimit;
+  }
+
+  if (!data?.length) return adaptiveHeliusWalletLimit;
+
+  const totals = data.reduce(
+    (sum, row) => ({
+      signatureRequests:
+        sum.signatureRequests + Number(row.signature_requests),
+      transactionRequests:
+        sum.transactionRequests + Number(row.transaction_requests),
+      webhookEvents: sum.webhookEvents + Number(row.webhook_events),
+      websocketBytes: sum.websocketBytes + Number(row.websocket_bytes),
+    }),
+    {
+      signatureRequests: 0,
+      transactionRequests: 0,
+      webhookEvents: 0,
+      websocketBytes: 0,
+    }
+  );
+  const latestRecordedAtMs = Math.max(
+    ...data.map((row) => Date.parse(row.recorded_at))
+  );
+  const sampledHours =
+    (latestRecordedAtMs - sampleStartMs) / 3_600_000;
+
+  if (!Number.isFinite(sampledHours) || sampledHours < 0.25) {
+    return adaptiveHeliusWalletLimit;
+  }
+
+  const projectedMonthlyCredits =
+    (estimateHeliusCredits(totals) / sampledHours) * 24 * 30;
+  const nextLimit = reduceWalletLimitForMonthlyBudget({
+    currentLimit: adaptiveHeliusWalletLimit,
+    minimumLimit: 3,
+    projectedMonthlyCredits,
+    targetMonthlyCredits: HELIUS_MONTHLY_CREDIT_TARGET,
+  });
+
+  if (nextLimit < adaptiveHeliusWalletLimit) {
+    const previousLimit = adaptiveHeliusWalletLimit;
+    adaptiveHeliusWalletLimit = nextLimit;
+    lastWebhookCheckAt = 0;
+    const message =
+      `🛡️ Helius budget guard reduced live webhook coverage from ` +
+      `${previousLimit} to ${nextLimit} wallets. Recent usage projects ` +
+      `${Math.round(projectedMonthlyCredits).toLocaleString()} credits/month ` +
+      `against the ${HELIUS_MONTHLY_CREDIT_TARGET.toLocaleString()} target. ` +
+      `All active wallets remain in low-cost reconciliation.`;
+    console.warn(`[helius-budget] ${message}`);
+    void sendTelegramAlert(message).catch((alertError) =>
+      console.error("[helius-budget] Telegram alert failed:", alertError)
+    );
+  }
+
+  return adaptiveHeliusWalletLimit;
+}
+
 async function syncWalletSubscriptions(): Promise<void> {
   const { data: wallets, error } = await supabase
     .from("wallets")
@@ -1187,11 +1286,16 @@ async function syncWalletSubscriptions(): Promise<void> {
 
   const addresses = [...desired];
   const trustScores = await getTrustScoresForWallets(addresses);
+  const walletLimit = await refreshHeliusBudgetLimit();
+  const coreWalletCount = Math.min(
+    HELIUS_CORE_WALLETS,
+    Math.max(1, walletLimit - 1)
+  );
   const selection = selectHeliusWallets({
     addresses,
     trustScores,
-    limit: MAX_HELIUS_WALLETS,
-    coreCount: HELIUS_CORE_WALLETS,
+    limit: walletLimit,
+    coreCount: coreWalletCount,
     rotationHours: HELIUS_ROTATION_HOURS,
   });
   const webhookActive = await syncHeliusWebhook(selection.selected);
