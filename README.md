@@ -78,7 +78,11 @@ The token is exchanged for an HTTP-only cookie and removed from the URL. A frien
 - The dashboard contains no add/delete wallet controls.
 - Existing wallet write endpoints require HTTP Basic auth with `DASHBOARD_ADMIN_PASSWORD`.
 - Viewer and API reads require the replaceable share token cookie.
-- The monitor uses paginated signature reads, bounded concurrent wallet polling, and non-overlapping monitor/position loops.
+- A wallet with no cursor starts at its latest confirmed signature. Normal startup never replays historical swaps.
+- Every inspected signature checkpoints its cursor immediately, so a Railway restart cannot restart a large backfill.
+- Helius requests are sequential and globally paced with exponential 429 backoff. Only fresh, non-dust swaps enter consensus.
+- Both sides of a rapid buy/sell pair are marked as scalps, preventing an earlier scalp buy from creating a false signal.
+- Monitor and position loops do not overlap with themselves.
 - Supabase failures throw instead of silently pretending state was saved.
 - Partial sells contribute to one logical position; the consecutive-loss counter changes only when that full position closes.
 - The default alert gate is `MIN_SCORE_FOR_ALERT=8`, matching the paper trader’s validated entry filter. Override it explicitly only after reviewing paper results.
