@@ -13,6 +13,8 @@ import {
   handleWalletStats,
   handleExitStats,
   handleScoreStats,
+  handleHeliusStats,
+  handleReadiness,
   handleResume,
 } from '../paper-trader/telegramCommands';
 
@@ -80,6 +82,8 @@ const COMMAND_HANDLERS: Record<string, () => Promise<string>> = {
   '/walletstats': handleWalletStats,
   '/exitstats': handleExitStats,
   '/scorestats': handleScoreStats,
+  '/heliusstats': handleHeliusStats,
+  '/readiness': handleReadiness,
   '/resume': handleResume,
 };
 
