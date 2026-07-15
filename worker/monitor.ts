@@ -71,10 +71,10 @@ const HELIUS_EVENT_MODE = (
 ).toLowerCase();
 
 const MAX_HELIUS_WALLETS = Math.floor(
-  readBoundedNumber(process.env.MAX_HELIUS_WALLETS, 10, 3, 25)
+  readBoundedNumber(process.env.MAX_HELIUS_WALLETS, 6, 3, 25)
 );
 const HELIUS_CORE_WALLETS = Math.floor(
-  readBoundedNumber(process.env.HELIUS_CORE_WALLETS, 6, 0, 25)
+  readBoundedNumber(process.env.HELIUS_CORE_WALLETS, 4, 0, 25)
 );
 const HELIUS_ROTATION_HOURS = readBoundedNumber(
   process.env.HELIUS_ROTATION_HOURS,
