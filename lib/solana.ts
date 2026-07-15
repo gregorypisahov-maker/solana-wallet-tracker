@@ -31,7 +31,8 @@ export async function fetchNewSignatures(
   connection: Connection,
   address: string,
   untilSignature: string | null,
-  maxSignatures = 50
+  maxSignatures = 50,
+  onRequest: () => void = () => undefined
 ) {
   const pubkey = new PublicKey(address);
   const sigs: ConfirmedSignatureInfo[] = [];
@@ -39,6 +40,7 @@ export async function fetchNewSignatures(
 
   while (sigs.length < maxSignatures) {
     const pageSize = Math.min(100, maxSignatures - sigs.length);
+    onRequest();
     const page = await connection.getSignaturesForAddress(
       pubkey,
       { limit: pageSize, before, until: untilSignature ?? undefined },
