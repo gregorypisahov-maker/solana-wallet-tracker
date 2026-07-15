@@ -10,6 +10,9 @@ import { config } from './config';
 import { computeAnalytics } from './analytics';
 import { loadState, loadOpenPositions, saveState } from './storage';
 import { getTopWallets, getBottomWallets, WalletPerformanceRow } from './walletPerformance';
+import { getSupabaseAdmin } from '../lib/supabase';
+import { estimateHeliusCredits } from '../worker/heliusUsage';
+import { evaluatePaperReadiness } from './readiness';
 
 function signedSol(value: number): string {
   return `${value >= 0 ? '+' : ''}${value.toFixed(3)} SOL`;
@@ -137,6 +140,121 @@ export async function handleScoreStats(): Promise<string> {
 
   return lines.join('\n');
 }
+
+export async function handleHeliusStats(): Promise<string> {
+  const supabase = getSupabaseAdmin();
+  const since = new Date(Date.now() - 24 * 60 * 60_000).toISOString();
+  const { data, error } = await supabase
+    .from('monitor_usage_samples')
+    .select(
+      'period_started_at, recorded_at, signature_requests, transaction_requests, websocket_notifications, websocket_bytes, rate_limit_errors, rpc_failures, stored_trades, max_queue_depth'
+    )
+    .gte('recorded_at', since)
+    .order('recorded_at', { ascending: true });
+
+  if (error) {
+    throw new Error(`Failed to load Helius usage: ${error.message}`);
+  }
+
+  if (!data?.length) {
+    return [
+      '⚡ <b>HELIUS USAGE</b>',
+      '',
+      'No monitor usage sample has been saved yet.',
+      'The first sample is written within 15 minutes of deployment.',
+    ].join('\n');
+  }
+
+  const totals = data.reduce(
+    (sum, row) => ({
+      signatureRequests: sum.signatureRequests + Number(row.signature_requests),
+      transactionRequests: sum.transactionRequests + Number(row.transaction_requests),
+      websocketNotifications:
+        sum.websocketNotifications + Number(row.websocket_notifications),
+      websocketBytes: sum.websocketBytes + Number(row.websocket_bytes),
+      rateLimitErrors: sum.rateLimitErrors + Number(row.rate_limit_errors),
+      rpcFailures: sum.rpcFailures + Number(row.rpc_failures),
+      storedTrades: sum.storedTrades + Number(row.stored_trades),
+      maxQueueDepth: Math.max(sum.maxQueueDepth, Number(row.max_queue_depth)),
+    }),
+    {
+      signatureRequests: 0,
+      transactionRequests: 0,
+      websocketNotifications: 0,
+      websocketBytes: 0,
+      rateLimitErrors: 0,
+      rpcFailures: 0,
+      storedTrades: 0,
+      maxQueueDepth: 0,
+    }
+  );
+
+  const estimatedCredits = estimateHeliusCredits(totals);
+  const firstStartedAt = Date.parse(data[0].period_started_at);
+  const lastRecordedAt = Date.parse(data[data.length - 1].recorded_at);
+  const sampledHours = Math.max(
+    0.25,
+    (lastRecordedAt - firstStartedAt) / 3_600_000
+  );
+  const projectedDaily = (estimatedCredits / sampledHours) * 24;
+  const projectedMonthly = projectedDaily * 30;
+
+  return [
+    '⚡ <b>HELIUS USAGE — BOT ESTIMATE</b>',
+    '',
+    `Sample: ${sampledHours.toFixed(1)} hours`,
+    `Estimated credits: <b>${Math.round(estimatedCredits).toLocaleString()}</b>`,
+    `Projected 30 days: <b>${Math.round(projectedMonthly).toLocaleString()}</b> / 1,000,000`,
+    '',
+    `Reconciliation calls: ${totals.signatureRequests.toLocaleString()}`,
+    `Transaction lookups: ${totals.transactionRequests.toLocaleString()}`,
+    `WebSocket events: ${totals.websocketNotifications.toLocaleString()}`,
+    `Stored trades: ${totals.storedTrades.toLocaleString()}`,
+    `429 errors: ${totals.rateLimitErrors}`,
+    `RPC failures: ${totals.rpcFailures}`,
+    `Maximum event queue: ${totals.maxQueueDepth}`,
+    '',
+    'Dashboard billing remains the final source of truth; streamed-byte billing is estimated.',
+  ].join('\n');
+}
+
+export async function handleReadiness(): Promise<string> {
+  const state = await loadState();
+  const analytics = await computeAnalytics(
+    config.position.simulatedBankrollSol,
+    state.bankrollSol
+  );
+  const result = evaluatePaperReadiness({
+    completedPositions: analytics.totalCompletedPositions,
+    totalPnlSol: analytics.totalPnlSol,
+    profitFactor: analytics.profitFactor,
+    maxDrawdownPct: analytics.maxDrawdownPct,
+    halted: state.halted,
+  });
+
+  const lines = [
+    '🧪 <b>REAL-SOL READINESS GATE</b>',
+    '',
+    result.ready
+      ? '🟢 Paper evidence gate passed.'
+      : '🟡 Keep paper trading — the evidence gate has not passed yet.',
+    '',
+  ];
+
+  for (const check of result.checks) {
+    lines.push(
+      `${check.passed ? '✅' : '❌'} <b>${check.label}</b>: ${check.actual} (target: ${check.target})`
+    );
+  }
+
+  lines.push(
+    '',
+    'Passing this gate reduces uncertainty; it cannot guarantee future profit. Real trading remains disabled.'
+  );
+
+  return lines.join('\n');
+}
+
 export async function handleResume(): Promise<string> {
   const state = await loadState();
 

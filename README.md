@@ -1,6 +1,6 @@
 # Solana Smart Wallet Tracker
 
-Paper-trading-only Solana wallet monitor with Telegram alerts and a protected, view-only live dashboard. It never signs transactions, holds a private key, or executes real trades.
+Paper-trading-only Solana wallet monitor with Telegram alerts and a protected, view-only live dashboard. It never signs transactions, holds a private key, or executes real trades. Wallet activity arrives through one standard Helius WebSocket connection, with slow RPC reconciliation as a safety net.
 
 ## What runs where
 
@@ -34,6 +34,8 @@ Never expose `SUPABASE_SERVICE_ROLE_KEY`, the Telegram token, viewer token, or a
 ## Database upgrade
 
 Before deploying, paste the complete contents of `supabase/finish-job-migration.sql` into the Supabase SQL editor and run it once. The migration is idempotent and preserves existing rows.
+
+Then apply the timestamped files in `supabase/migrations/` in order. They add the server-only Helius usage samples used by `/heliusstats` and remove only verified duplicate indexes.
 
 Then backfill historical grouping and alert participants once:
 
@@ -80,7 +82,9 @@ The token is exchanged for an HTTP-only cookie and removed from the URL. A frien
 - Viewer and API reads require the replaceable share token cookie.
 - A wallet with no cursor starts at its latest confirmed signature. Normal startup never replays historical swaps.
 - Every inspected signature checkpoints its cursor immediately, so a Railway restart cannot restart a large backfill.
-- Helius requests are sequential and globally paced with exponential 429 backoff. Only fresh, non-dust swaps enter consensus.
+- Helius uses one WebSocket connection with one subscription per active wallet. A five-minute reconciliation pass catches restart or connection gaps without spending credits on 15-second polling.
+- Helius RPC requests are globally paced with exponential 429 backoff. Event and reconciliation paths share signature deduplication, so the same wallet transaction is fetched and stored once whenever possible.
+- Operational usage samples are server-only and power `/heliusstats`; the estimate includes RPC calls and streamed bytes but the Helius dashboard remains the billing source of truth.
 - Both sides of a rapid buy/sell pair are marked as scalps, preventing an earlier scalp buy from creating a false signal.
 - Monitor and position loops do not overlap with themselves.
 - Supabase failures throw instead of silently pretending state was saved.
@@ -93,6 +97,8 @@ The token is exchanged for an HTTP-only cookie and removed from the URL. A frien
 - `/walletstats`
 - `/exitstats`
 - `/scorestats`
+- `/heliusstats`
+- `/readiness`
 - `/resume`
 
 Only messages from `TELEGRAM_CHAT_ID` are accepted.

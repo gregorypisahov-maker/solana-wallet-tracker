@@ -10,7 +10,7 @@
     "paper-trader": "tsx worker/monitor.ts",
     "worker:dev": "tsx watch worker/monitor.ts",
     "telegram-bot": "tsx worker/telegramBot.ts",
-    "test": "node --import tsx --test worker/monitorSafety.test.ts",
+    "test": "node --import tsx --test worker/*.test.ts paper-trader/*.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
