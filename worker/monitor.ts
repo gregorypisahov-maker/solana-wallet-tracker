@@ -26,28 +26,80 @@ import {
 import {
   computeWeightedWalletScore,
 } from "../paper-trader/trustScore";
+import {
+  getRateLimitDelayMs,
+  isFreshTimestamp,
+  readBoundedNumber,
+  RpcPacer,
+} from "./monitorSafety";
 
-const configuredPollIntervalSeconds = Number(
-  process.env.POLL_INTERVAL_SECONDS ?? 15
+const POLL_INTERVAL_SECONDS = readBoundedNumber(
+  process.env.POLL_INTERVAL_SECONDS,
+  15,
+  5,
+  300
 );
 
-const POLL_INTERVAL_SECONDS =
-  Number.isFinite(configuredPollIntervalSeconds) &&
-  configuredPollIntervalSeconds >= 5
-    ? configuredPollIntervalSeconds
-    : 15;
-
-const SCALP_WINDOW_MINUTES = Number(
-  process.env.SCALP_WINDOW_MINUTES ?? 5
+const SCALP_WINDOW_MINUTES = readBoundedNumber(
+  process.env.SCALP_WINDOW_MINUTES,
+  5,
+  1,
+  60
 );
 
-const ALERT_WINDOW_HOURS = Number(
-  process.env.ALERT_WINDOW_HOURS ?? 24
+const ALERT_WINDOW_HOURS = readBoundedNumber(
+  process.env.ALERT_WINDOW_HOURS,
+  24,
+  1,
+  48
+);
+
+const MAX_SIGNATURES_PER_WALLET = Math.floor(
+  readBoundedNumber(
+    process.env.MAX_SIGNATURES_PER_WALLET,
+    50,
+    1,
+    100
+  )
+);
+
+const RPC_MIN_INTERVAL_MS = Math.floor(
+  readBoundedNumber(
+    process.env.RPC_MIN_INTERVAL_MS,
+    500,
+    250,
+    10_000
+  )
+);
+
+const MAX_TRADE_AGE_MS =
+  readBoundedNumber(
+    process.env.MAX_TRADE_AGE_SECONDS,
+    120,
+    30,
+    3_600
+  ) * 1_000;
+
+const SIGNAL_MAX_AGE_MS =
+  readBoundedNumber(
+    process.env.SIGNAL_MAX_AGE_MINUTES,
+    10,
+    1,
+    120
+  ) * 60_000;
+
+const MIN_TRACKED_TRADE_SOL = readBoundedNumber(
+  process.env.MIN_TRACKED_TRADE_SOL,
+  0.01,
+  0,
+  100
 );
 
 const MIN_WALLETS_FOR_ALERT = 3;
 const MIN_SCORE_FOR_ALERT = Number(process.env.MIN_SCORE_FOR_ALERT ?? 8);
-const WALLET_POLL_CONCURRENCY = Math.max(1, Number(process.env.WALLET_POLL_CONCURRENCY ?? 4));
+// Keep Helius requests sequential. A single global pacer still protects the
+// worker if concurrency is raised in a future version.
+const WALLET_POLL_CONCURRENCY = 1;
 const MIN_LIQUIDITY_USD = 10_000;
 const MIN_MARKET_CAP = 10_000;
 const MAX_MARKET_CAP = 3_000_000;
@@ -57,27 +109,37 @@ const supabase = getSupabaseAdmin();
 const connection = getConnection();
 
 const sleep = (ms: number) =>
-  new Promise((resolve) =>
+  new Promise<void>((resolve) =>
     setTimeout(resolve, ms)
   );
+
+const rpcPacer = new RpcPacer(
+  RPC_MIN_INTERVAL_MS,
+  Date.now,
+  sleep
+);
 
 function throwIfError(label: string, error: { message: string } | null): void {
   if (error) throw new Error(`${label}: ${error.message}`);
 }
 
-async function mapWithConcurrency<T>(
+async function mapWithConcurrency<T, R>(
   values: T[],
   concurrency: number,
-  task: (value: T) => Promise<void>
-): Promise<void> {
+  task: (value: T) => Promise<R>
+): Promise<R[]> {
   let next = 0;
+  const results = new Array<R>(values.length);
+
   async function worker(): Promise<void> {
     while (next < values.length) {
       const index = next++;
-      await task(values[index]);
+      results[index] = await task(values[index]);
     }
   }
+
   await Promise.all(Array.from({ length: Math.min(concurrency, values.length) }, worker));
+  return results;
 }
 
 function isRateLimitError(err: any): boolean {
@@ -101,7 +163,14 @@ async function withRetry<T>(
       return await fn();
     } catch (err) {
       if (isRateLimitError(err)) {
-        const waitMs = 3000 * (i + 1);
+        if (i === retries) {
+          console.error(
+            `[429] ${label}. Retry budget exhausted`
+          );
+          return null;
+        }
+
+        const waitMs = getRateLimitDelayMs(i);
 
         console.warn(
           `[429] ${label}. Waiting ${waitMs}ms`
@@ -123,47 +192,109 @@ async function withRetry<T>(
   return null;
 }
 
+async function checkpointWalletCursor(
+  walletAddress: string,
+  signature: string
+): Promise<void> {
+  const { error } = await supabase
+    .from("wallets")
+    .update({
+      last_signature: signature,
+    })
+    .eq("address", walletAddress);
+
+  throwIfError("Failed to checkpoint wallet cursor", error);
+}
+
+async function fetchWalletSignatures(
+  walletAddress: string,
+  untilSignature: string | null,
+  limit: number
+) {
+  return withRetry(
+    `fetch signatures ${walletAddress.slice(0, 6)}`,
+    () =>
+      rpcPacer.run(() =>
+        fetchNewSignatures(
+          connection,
+          walletAddress,
+          untilSignature,
+          limit
+        )
+      )
+  );
+}
+
 async function pollWallet(wallet: {
   address: string;
   last_signature: string | null;
-}): Promise<void> {
-  let newest = wallet.last_signature;
+}): Promise<number> {
+  // A newly added wallet must start at "now". Replaying its history creates
+  // false consensus, burns RPC quota, and can loop forever if Railway restarts
+  // before the old cursor-at-end implementation finishes.
+  if (!wallet.last_signature) {
+    const latest = await fetchWalletSignatures(
+      wallet.address,
+      null,
+      1
+    );
 
-  const sigs = await withRetry(
-    `fetch signatures ${wallet.address.slice(
-      0,
-      6
-    )}`,
-    () =>
-      fetchNewSignatures(
-        connection,
+    const latestSignature = latest?.[0]?.signature;
+
+    if (latestSignature) {
+      await checkpointWalletCursor(
         wallet.address,
-        wallet.last_signature,
-        250
-      )
+        latestSignature
+      );
+
+      console.log(
+        `[cursor] ${wallet.address.slice(0, 6)}… initialized; ` +
+          "historical transactions skipped"
+      );
+    }
+
+    return 0;
+  }
+
+  const sigs = await fetchWalletSignatures(
+    wallet.address,
+    wallet.last_signature,
+    MAX_SIGNATURES_PER_WALLET
   );
 
   if (!sigs?.length) {
-    return;
+    return 0;
   }
 
-  for (const sigInfo of sigs) {
-    await sleep(500);
+  if (sigs.length === MAX_SIGNATURES_PER_WALLET) {
+    console.warn(
+      `[cursor] ${wallet.address.slice(0, 6)}… backlog capped at ` +
+        `${MAX_SIGNATURES_PER_WALLET}; prioritizing the newest activity`
+    );
+  }
 
+  let newTrades = 0;
+
+  for (const sigInfo of sigs) {
     const tx = await withRetry(
-      `fetch tx ${sigInfo.signature.slice(
-        0,
-        8
-      )}`,
+      `fetch tx ${sigInfo.signature.slice(0, 8)}`,
       () =>
-        getParsedTx(
-          connection,
-          sigInfo.signature
+        rpcPacer.run(() =>
+          getParsedTx(
+            connection,
+            sigInfo.signature
+          )
         )
     );
 
+    // Never advance past a transaction we failed to inspect. The next cycle
+    // will retry it instead of silently losing a possible trade.
     if (!tx) {
-      continue;
+      console.warn(
+        `[cursor] ${wallet.address.slice(0, 6)}… stopped before ` +
+          `${sigInfo.signature.slice(0, 8)} after RPC failure`
+      );
+      break;
     }
 
     const trade = extractTrade(
@@ -171,9 +302,37 @@ async function pollWallet(wallet: {
       wallet.address
     );
 
-    newest = sigInfo.signature;
-
     if (!trade) {
+      await checkpointWalletCursor(
+        wallet.address,
+        sigInfo.signature
+      );
+      continue;
+    }
+
+    // Old swaps are useful for analytics only if deliberately backfilled.
+    // They must never create a delayed paper entry during normal monitoring.
+    if (
+      !isFreshTimestamp(
+        trade.txTime,
+        Date.now(),
+        MAX_TRADE_AGE_MS
+      )
+    ) {
+      await checkpointWalletCursor(
+        wallet.address,
+        sigInfo.signature
+      );
+      continue;
+    }
+
+    // Dust swaps were responsible for much of the 0.001 SOL log noise and
+    // cannot contribute meaningfully to the one-SOL consensus threshold.
+    if (trade.solAmount < MIN_TRACKED_TRADE_SOL) {
+      await checkpointWalletCursor(
+        wallet.address,
+        sigInfo.signature
+      );
       continue;
     }
 
@@ -196,97 +355,89 @@ async function pollWallet(wallet: {
       await supabase
         .from("wallet_transactions")
         .select("id")
-        .eq(
-          "wallet_address",
-          wallet.address
-        )
-        .eq(
-          "token_mint",
-          trade.tokenMint
-        )
+        .eq("wallet_address", wallet.address)
+        .eq("token_mint", trade.tokenMint)
         .eq("side", oppositeSide)
-        .gte(
-          "tx_time",
-          windowStart.toISOString()
-        )
-        .lte(
-          "tx_time",
-          windowEnd.toISOString()
-        )
-        .limit(1);
+        .gte("tx_time", windowStart.toISOString())
+        .lte("tx_time", windowEnd.toISOString());
     throwIfError("Failed to check scalp window", nearbyError);
 
-    const isScalp =
-      !!nearbyOpposite?.length;
+    const oppositeIds = (nearbyOpposite ?? []).map(
+      (row) => row.id
+    );
+    const isScalp = oppositeIds.length > 0;
 
-    const { error: tradeError } = await supabase
+    // Mark both legs. Previously only the second leg was marked as a scalp,
+    // leaving the earlier buy eligible to create a false consensus signal.
+    if (oppositeIds.length > 0) {
+      const { error: oppositeUpdateError } = await supabase
+        .from("wallet_transactions")
+        .update({ is_scalp: true })
+        .in("id", oppositeIds);
+      throwIfError(
+        "Failed to mark opposite scalp trades",
+        oppositeUpdateError
+      );
+    }
+
+    const { data: storedRows, error: tradeError } = await supabase
       .from("wallet_transactions")
       .upsert(
         {
-          wallet_address:
-            wallet.address,
-          signature:
-            trade.signature,
-          token_mint:
-            trade.tokenMint,
-          side:
-            trade.side,
-          sol_amount:
-            trade.solAmount,
-          token_amount:
-            trade.tokenAmount,
-          tx_time:
-            trade.txTime.toISOString(),
-          is_scalp:
-            isScalp,
+          wallet_address: wallet.address,
+          signature: trade.signature,
+          token_mint: trade.tokenMint,
+          side: trade.side,
+          sol_amount: trade.solAmount,
+          token_amount: trade.tokenAmount,
+          tx_time: trade.txTime.toISOString(),
+          is_scalp: isScalp,
         },
         {
           onConflict:
             "wallet_address,signature,token_mint,side",
+          ignoreDuplicates: true,
         }
-      );
+      )
+      .select("id");
     throwIfError("Failed to store wallet transaction", tradeError);
 
+    // Checkpoint immediately. A container stop can now replay at most the one
+    // signature that was in flight, and the unique upsert suppresses even that.
+    await checkpointWalletCursor(
+      wallet.address,
+      sigInfo.signature
+    );
+
+    if (!storedRows?.length) {
+      continue;
+    }
+
+    newTrades += 1;
+
     console.log(
-      `[trade] ${wallet.address.slice(
-        0,
-        6
-      )}… ${trade.side.toUpperCase()} ` +
-        `${trade.tokenMint.slice(
-          0,
-          6
-        )}… ${trade.solAmount.toFixed(
-          3
-        )} SOL` +
+      `[trade] ${wallet.address.slice(0, 6)}… ` +
+        `${trade.side.toUpperCase()} ${trade.tokenMint.slice(0, 6)}… ` +
+        `${trade.solAmount.toFixed(3)} SOL` +
         `${isScalp ? " (SCALP)" : ""}`
     );
   }
 
-  if (
-    newest &&
-    newest !== wallet.last_signature
-  ) {
-    const { error: cursorError } = await supabase
-      .from("wallets")
-      .update({
-        last_signature: newest,
-      })
-      .eq(
-        "address",
-        wallet.address
-      );
-    throwIfError("Failed to update wallet cursor", cursorError);
-  }
+  return newTrades;
 }
 
 async function recomputeConsensus(): Promise<void> {
+  const now = Date.now();
   const windowStart = new Date(
-    Date.now() -
+    now -
       ALERT_WINDOW_HOURS *
         60 *
         60 *
         1000
   ).toISOString();
+  const freshSignalCutoff = new Date(
+    now - SIGNAL_MAX_AGE_MS
+  );
 
   const { data: buys, error } =
     await supabase
@@ -395,6 +546,7 @@ async function recomputeConsensus(): Promise<void> {
     ([tokenMint, agg]) =>
       agg.wallets.size >= MIN_WALLETS_FOR_ALERT &&
       agg.totalSol >= MIN_TOTAL_SOL &&
+      agg.last >= freshSignalCutoff &&
       !recentlyAlertedMints.has(tokenMint)
   );
 
@@ -442,6 +594,7 @@ async function recomputeConsensus(): Promise<void> {
           tokenMint
         )
         .eq("side", "sell")
+        .eq("is_scalp", false)
         .gte(
           "tx_time",
           windowStart
@@ -752,24 +905,43 @@ async function runCycle(): Promise<void> {
     `Monitoring ${wallets.length} wallets`
   );
 
-  await mapWithConcurrency(wallets, WALLET_POLL_CONCURRENCY, async (wallet) => {
+  const tradeCounts = await mapWithConcurrency(
+    wallets,
+    WALLET_POLL_CONCURRENCY,
+    async (wallet) => {
     try {
-      await pollWallet(wallet);
+      return await pollWallet(wallet);
     } catch (error) {
       console.error(`[wallet] ${wallet.address.slice(0, 6)}… poll failed:`, error);
+      return 0;
     }
-  });
-
-  await recomputeConsensus();
-
-  console.log(
-    "=== Cycle complete ==="
+    }
   );
+
+  const newTrades = tradeCounts.reduce(
+    (total, count) => total + count,
+    0
+  );
+
+  if (newTrades > 0) {
+    await recomputeConsensus();
+  } else {
+    console.log(
+      "[consensus] skipped; no new significant trades"
+    );
+  }
+
+  console.log(`=== Cycle complete: ${newTrades} new trades ===`);
 }
 
 async function main(): Promise<void> {
   console.log(
     `Solana wallet tracker worker starting. Polling every ${POLL_INTERVAL_SECONDS} sec.`
+  );
+  console.log(
+    `RPC pacing: one request every ${RPC_MIN_INTERVAL_MS}ms; ` +
+      `fresh trades only (${MAX_TRADE_AGE_MS / 1_000}s); ` +
+      `minimum ${MIN_TRACKED_TRADE_SOL} SOL`
   );
 
   if (
@@ -846,4 +1018,3 @@ main().catch((err) => {
 
   process.exit(1);
 });
-
