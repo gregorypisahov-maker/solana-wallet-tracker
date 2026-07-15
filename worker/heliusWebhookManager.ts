@@ -9,11 +9,19 @@ interface HeliusWebhookRecord {
   webhookType?: string;
   transactionTypes?: string[];
   accountAddresses?: string[];
+  authHeader?: string;
+  active?: boolean;
 }
 
 export interface EnsureHeliusWebhookResult {
   active: boolean;
-  action: "existing" | "created" | "updated" | "conflict" | "failed";
+  action:
+    | "existing"
+    | "created"
+    | "updated"
+    | "reactivated"
+    | "conflict"
+    | "failed";
   webhookId?: string;
   message?: string;
 }
@@ -65,10 +73,13 @@ export async function ensureHeliusSwapWebhook(options: {
 
     if (existing?.webhookID) {
       const alreadyMatches =
-        existing.webhookType === "enhanced" &&
+        (existing.webhookType === undefined ||
+          existing.webhookType === "enhanced") &&
         sameStrings(existing.transactionTypes, ["SWAP"]) &&
-        sameStrings(existing.accountAddresses, desiredAddresses);
-      if (alreadyMatches) {
+        sameStrings(existing.accountAddresses, desiredAddresses) &&
+        (existing.authHeader === undefined ||
+          existing.authHeader === body.authHeader);
+      if (alreadyMatches && existing.active !== false) {
         return {
           active: true,
           action: "existing",
@@ -80,21 +91,38 @@ export async function ensureHeliusSwapWebhook(options: {
         `https://mainnet.helius-rpc.com/v0/webhooks/${existing.webhookID}`
       );
       updateUrl.searchParams.set("api-key", apiKey);
-      const updateResponse = await fetchImpl(updateUrl, {
-        method: "PUT",
-        headers,
-        body: JSON.stringify(body),
-      });
-      if (!updateResponse.ok) {
-        return {
-          active: false,
-          action: "failed",
-          message: `update failed (${updateResponse.status})`,
-        };
+      if (!alreadyMatches) {
+        const updateResponse = await fetchImpl(updateUrl, {
+          method: "PUT",
+          headers,
+          body: JSON.stringify(body),
+        });
+        if (!updateResponse.ok) {
+          return {
+            active: false,
+            action: "failed",
+            message: `update failed (${updateResponse.status})`,
+          };
+        }
+      }
+
+      if (existing.active === false) {
+        const toggleResponse = await fetchImpl(updateUrl, {
+          method: "PATCH",
+          headers,
+          body: JSON.stringify({ active: true }),
+        });
+        if (!toggleResponse.ok) {
+          return {
+            active: false,
+            action: "failed",
+            message: `reactivation failed (${toggleResponse.status})`,
+          };
+        }
       }
       return {
         active: true,
-        action: "updated",
+        action: existing.active === false ? "reactivated" : "updated",
         webhookId: existing.webhookID,
       };
     }

@@ -55,3 +55,38 @@ test("ensureHeliusSwapWebhook does not overwrite an unrelated Free-plan webhook"
   assert.equal(result.active, false);
   assert.equal(result.action, "conflict");
 });
+
+test("ensureHeliusSwapWebhook reactivates a disabled matching webhook", async () => {
+  const methods: string[] = [];
+  const fetchImpl = (async (_input: URL | RequestInfo, init?: RequestInit) => {
+    const method = init?.method ?? "GET";
+    methods.push(method);
+    if (method === "GET") {
+      return new Response(
+        JSON.stringify([
+          {
+            webhookID: "disabled",
+            webhookURL: "https://example.com/api/helius",
+            transactionTypes: ["SWAP"],
+            accountAddresses: ["wallet"],
+            active: false,
+          },
+        ]),
+        { status: 200 }
+      );
+    }
+    return new Response(JSON.stringify({ active: true }), { status: 200 });
+  }) as typeof fetch;
+
+  const result = await ensureHeliusSwapWebhook({
+    rpcUrl: "https://mainnet.helius-rpc.com/?api-key=secret",
+    serviceRoleKey: "service-secret",
+    webhookUrl: "https://example.com/api/helius",
+    accountAddresses: ["wallet"],
+    fetchImpl,
+  });
+
+  assert.equal(result.active, true);
+  assert.equal(result.action, "reactivated");
+  assert.deepEqual(methods, ["GET", "PATCH"]);
+});
