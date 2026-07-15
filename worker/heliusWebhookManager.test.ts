@@ -90,3 +90,41 @@ test("ensureHeliusSwapWebhook reactivates a disabled matching webhook", async ()
   assert.equal(result.action, "reactivated");
   assert.deepEqual(methods, ["GET", "PATCH"]);
 });
+
+test("ensureHeliusSwapWebhook migrates the retired Vercel receiver", async () => {
+  const methods: string[] = [];
+  const fetchImpl = (async (_input: URL | RequestInfo, init?: RequestInit) => {
+    const method = init?.method ?? "GET";
+    methods.push(method);
+    if (method === "GET") {
+      return new Response(
+        JSON.stringify([
+          {
+            webhookID: "legacy",
+            webhookURL: "https://solana-wallet-tracker.vercel.app/api/helius",
+            transactionTypes: ["SWAP"],
+            accountAddresses: ["wallet"],
+            active: true,
+          },
+        ]),
+        { status: 200 }
+      );
+    }
+    return new Response(JSON.stringify({ webhookID: "legacy" }), {
+      status: 200,
+    });
+  }) as typeof fetch;
+
+  const result = await ensureHeliusSwapWebhook({
+    rpcUrl: "https://mainnet.helius-rpc.com/?api-key=secret",
+    serviceRoleKey: "service-secret",
+    webhookUrl:
+      "https://project.supabase.co/functions/v1/helius-webhook",
+    accountAddresses: ["wallet"],
+    fetchImpl,
+  });
+
+  assert.equal(result.active, true);
+  assert.equal(result.action, "updated");
+  assert.deepEqual(methods, ["GET", "PUT"]);
+});
