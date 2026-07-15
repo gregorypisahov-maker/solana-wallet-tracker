@@ -10,9 +10,10 @@ test("estimateHeliusCredits combines RPC calls and streamed data", () => {
     estimateHeliusCredits({
       signatureRequests: 20,
       transactionRequests: 30,
+      webhookEvents: 5,
       websocketBytes: 100_001,
     }),
-    54
+    59
   );
 });
 

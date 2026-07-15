@@ -44,13 +44,28 @@ import {
   estimateHeliusCredits,
   HeliusUsageTracker,
 } from "./heliusUsage";
+import { ensureHeliusSwapWebhook } from "./heliusWebhookManager";
 
 const RECONCILE_INTERVAL_SECONDS = readBoundedNumber(
   process.env.RECONCILE_INTERVAL_SECONDS,
+  900,
   300,
-  60,
   1_800
 );
+
+const CONSENSUS_REFRESH_INTERVAL_SECONDS = readBoundedNumber(
+  process.env.CONSENSUS_REFRESH_INTERVAL_SECONDS,
+  30,
+  10,
+  300
+);
+
+const HELIUS_WEBHOOK_URL =
+  process.env.HELIUS_WEBHOOK_URL ??
+  "https://solana-wallet-tracker.vercel.app/api/helius";
+const HELIUS_EVENT_MODE = (
+  process.env.HELIUS_EVENT_MODE ?? "auto"
+).toLowerCase();
 
 const WALLET_REFRESH_INTERVAL_SECONDS = readBoundedNumber(
   process.env.WALLET_REFRESH_INTERVAL_SECONDS,
@@ -148,6 +163,9 @@ const processedSignatures = new SignatureDeduper(
 const inFlightSignatures = new Map<string, Promise<SignatureProcessResult>>();
 const walletProcessingTails = new Map<string, Promise<void>>();
 const walletSubscriptions = new Map<string, number>();
+let webhookMode = false;
+let lastWebhookAddressKey = "";
+let lastWebhookCheckAt = 0;
 
 const sleep = (ms: number) =>
   new Promise<void>((resolve) =>
@@ -472,6 +490,18 @@ async function pollWallet(wallet: {
       );
     }
 
+    return 0;
+  }
+
+  // A filtered enhanced webhook already delivered and parsed every successful
+  // SWAP. Reconciliation only keeps a recent cursor so a future fallback does
+  // not replay webhook-era activity through getTransaction.
+  if (webhookMode) {
+    const latest = await fetchWalletSignatures(wallet.address, null, 1);
+    const latestSignature = latest?.[0]?.signature;
+    if (latestSignature && latestSignature !== wallet.last_signature) {
+      await checkpointWalletCursor(wallet.address, latestSignature);
+    }
     return 0;
   }
 
@@ -1050,6 +1080,57 @@ function getWalletEventQueue(
 
 const activeWalletAddresses = new Set<string>();
 
+async function syncHeliusWebhook(addresses: string[]): Promise<boolean> {
+  if (HELIUS_EVENT_MODE === "websocket") {
+    webhookMode = false;
+    return false;
+  }
+
+  const rpcUrl = process.env.HELIUS_RPC_URL;
+  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!rpcUrl || !serviceRoleKey) {
+    webhookMode = false;
+    return false;
+  }
+
+  const addressKey = [...addresses].sort().join(",");
+  const now = Date.now();
+  if (
+    webhookMode &&
+    addressKey === lastWebhookAddressKey &&
+    now - lastWebhookCheckAt < 10 * 60_000
+  ) {
+    return true;
+  }
+
+  const result = await ensureHeliusSwapWebhook({
+    rpcUrl,
+    serviceRoleKey,
+    webhookUrl: HELIUS_WEBHOOK_URL,
+    accountAddresses: addresses,
+  });
+  lastWebhookCheckAt = now;
+
+  if (!result.active) {
+    webhookMode = false;
+    console.warn(
+      `[helius-webhook] ${result.action}: ${result.message ?? "not active"}; ` +
+        "using WebSocket fallback"
+    );
+    return false;
+  }
+
+  if (!webhookMode || result.action !== "existing") {
+    console.log(
+      `[helius-webhook] ${result.action}; filtered SWAP delivery active for ` +
+        `${addresses.length} wallets`
+    );
+  }
+  webhookMode = true;
+  lastWebhookAddressKey = addressKey;
+  return true;
+}
+
 function handleWalletLogs(walletAddress: string, logs: Logs): void {
   usage.increment("websocketNotifications");
   usage.increment(
@@ -1087,6 +1168,25 @@ async function syncWalletSubscriptions(): Promise<void> {
   const desired = new Set((wallets ?? []).map((wallet) => wallet.address));
   activeWalletAddresses.clear();
   for (const address of desired) activeWalletAddresses.add(address);
+
+  const webhookActive = await syncHeliusWebhook([...desired]);
+
+  if (webhookActive) {
+    for (const [address, subscriptionId] of walletSubscriptions) {
+      try {
+        await connection.removeOnLogsListener(subscriptionId);
+      } catch (error) {
+        console.warn(
+          `[websocket] Failed to close fallback subscription ${address.slice(0, 6)}…:`,
+          error
+        );
+      } finally {
+        walletSubscriptions.delete(address);
+      }
+    }
+    console.log("[helius-webhook] WebSocket fallback is idle");
+    return;
+  }
 
   for (const [address, subscriptionId] of walletSubscriptions) {
     if (desired.has(address)) continue;
@@ -1158,6 +1258,7 @@ async function persistHeliusUsageInner(): Promise<void> {
         recorded_at: snapshot.capturedAt,
         signature_requests: snapshot.signatureRequests,
         transaction_requests: snapshot.transactionRequests,
+        webhook_events: snapshot.webhookEvents,
         websocket_notifications: snapshot.websocketNotifications,
         websocket_bytes: snapshot.websocketBytes,
         rate_limit_errors: snapshot.rateLimitErrors,
@@ -1165,6 +1266,7 @@ async function persistHeliusUsageInner(): Promise<void> {
         stored_trades: snapshot.storedTrades,
         duplicate_events: snapshot.duplicateEvents,
         max_queue_depth: snapshot.maxQueueDepth,
+        mode: webhookMode ? "webhook" : "websocket",
       },
       { onConflict: "instance_id,period_started_at" }
     );
@@ -1179,6 +1281,7 @@ async function persistHeliusUsageInner(): Promise<void> {
     `[helius-usage] estimated ${estimateHeliusCredits({
       signatureRequests: snapshot.signatureRequests,
       transactionRequests: snapshot.transactionRequests,
+      webhookEvents: snapshot.webhookEvents,
       websocketBytes: snapshot.websocketBytes,
     })} credits since ${snapshot.periodStartedAt}; ` +
       `${snapshot.rateLimitErrors} rate limits; max queue ${snapshot.maxQueueDepth}`
@@ -1250,7 +1353,7 @@ async function runCycle(): Promise<void> {
 
 async function main(): Promise<void> {
   console.log(
-    "Solana wallet tracker worker starting in WebSocket-first mode."
+    "Solana wallet tracker worker starting in filtered-webhook-first mode."
   );
   console.log(
     `RPC pacing: one request every ${RPC_MIN_INTERVAL_MS}ms; ` +
@@ -1260,6 +1363,10 @@ async function main(): Promise<void> {
   );
 
   await syncWalletSubscriptions();
+
+  // Webhook inserts happen in the public HTTPS route, so refresh consensus on
+  // a small database-only cadence. This uses no Helius credits.
+  setInterval(() => scheduleConsensusRecompute(), CONSENSUS_REFRESH_INTERVAL_SECONDS * 1_000);
 
   let syncingSubscriptions = false;
   setInterval(() => {
@@ -1294,7 +1401,9 @@ async function main(): Promise<void> {
       .TELEGRAM_CHAT_ID
   ) {
     await sendTelegramAlert(
-      "✅ Solana wallet tracker started in credit-saving WebSocket mode. Telegram alerts are working."
+      `✅ Solana wallet tracker started in credit-saving ${
+        webhookMode ? "filtered webhook" : "WebSocket fallback"
+      } mode. Telegram alerts are working.`
     );
   } else {
     console.log(
