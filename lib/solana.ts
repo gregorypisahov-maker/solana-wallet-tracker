@@ -5,7 +5,13 @@ const WSOL_MINT = "So11111111111111111111111111111111111111112";
 export function getConnection() {
   const url = process.env.HELIUS_RPC_URL;
   if (!url) throw new Error("Missing HELIUS_RPC_URL");
-  return new Connection(url, "confirmed");
+  return new Connection(url, {
+    commitment: "confirmed",
+    // @solana/web3.js otherwise retries 429 responses every 500ms internally,
+    // which creates a retry storm. The monitor owns exponential backoff and
+    // global request pacing instead.
+    disableRetryOnRateLimit: true,
+  });
 }
 
 export interface DetectedTrade {
@@ -25,7 +31,7 @@ export async function fetchNewSignatures(
   connection: Connection,
   address: string,
   untilSignature: string | null,
-  maxSignatures = 250
+  maxSignatures = 50
 ) {
   const pubkey = new PublicKey(address);
   const sigs: ConfirmedSignatureInfo[] = [];
