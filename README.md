@@ -82,9 +82,9 @@ The token is exchanged for an HTTP-only cookie and removed from the URL. A frien
 - Viewer and API reads require the replaceable share token cookie.
 - A wallet with no cursor starts at its latest confirmed signature. Normal startup never replays historical swaps.
 - Every inspected signature checkpoints its cursor immediately, so a Railway restart cannot restart a large backfill.
-- Helius uses one WebSocket connection with one subscription per active wallet. A five-minute reconciliation pass catches restart or connection gaps without spending credits on 15-second polling.
-- Helius RPC requests are globally paced with exponential 429 backoff. Event and reconciliation paths share signature deduplication, so the same wallet transaction is fetched and stored once whenever possible.
-- Operational usage samples are server-only and power `/heliusstats`; the estimate includes RPC calls and streamed bytes but the Helius dashboard remains the billing source of truth.
+- The worker automatically creates one Helius Enhanced Webhook filtered to successful `SWAP` events for the active wallets. Helius charges one credit per delivered event, and the parsed balance changes avoid a `getTransaction` lookup for every non-trade wallet action. A standard WebSocket remains the automatic fallback if the webhook cannot activate.
+- A 15-minute signatures-only reconciliation keeps cursors current without refetching webhook-era transactions. Fallback RPC calls are globally paced with exponential 429 backoff, and duplicate signatures are suppressed in memory and Postgres.
+- Operational usage samples are server-only and power `/heliusstats`; the estimate includes filtered webhook events, fallback RPC calls, and streamed bytes, but the Helius dashboard remains the billing source of truth.
 - Both sides of a rapid buy/sell pair are marked as scalps, preventing an earlier scalp buy from creating a false signal.
 - Monitor and position loops do not overlap with themselves.
 - Supabase failures throw instead of silently pretending state was saved.

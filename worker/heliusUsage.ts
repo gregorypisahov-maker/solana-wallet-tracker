@@ -3,6 +3,7 @@ export interface HeliusUsageSnapshot {
   capturedAt: string;
   signatureRequests: number;
   transactionRequests: number;
+  webhookEvents: number;
   websocketNotifications: number;
   websocketBytes: number;
   rateLimitErrors: number;
@@ -22,6 +23,7 @@ export class HeliusUsageTracker {
   private readonly counters: Record<CounterName, number> = {
     signatureRequests: 0,
     transactionRequests: 0,
+    webhookEvents: 0,
     websocketNotifications: 0,
     websocketBytes: 0,
     rateLimitErrors: 0,
@@ -71,11 +73,13 @@ export class HeliusUsageTracker {
 export function estimateHeliusCredits(input: {
   signatureRequests: number;
   transactionRequests: number;
+  webhookEvents?: number;
   websocketBytes: number;
 }): number {
   const rpcCredits =
     Math.max(0, input.signatureRequests) +
-    Math.max(0, input.transactionRequests);
+    Math.max(0, input.transactionRequests) +
+    Math.max(0, input.webhookEvents ?? 0);
   const websocketCredits =
     input.websocketBytes > 0
       ? Math.ceil(input.websocketBytes / 100_000) * 2

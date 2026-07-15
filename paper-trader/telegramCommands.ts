@@ -147,7 +147,7 @@ export async function handleHeliusStats(): Promise<string> {
   const { data, error } = await supabase
     .from('monitor_usage_samples')
     .select(
-      'period_started_at, recorded_at, signature_requests, transaction_requests, websocket_notifications, websocket_bytes, rate_limit_errors, rpc_failures, stored_trades, max_queue_depth'
+      'period_started_at, recorded_at, signature_requests, transaction_requests, webhook_events, websocket_notifications, websocket_bytes, rate_limit_errors, rpc_failures, stored_trades, max_queue_depth, mode'
     )
     .gte('recorded_at', since)
     .order('recorded_at', { ascending: true });
@@ -165,10 +165,21 @@ export async function handleHeliusStats(): Promise<string> {
     ].join('\n');
   }
 
-  const totals = data.reduce(
+  const latestMode = data[data.length - 1].mode ?? 'websocket';
+  let currentModeStart = data.length - 1;
+  while (
+    currentModeStart > 0 &&
+    (data[currentModeStart - 1].mode ?? 'websocket') === latestMode
+  ) {
+    currentModeStart -= 1;
+  }
+  const currentData = data.slice(currentModeStart);
+
+  const totals = currentData.reduce(
     (sum, row) => ({
       signatureRequests: sum.signatureRequests + Number(row.signature_requests),
       transactionRequests: sum.transactionRequests + Number(row.transaction_requests),
+      webhookEvents: sum.webhookEvents + Number(row.webhook_events),
       websocketNotifications:
         sum.websocketNotifications + Number(row.websocket_notifications),
       websocketBytes: sum.websocketBytes + Number(row.websocket_bytes),
@@ -180,6 +191,7 @@ export async function handleHeliusStats(): Promise<string> {
     {
       signatureRequests: 0,
       transactionRequests: 0,
+      webhookEvents: 0,
       websocketNotifications: 0,
       websocketBytes: 0,
       rateLimitErrors: 0,
@@ -190,8 +202,8 @@ export async function handleHeliusStats(): Promise<string> {
   );
 
   const estimatedCredits = estimateHeliusCredits(totals);
-  const firstStartedAt = Date.parse(data[0].period_started_at);
-  const lastRecordedAt = Date.parse(data[data.length - 1].recorded_at);
+  const firstStartedAt = Date.parse(currentData[0].period_started_at);
+  const lastRecordedAt = Date.parse(currentData[currentData.length - 1].recorded_at);
   const sampledHours = Math.max(
     0.25,
     (lastRecordedAt - firstStartedAt) / 3_600_000
@@ -202,12 +214,14 @@ export async function handleHeliusStats(): Promise<string> {
   return [
     '⚡ <b>HELIUS USAGE — BOT ESTIMATE</b>',
     '',
+    `Mode: <b>${latestMode === 'webhook' ? 'Filtered SWAP webhook' : 'WebSocket fallback'}</b>`,
     `Sample: ${sampledHours.toFixed(1)} hours`,
     `Estimated credits: <b>${Math.round(estimatedCredits).toLocaleString()}</b>`,
     `Projected 30 days: <b>${Math.round(projectedMonthly).toLocaleString()}</b> / 1,000,000`,
     '',
     `Reconciliation calls: ${totals.signatureRequests.toLocaleString()}`,
     `Transaction lookups: ${totals.transactionRequests.toLocaleString()}`,
+    `Filtered webhook events: ${totals.webhookEvents.toLocaleString()}`,
     `WebSocket events: ${totals.websocketNotifications.toLocaleString()}`,
     `Stored trades: ${totals.storedTrades.toLocaleString()}`,
     `429 errors: ${totals.rateLimitErrors}`,
