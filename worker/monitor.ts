@@ -1,4 +1,6 @@
 import "dotenv/config";
+import { randomUUID } from "node:crypto";
+import { Logs, PublicKey } from "@solana/web3.js";
 import {
   getConnection,
   fetchNewSignatures,
@@ -32,12 +34,43 @@ import {
   readBoundedNumber,
   RpcPacer,
 } from "./monitorSafety";
+import {
+  SerialEventQueue,
+  SignatureDeduper,
+  signatureEventKey,
+  WalletSignatureEvent,
+} from "./eventIntake";
+import {
+  estimateHeliusCredits,
+  HeliusUsageTracker,
+} from "./heliusUsage";
 
-const POLL_INTERVAL_SECONDS = readBoundedNumber(
-  process.env.POLL_INTERVAL_SECONDS,
+const RECONCILE_INTERVAL_SECONDS = readBoundedNumber(
+  process.env.RECONCILE_INTERVAL_SECONDS,
+  300,
+  60,
+  1_800
+);
+
+const WALLET_REFRESH_INTERVAL_SECONDS = readBoundedNumber(
+  process.env.WALLET_REFRESH_INTERVAL_SECONDS,
+  60,
   15,
-  5,
-  300
+  600
+);
+
+const EVENT_DEDUPE_MINUTES = readBoundedNumber(
+  process.env.EVENT_DEDUPE_MINUTES,
+  30,
+  10,
+  180
+);
+
+const USAGE_FLUSH_INTERVAL_SECONDS = readBoundedNumber(
+  process.env.USAGE_FLUSH_INTERVAL_SECONDS,
+  900,
+  60,
+  3_600
 );
 
 const SCALP_WINDOW_MINUTES = readBoundedNumber(
@@ -57,17 +90,17 @@ const ALERT_WINDOW_HOURS = readBoundedNumber(
 const MAX_SIGNATURES_PER_WALLET = Math.floor(
   readBoundedNumber(
     process.env.MAX_SIGNATURES_PER_WALLET,
-    50,
+    500,
     1,
-    100
+    1_000
   )
 );
 
 const RPC_MIN_INTERVAL_MS = Math.floor(
   readBoundedNumber(
     process.env.RPC_MIN_INTERVAL_MS,
-    500,
-    250,
+    200,
+    125,
     10_000
   )
 );
@@ -107,6 +140,13 @@ const MIN_TOTAL_SOL = 1;
 
 const supabase = getSupabaseAdmin();
 const connection = getConnection();
+const processInstanceId = randomUUID();
+const usage = new HeliusUsageTracker();
+const processedSignatures = new SignatureDeduper(
+  EVENT_DEDUPE_MINUTES * 60_000
+);
+const inFlightSignatures = new Map<string, Promise<SignatureProcessResult>>();
+const walletSubscriptions = new Map<string, number>();
 
 const sleep = (ms: number) =>
   new Promise<void>((resolve) =>
@@ -156,14 +196,23 @@ function isRateLimitError(err: any): boolean {
 async function withRetry<T>(
   label: string,
   fn: () => Promise<T>,
-  retries = 3
+  retries = 3,
+  trackHelius = false
 ): Promise<T | null> {
   for (let i = 0; i <= retries; i++) {
     try {
       return await fn();
     } catch (err) {
       if (isRateLimitError(err)) {
+        if (trackHelius) {
+          usage.increment("rateLimitErrors");
+        }
+
         if (i === retries) {
+          if (trackHelius) {
+            usage.increment("rpcFailures");
+          }
+
           console.error(
             `[429] ${label}. Retry budget exhausted`
           );
@@ -184,6 +233,10 @@ async function withRetry<T>(
         `[error] ${label}:`,
         err
       );
+
+      if (trackHelius) {
+        usage.increment("rpcFailures");
+      }
 
       return null;
     }
@@ -219,10 +272,159 @@ async function fetchWalletSignatures(
           connection,
           walletAddress,
           untilSignature,
-          limit
+          limit,
+          () => usage.increment("signatureRequests")
         )
-      )
+      ),
+    3,
+    true
   );
+}
+
+async function fetchParsedTransaction(signature: string) {
+  return withRetry(
+    `fetch tx ${signature.slice(0, 8)}`,
+    () =>
+      rpcPacer.run(() => {
+        usage.increment("transactionRequests");
+        return getParsedTx(connection, signature);
+      }),
+    3,
+    true
+  );
+}
+
+type SignatureProcessResult =
+  | "already_processed"
+  | "retry"
+  | "ignored"
+  | "duplicate"
+  | "new_trade";
+
+async function processWalletSignatureInner(
+  walletAddress: string,
+  signature: string
+): Promise<SignatureProcessResult> {
+  const key = signatureEventKey(walletAddress, signature);
+  const tx = await fetchParsedTransaction(signature);
+
+  if (!tx) {
+    return "retry";
+  }
+
+  const trade = extractTrade(tx, walletAddress);
+
+  if (!trade) {
+    processedSignatures.mark(key);
+    return "ignored";
+  }
+
+  // Delayed swaps must not train the live entry logic or create late paper
+  // positions. The reconciliation loop still advances the wallet cursor.
+  if (
+    !isFreshTimestamp(
+      trade.txTime,
+      Date.now(),
+      MAX_TRADE_AGE_MS
+    )
+  ) {
+    processedSignatures.mark(key);
+    return "ignored";
+  }
+
+  if (trade.solAmount < MIN_TRACKED_TRADE_SOL) {
+    processedSignatures.mark(key);
+    return "ignored";
+  }
+
+  const windowStart = new Date(
+    trade.txTime.getTime() - SCALP_WINDOW_MINUTES * 60_000
+  );
+  const windowEnd = new Date(
+    trade.txTime.getTime() + SCALP_WINDOW_MINUTES * 60_000
+  );
+  const oppositeSide = trade.side === "buy" ? "sell" : "buy";
+
+  const { data: nearbyOpposite, error: nearbyError } = await supabase
+    .from("wallet_transactions")
+    .select("id")
+    .eq("wallet_address", walletAddress)
+    .eq("token_mint", trade.tokenMint)
+    .eq("side", oppositeSide)
+    .gte("tx_time", windowStart.toISOString())
+    .lte("tx_time", windowEnd.toISOString());
+  throwIfError("Failed to check scalp window", nearbyError);
+
+  const oppositeIds = (nearbyOpposite ?? []).map((row) => row.id);
+  const isScalp = oppositeIds.length > 0;
+
+  if (oppositeIds.length > 0) {
+    const { error: oppositeUpdateError } = await supabase
+      .from("wallet_transactions")
+      .update({ is_scalp: true })
+      .in("id", oppositeIds);
+    throwIfError(
+      "Failed to mark opposite scalp trades",
+      oppositeUpdateError
+    );
+  }
+
+  const { data: storedRows, error: tradeError } = await supabase
+    .from("wallet_transactions")
+    .upsert(
+      {
+        wallet_address: walletAddress,
+        signature: trade.signature,
+        token_mint: trade.tokenMint,
+        side: trade.side,
+        sol_amount: trade.solAmount,
+        token_amount: trade.tokenAmount,
+        tx_time: trade.txTime.toISOString(),
+        is_scalp: isScalp,
+      },
+      {
+        onConflict: "wallet_address,signature,token_mint,side",
+        ignoreDuplicates: true,
+      }
+    )
+    .select("id");
+  throwIfError("Failed to store wallet transaction", tradeError);
+
+  processedSignatures.mark(key);
+
+  if (!storedRows?.length) {
+    return "duplicate";
+  }
+
+  usage.increment("storedTrades");
+  console.log(
+    `[trade] ${walletAddress.slice(0, 6)}… ` +
+      `${trade.side.toUpperCase()} ${trade.tokenMint.slice(0, 6)}… ` +
+      `${trade.solAmount.toFixed(3)} SOL` +
+      `${isScalp ? " (SCALP)" : ""}`
+  );
+
+  return "new_trade";
+}
+
+async function processWalletSignature(
+  walletAddress: string,
+  signature: string
+): Promise<SignatureProcessResult> {
+  const key = signatureEventKey(walletAddress, signature);
+
+  if (processedSignatures.has(key)) {
+    return "already_processed";
+  }
+
+  const existing = inFlightSignatures.get(key);
+  if (existing) return existing;
+
+  const task = processWalletSignatureInner(walletAddress, signature).finally(
+    () => inFlightSignatures.delete(key)
+  );
+  inFlightSignatures.set(key, task);
+  return task;
 }
 
 async function pollWallet(wallet: {
@@ -269,27 +471,21 @@ async function pollWallet(wallet: {
   if (sigs.length === MAX_SIGNATURES_PER_WALLET) {
     console.warn(
       `[cursor] ${wallet.address.slice(0, 6)}… backlog capped at ` +
-        `${MAX_SIGNATURES_PER_WALLET}; prioritizing the newest activity`
+        `${MAX_SIGNATURES_PER_WALLET}; WebSocket delivery remains primary`
     );
   }
 
   let newTrades = 0;
 
   for (const sigInfo of sigs) {
-    const tx = await withRetry(
-      `fetch tx ${sigInfo.signature.slice(0, 8)}`,
-      () =>
-        rpcPacer.run(() =>
-          getParsedTx(
-            connection,
-            sigInfo.signature
-          )
-        )
+    const result = await processWalletSignature(
+      wallet.address,
+      sigInfo.signature
     );
 
     // Never advance past a transaction we failed to inspect. The next cycle
     // will retry it instead of silently losing a possible trade.
-    if (!tx) {
+    if (result === "retry") {
       console.warn(
         `[cursor] ${wallet.address.slice(0, 6)}… stopped before ` +
           `${sigInfo.signature.slice(0, 8)} after RPC failure`
@@ -297,130 +493,16 @@ async function pollWallet(wallet: {
       break;
     }
 
-    const trade = extractTrade(
-      tx,
-      wallet.address
-    );
-
-    if (!trade) {
-      await checkpointWalletCursor(
-        wallet.address,
-        sigInfo.signature
-      );
-      continue;
-    }
-
-    // Old swaps are useful for analytics only if deliberately backfilled.
-    // They must never create a delayed paper entry during normal monitoring.
-    if (
-      !isFreshTimestamp(
-        trade.txTime,
-        Date.now(),
-        MAX_TRADE_AGE_MS
-      )
-    ) {
-      await checkpointWalletCursor(
-        wallet.address,
-        sigInfo.signature
-      );
-      continue;
-    }
-
-    // Dust swaps were responsible for much of the 0.001 SOL log noise and
-    // cannot contribute meaningfully to the one-SOL consensus threshold.
-    if (trade.solAmount < MIN_TRACKED_TRADE_SOL) {
-      await checkpointWalletCursor(
-        wallet.address,
-        sigInfo.signature
-      );
-      continue;
-    }
-
-    const windowStart = new Date(
-      trade.txTime.getTime() -
-        SCALP_WINDOW_MINUTES * 60_000
-    );
-
-    const windowEnd = new Date(
-      trade.txTime.getTime() +
-        SCALP_WINDOW_MINUTES * 60_000
-    );
-
-    const oppositeSide =
-      trade.side === "buy"
-        ? "sell"
-        : "buy";
-
-    const { data: nearbyOpposite, error: nearbyError } =
-      await supabase
-        .from("wallet_transactions")
-        .select("id")
-        .eq("wallet_address", wallet.address)
-        .eq("token_mint", trade.tokenMint)
-        .eq("side", oppositeSide)
-        .gte("tx_time", windowStart.toISOString())
-        .lte("tx_time", windowEnd.toISOString());
-    throwIfError("Failed to check scalp window", nearbyError);
-
-    const oppositeIds = (nearbyOpposite ?? []).map(
-      (row) => row.id
-    );
-    const isScalp = oppositeIds.length > 0;
-
-    // Mark both legs. Previously only the second leg was marked as a scalp,
-    // leaving the earlier buy eligible to create a false consensus signal.
-    if (oppositeIds.length > 0) {
-      const { error: oppositeUpdateError } = await supabase
-        .from("wallet_transactions")
-        .update({ is_scalp: true })
-        .in("id", oppositeIds);
-      throwIfError(
-        "Failed to mark opposite scalp trades",
-        oppositeUpdateError
-      );
-    }
-
-    const { data: storedRows, error: tradeError } = await supabase
-      .from("wallet_transactions")
-      .upsert(
-        {
-          wallet_address: wallet.address,
-          signature: trade.signature,
-          token_mint: trade.tokenMint,
-          side: trade.side,
-          sol_amount: trade.solAmount,
-          token_amount: trade.tokenAmount,
-          tx_time: trade.txTime.toISOString(),
-          is_scalp: isScalp,
-        },
-        {
-          onConflict:
-            "wallet_address,signature,token_mint,side",
-          ignoreDuplicates: true,
-        }
-      )
-      .select("id");
-    throwIfError("Failed to store wallet transaction", tradeError);
-
-    // Checkpoint immediately. A container stop can now replay at most the one
-    // signature that was in flight, and the unique upsert suppresses even that.
+    // WebSocket processing never moves cursors because notifications can arrive
+    // out of order. Reconciliation owns ordered checkpointing.
     await checkpointWalletCursor(
       wallet.address,
       sigInfo.signature
     );
 
-    if (!storedRows?.length) {
-      continue;
+    if (result === "new_trade") {
+      newTrades += 1;
     }
-
-    newTrades += 1;
-
-    console.log(
-      `[trade] ${wallet.address.slice(0, 6)}… ` +
-        `${trade.side.toUpperCase()} ${trade.tokenMint.slice(0, 6)}… ` +
-        `${trade.solAmount.toFixed(3)} SOL` +
-        `${isScalp ? " (SCALP)" : ""}`
-    );
   }
 
   return newTrades;
@@ -871,9 +953,224 @@ async function recomputeConsensus(): Promise<void> {
   }
 }
 
+let consensusTimer: ReturnType<typeof setTimeout> | null = null;
+let consensusRunning = false;
+let consensusPending = false;
+
+function scheduleConsensusRecompute(): void {
+  consensusPending = true;
+  if (consensusTimer || consensusRunning) return;
+
+  consensusTimer = setTimeout(() => {
+    consensusTimer = null;
+    void runScheduledConsensus();
+  }, 1_500);
+}
+
+async function runScheduledConsensus(): Promise<void> {
+  if (consensusRunning) return;
+  consensusRunning = true;
+  consensusPending = false;
+
+  try {
+    await recomputeConsensus();
+  } catch (error) {
+    console.error("[consensus] Event-driven recompute failed:", error);
+  } finally {
+    consensusRunning = false;
+
+    if (consensusPending) {
+      scheduleConsensusRecompute();
+    }
+  }
+}
+
+const walletEventQueues = new Map<
+  string,
+  SerialEventQueue<WalletSignatureEvent>
+>();
+
+function totalEventQueueDepth(): number {
+  let total = 0;
+  for (const queue of walletEventQueues.values()) total += queue.depth;
+  return total;
+}
+
+function getWalletEventQueue(
+  walletAddress: string
+): SerialEventQueue<WalletSignatureEvent> {
+  const existing = walletEventQueues.get(walletAddress);
+  if (existing) return existing;
+
+  const queue = new SerialEventQueue<WalletSignatureEvent>(
+    async (event) => {
+      const result = await processWalletSignature(
+        event.walletAddress,
+        event.signature
+      );
+
+      if (result === "new_trade") {
+        const latencyMs = Math.max(0, Date.now() - event.receivedAt);
+        console.log(
+          `[websocket] processed ${event.signature.slice(0, 8)} in ` +
+            `${latencyMs}ms; queue=${totalEventQueueDepth()}`
+        );
+        scheduleConsensusRecompute();
+      }
+    },
+    (error, event) => {
+      console.error(
+        `[websocket] ${event.walletAddress.slice(0, 6)}… ` +
+          `${event.signature.slice(0, 8)} failed:`,
+        error
+      );
+    },
+    () => usage.observeQueueDepth(totalEventQueueDepth())
+  );
+  walletEventQueues.set(walletAddress, queue);
+  return queue;
+}
+
+const activeWalletAddresses = new Set<string>();
+
+function handleWalletLogs(walletAddress: string, logs: Logs): void {
+  usage.increment("websocketNotifications");
+  usage.increment(
+    "websocketBytes",
+    Buffer.byteLength(JSON.stringify(logs), "utf8")
+  );
+
+  if (logs.err || !activeWalletAddresses.has(walletAddress)) {
+    return;
+  }
+
+  const key = signatureEventKey(walletAddress, logs.signature);
+  const enqueued = getWalletEventQueue(walletAddress).enqueue(key, {
+    walletAddress,
+    signature: logs.signature,
+    receivedAt: Date.now(),
+  });
+
+  if (!enqueued) {
+    usage.increment("duplicateEvents");
+  }
+}
+
+async function syncWalletSubscriptions(): Promise<void> {
+  const { data: wallets, error } = await supabase
+    .from("wallets")
+    .select("address")
+    .eq("active", true);
+
+  if (error) {
+    console.error("[websocket] Failed to refresh wallet list:", error);
+    return;
+  }
+
+  const desired = new Set((wallets ?? []).map((wallet) => wallet.address));
+  activeWalletAddresses.clear();
+  for (const address of desired) activeWalletAddresses.add(address);
+
+  for (const [address, subscriptionId] of walletSubscriptions) {
+    if (desired.has(address)) continue;
+
+    try {
+      await connection.removeOnLogsListener(subscriptionId);
+      walletSubscriptions.delete(address);
+      console.log(`[websocket] unsubscribed ${address.slice(0, 6)}…`);
+    } catch (error) {
+      console.warn(
+        `[websocket] Failed to unsubscribe ${address.slice(0, 6)}…:`,
+        error
+      );
+    }
+  }
+
+  for (const address of desired) {
+    if (walletSubscriptions.has(address)) continue;
+
+    try {
+      const subscriptionId = connection.onLogs(
+        new PublicKey(address),
+        (logs) => handleWalletLogs(address, logs),
+        "confirmed"
+      );
+      walletSubscriptions.set(address, subscriptionId);
+      console.log(`[websocket] subscribed ${address.slice(0, 6)}…`);
+    } catch (error) {
+      console.error(
+        `[websocket] Failed to subscribe ${address.slice(0, 6)}…:`,
+        error
+      );
+    }
+  }
+
+  console.log(
+    `[websocket] ${walletSubscriptions.size}/${desired.size} wallet subscriptions active`
+  );
+}
+
+let usagePersistPromise: Promise<void> | null = null;
+
+function persistHeliusUsage(): Promise<void> {
+  if (usagePersistPromise) return usagePersistPromise;
+
+  usagePersistPromise = persistHeliusUsageInner().finally(() => {
+    usagePersistPromise = null;
+  });
+  return usagePersistPromise;
+}
+
+async function persistHeliusUsageInner(): Promise<void> {
+  const snapshot = usage.snapshot();
+  const hasActivity =
+    snapshot.signatureRequests > 0 ||
+    snapshot.transactionRequests > 0 ||
+    snapshot.websocketNotifications > 0 ||
+    snapshot.rateLimitErrors > 0 ||
+    snapshot.rpcFailures > 0;
+
+  if (!hasActivity) return;
+
+  const { error } = await supabase
+    .from("monitor_usage_samples")
+    .upsert(
+      {
+        instance_id: processInstanceId,
+        period_started_at: snapshot.periodStartedAt,
+        recorded_at: snapshot.capturedAt,
+        signature_requests: snapshot.signatureRequests,
+        transaction_requests: snapshot.transactionRequests,
+        websocket_notifications: snapshot.websocketNotifications,
+        websocket_bytes: snapshot.websocketBytes,
+        rate_limit_errors: snapshot.rateLimitErrors,
+        rpc_failures: snapshot.rpcFailures,
+        stored_trades: snapshot.storedTrades,
+        duplicate_events: snapshot.duplicateEvents,
+        max_queue_depth: snapshot.maxQueueDepth,
+      },
+      { onConflict: "instance_id,period_started_at" }
+    );
+
+  if (error) {
+    console.error("[helius-usage] Failed to save usage sample:", error);
+    return;
+  }
+
+  usage.commit(snapshot);
+  console.log(
+    `[helius-usage] estimated ${estimateHeliusCredits({
+      signatureRequests: snapshot.signatureRequests,
+      transactionRequests: snapshot.transactionRequests,
+      websocketBytes: snapshot.websocketBytes,
+    })} credits since ${snapshot.periodStartedAt}; ` +
+      `${snapshot.rateLimitErrors} rate limits; max queue ${snapshot.maxQueueDepth}`
+  );
+}
+
 async function runCycle(): Promise<void> {
   console.log(
-    `\n=== Monitor cycle @ ${new Date().toISOString()} ===`
+    `\n=== Reconciliation cycle @ ${new Date().toISOString()} ===`
   );
 
   const { data: wallets, error } =
@@ -924,25 +1221,54 @@ async function runCycle(): Promise<void> {
   );
 
   if (newTrades > 0) {
-    await recomputeConsensus();
+    scheduleConsensusRecompute();
   } else {
     console.log(
       "[consensus] skipped; no new significant trades"
     );
   }
 
-  console.log(`=== Cycle complete: ${newTrades} new trades ===`);
+  console.log(`=== Reconciliation complete: ${newTrades} new trades ===`);
 }
 
 async function main(): Promise<void> {
   console.log(
-    `Solana wallet tracker worker starting. Polling every ${POLL_INTERVAL_SECONDS} sec.`
+    "Solana wallet tracker worker starting in WebSocket-first mode."
   );
   console.log(
     `RPC pacing: one request every ${RPC_MIN_INTERVAL_MS}ms; ` +
+      `reconciliation every ${RECONCILE_INTERVAL_SECONDS}s; ` +
       `fresh trades only (${MAX_TRADE_AGE_MS / 1_000}s); ` +
       `minimum ${MIN_TRACKED_TRADE_SOL} SOL`
   );
+
+  await syncWalletSubscriptions();
+
+  let syncingSubscriptions = false;
+  setInterval(() => {
+    if (syncingSubscriptions) return;
+    syncingSubscriptions = true;
+    syncWalletSubscriptions()
+      .catch((error) =>
+        console.error("[websocket] Wallet refresh failed:", error)
+      )
+      .finally(() => {
+        syncingSubscriptions = false;
+      });
+  }, WALLET_REFRESH_INTERVAL_SECONDS * 1_000);
+
+  let flushingUsage = false;
+  setInterval(() => {
+    if (flushingUsage) return;
+    flushingUsage = true;
+    persistHeliusUsage()
+      .catch((error) =>
+        console.error("[helius-usage] Flush failed:", error)
+      )
+      .finally(() => {
+        flushingUsage = false;
+      });
+  }, USAGE_FLUSH_INTERVAL_SECONDS * 1_000);
 
   if (
     process.env
@@ -951,7 +1277,7 @@ async function main(): Promise<void> {
       .TELEGRAM_CHAT_ID
   ) {
     await sendTelegramAlert(
-      "✅ Solana wallet tracker started. Telegram alerts are working."
+      "✅ Solana wallet tracker started in credit-saving WebSocket mode. Telegram alerts are working."
     );
   } else {
     console.log(
@@ -993,8 +1319,8 @@ async function main(): Promise<void> {
     );
   }, 30 * 60_000);
 
-  // Reporting and analytics are maintenance work. Never delay the first
-  // wallet-polling cycle (and therefore paper trading) while they run.
+  // Reporting and analytics are maintenance work. Never delay live event
+  // processing while they run.
   void sendDailyPaperReportIfDue().catch((err) =>
     console.error("[paper-trader] Initial daily report check failed:", err)
   );
@@ -1003,12 +1329,29 @@ async function main(): Promise<void> {
   );
   while (true) {
     const startedAt = Date.now();
-    await runCycle().catch((error) => console.error("[monitor] Cycle failed:", error));
+    await runCycle().catch((error) =>
+      console.error("[monitor] Reconciliation failed:", error)
+    );
     const elapsed = Date.now() - startedAt;
-    const interval = POLL_INTERVAL_SECONDS * 1000;
+    const interval = RECONCILE_INTERVAL_SECONDS * 1_000;
     await sleep(Math.max(1_000, interval - elapsed));
   }
 }
+
+let shuttingDown = false;
+async function shutdown(signal: string): Promise<void> {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`[monitor] ${signal} received; saving usage before exit`);
+
+  await persistHeliusUsage().catch((error) =>
+    console.error("[helius-usage] Final flush failed:", error)
+  );
+  process.exit(0);
+}
+
+process.once("SIGTERM", () => void shutdown("SIGTERM"));
+process.once("SIGINT", () => void shutdown("SIGINT"));
 
 main().catch((err) => {
   console.error(
