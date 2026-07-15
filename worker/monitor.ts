@@ -45,6 +45,7 @@ import {
   HeliusUsageTracker,
 } from "./heliusUsage";
 import { ensureHeliusSwapWebhook } from "./heliusWebhookManager";
+import { selectHeliusWallets } from "./heliusWalletSelection";
 
 const RECONCILE_INTERVAL_SECONDS = readBoundedNumber(
   process.env.RECONCILE_INTERVAL_SECONDS,
@@ -68,6 +69,19 @@ const HELIUS_WEBHOOK_URL =
 const HELIUS_EVENT_MODE = (
   process.env.HELIUS_EVENT_MODE ?? "auto"
 ).toLowerCase();
+
+const MAX_HELIUS_WALLETS = Math.floor(
+  readBoundedNumber(process.env.MAX_HELIUS_WALLETS, 10, 3, 25)
+);
+const HELIUS_CORE_WALLETS = Math.floor(
+  readBoundedNumber(process.env.HELIUS_CORE_WALLETS, 6, 0, 25)
+);
+const HELIUS_ROTATION_HOURS = readBoundedNumber(
+  process.env.HELIUS_ROTATION_HOURS,
+  6,
+  1,
+  24
+);
 
 const WALLET_REFRESH_INTERVAL_SECONDS = readBoundedNumber(
   process.env.WALLET_REFRESH_INTERVAL_SECONDS,
@@ -1171,7 +1185,16 @@ async function syncWalletSubscriptions(): Promise<void> {
   activeWalletAddresses.clear();
   for (const address of desired) activeWalletAddresses.add(address);
 
-  const webhookActive = await syncHeliusWebhook([...desired]);
+  const addresses = [...desired];
+  const trustScores = await getTrustScoresForWallets(addresses);
+  const selection = selectHeliusWallets({
+    addresses,
+    trustScores,
+    limit: MAX_HELIUS_WALLETS,
+    coreCount: HELIUS_CORE_WALLETS,
+    rotationHours: HELIUS_ROTATION_HOURS,
+  });
+  const webhookActive = await syncHeliusWebhook(selection.selected);
 
   if (webhookActive) {
     for (const [address, subscriptionId] of walletSubscriptions) {
