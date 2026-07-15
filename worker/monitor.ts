@@ -146,6 +146,7 @@ const processedSignatures = new SignatureDeduper(
   EVENT_DEDUPE_MINUTES * 60_000
 );
 const inFlightSignatures = new Map<string, Promise<SignatureProcessResult>>();
+const walletProcessingTails = new Map<string, Promise<void>>();
 const walletSubscriptions = new Map<string, number>();
 
 const sleep = (ms: number) =>
@@ -420,10 +421,26 @@ async function processWalletSignature(
   const existing = inFlightSignatures.get(key);
   if (existing) return existing;
 
-  const task = processWalletSignatureInner(walletAddress, signature).finally(
-    () => inFlightSignatures.delete(key)
+  // WebSocket and reconciliation work share this per-wallet chain. Different
+  // wallets may run concurrently, while one wallet's trades remain ordered so
+  // opposite-side scalp detection cannot race itself.
+  const previous = walletProcessingTails.get(walletAddress) ?? Promise.resolve();
+  const task = previous
+    .catch(() => undefined)
+    .then(() => processWalletSignatureInner(walletAddress, signature))
+    .finally(() => inFlightSignatures.delete(key));
+  const tail = task.then(
+    () => undefined,
+    () => undefined
   );
+
   inFlightSignatures.set(key, task);
+  walletProcessingTails.set(walletAddress, tail);
+  void tail.finally(() => {
+    if (walletProcessingTails.get(walletAddress) === tail) {
+      walletProcessingTails.delete(walletAddress);
+    }
+  });
   return task;
 }
 
