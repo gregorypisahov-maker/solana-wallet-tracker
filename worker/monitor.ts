@@ -27,9 +27,15 @@ import {
   computeWeightedWalletScore,
 } from "../paper-trader/trustScore";
 
-const POLL_INTERVAL_MINUTES = Number(
-  process.env.POLL_INTERVAL_MINUTES ?? 1
+const configuredPollIntervalSeconds = Number(
+  process.env.POLL_INTERVAL_SECONDS ?? 15
 );
+
+const POLL_INTERVAL_SECONDS =
+  Number.isFinite(configuredPollIntervalSeconds) &&
+  configuredPollIntervalSeconds >= 5
+    ? configuredPollIntervalSeconds
+    : 15;
 
 const SCALP_WINDOW_MINUTES = Number(
   process.env.SCALP_WINDOW_MINUTES ?? 5
@@ -763,7 +769,7 @@ async function runCycle(): Promise<void> {
 
 async function main(): Promise<void> {
   console.log(
-    `Solana wallet tracker worker starting. Polling every ${POLL_INTERVAL_MINUTES} min.`
+    `Solana wallet tracker worker starting. Polling every ${POLL_INTERVAL_SECONDS} sec.`
   );
 
   if (
@@ -827,7 +833,7 @@ async function main(): Promise<void> {
     const startedAt = Date.now();
     await runCycle().catch((error) => console.error("[monitor] Cycle failed:", error));
     const elapsed = Date.now() - startedAt;
-    const interval = POLL_INTERVAL_MINUTES * 60_000;
+    const interval = POLL_INTERVAL_SECONDS * 1000;
     await sleep(Math.max(1_000, interval - elapsed));
   }
 }
