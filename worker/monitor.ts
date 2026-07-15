@@ -62,7 +62,9 @@ const CONSENSUS_REFRESH_INTERVAL_SECONDS = readBoundedNumber(
 
 const HELIUS_WEBHOOK_URL =
   process.env.HELIUS_WEBHOOK_URL ??
-  "https://solana-wallet-tracker.vercel.app/api/helius";
+  (process.env.NEXT_PUBLIC_SUPABASE_URL
+    ? `${process.env.NEXT_PUBLIC_SUPABASE_URL.replace(/\/$/, "")}/functions/v1/helius-webhook`
+    : "");
 const HELIUS_EVENT_MODE = (
   process.env.HELIUS_EVENT_MODE ?? "auto"
 ).toLowerCase();
@@ -1088,7 +1090,7 @@ async function syncHeliusWebhook(addresses: string[]): Promise<boolean> {
 
   const rpcUrl = process.env.HELIUS_RPC_URL;
   const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-  if (!rpcUrl || !serviceRoleKey) {
+  if (!rpcUrl || !serviceRoleKey || !HELIUS_WEBHOOK_URL) {
     webhookMode = false;
     return false;
   }

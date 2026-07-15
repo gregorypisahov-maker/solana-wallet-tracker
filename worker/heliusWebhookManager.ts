@@ -58,8 +58,14 @@ export async function ensureHeliusSwapWebhook(options: {
     }
 
     const records = (await listResponse.json()) as HeliusWebhookRecord[];
+    const legacyReceiverUrls = new Set([
+      "https://solana-wallet-tracker.vercel.app/api/helius",
+    ]);
     const existing = records.find(
-      (record) => record.webhookURL === options.webhookUrl
+      (record) =>
+        record.webhookURL === options.webhookUrl ||
+        (record.webhookURL !== undefined &&
+          legacyReceiverUrls.has(record.webhookURL))
     );
     const desiredAddresses = [...new Set(options.accountAddresses)].sort();
     const body = {
@@ -73,6 +79,7 @@ export async function ensureHeliusSwapWebhook(options: {
 
     if (existing?.webhookID) {
       const alreadyMatches =
+        existing.webhookURL === options.webhookUrl &&
         (existing.webhookType === undefined ||
           existing.webhookType === "enhanced") &&
         sameStrings(existing.transactionTypes, ["SWAP"]) &&
