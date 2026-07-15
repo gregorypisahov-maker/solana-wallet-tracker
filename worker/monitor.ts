@@ -28,7 +28,7 @@ import {
 } from "../paper-trader/trustScore";
 
 const POLL_INTERVAL_MINUTES = Number(
-  process.env.POLL_INTERVAL_MINUTES ?? 5
+  process.env.POLL_INTERVAL_MINUTES ?? 1
 );
 
 const SCALP_WINDOW_MINUTES = Number(
