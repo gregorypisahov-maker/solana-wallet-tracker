@@ -6,9 +6,9 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "worker": "tsx worker/monitor.ts",
-    "paper-trader": "tsx worker/monitor.ts",
-    "worker:dev": "tsx watch worker/monitor.ts",
+    "worker": "CONSENSUS_REFRESH_INTERVAL_SECONDS=10 tsx worker/monitor.ts",
+    "paper-trader": "CONSENSUS_REFRESH_INTERVAL_SECONDS=10 tsx worker/monitor.ts",
+    "worker:dev": "CONSENSUS_REFRESH_INTERVAL_SECONDS=10 tsx watch worker/monitor.ts",
     "telegram-bot": "tsx worker/telegramBot.ts",
     "test": "node --import tsx --test lib/*.test.ts worker/*.test.ts paper-trader/*.test.ts",
     "typecheck": "tsc --noEmit"
