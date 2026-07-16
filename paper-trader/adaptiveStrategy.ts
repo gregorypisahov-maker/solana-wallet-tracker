@@ -8,7 +8,16 @@ export interface AdaptiveEntryThresholds {
   minLiquidityUsd: number;
 }
 
-const BASE: AdaptiveEntryThresholds = { ...config.entry };
+const BASE: AdaptiveEntryThresholds = {
+  minScore: config.entry.minScore,
+  minAvgBuyPerWallet: config.entry.minAvgBuyPerWallet,
+  minLiquidityToMcapRatio: config.entry.minLiquidityToMcapRatio,
+  minLiquidityUsd: config.entry.minLiquidityUsd,
+};
+
+// Live paper trading always uses the productive baseline. The learner still
+// records performance, but it may no longer choke trade flow by changing live
+// thresholds from a small historical subset.
 let current: AdaptiveEntryThresholds = { ...BASE };
 let running = false;
 
@@ -34,8 +43,8 @@ type StrategyMetrics = {
 };
 
 function metrics(rows: PositionSample[]): StrategyMetrics {
-  const wins = rows.filter((r) => r.pnl > 0);
-  const losses = rows.filter((r) => r.pnl < 0);
+  const wins = rows.filter((row) => row.pnl > 0);
+  const losses = rows.filter((row) => row.pnl < 0);
   const grossProfit = wins.reduce((sum, row) => sum + row.pnl, 0);
   const grossLoss = Math.abs(losses.reduce((sum, row) => sum + row.pnl, 0));
 
@@ -47,66 +56,14 @@ function metrics(rows: PositionSample[]): StrategyMetrics {
   };
 }
 
-function validThreshold(value: unknown, minimum: number, maximum: number): number | null {
-  const parsed = Number(value);
-  return Number.isFinite(parsed) && parsed >= minimum && parsed <= maximum ? parsed : null;
-}
-
-async function applyManualOverride(): Promise<boolean> {
-  const supabase = getSupabaseAdmin();
-  const { data, error } = await supabase
-    .from('adaptive_strategy_state')
-    .select('enabled,min_score,min_avg_buy_per_wallet,min_liquidity_to_mcap_ratio,min_liquidity_usd,reason')
-    .eq('id', 1)
-    .maybeSingle();
-
-  if (error) throw new Error(error.message);
-
-  const reason = String(data?.reason ?? '');
-  if (!data?.enabled || !reason.startsWith('Manual safety correction:')) return false;
-
-  const minScore = validThreshold(data.min_score, BASE.minScore, 100);
-  const minAvgBuyPerWallet = validThreshold(data.min_avg_buy_per_wallet, BASE.minAvgBuyPerWallet, 10);
-  const minLiquidityToMcapRatio = validThreshold(
-    data.min_liquidity_to_mcap_ratio,
-    BASE.minLiquidityToMcapRatio,
-    0.75,
-  );
-  const minLiquidityUsd = validThreshold(data.min_liquidity_usd, BASE.minLiquidityUsd, 1_000_000);
-
-  if (
-    minScore === null ||
-    minAvgBuyPerWallet === null ||
-    minLiquidityToMcapRatio === null ||
-    minLiquidityUsd === null
-  ) {
-    throw new Error('manual adaptive thresholds are malformed');
-  }
-
-  current = {
-    minScore,
-    minAvgBuyPerWallet,
-    minLiquidityToMcapRatio,
-    minLiquidityUsd,
-  };
-
-  console.log(
-    `[adaptive-strategy] manual override loaded; score>=${current.minScore}, ` +
-      `avgBuy>=${current.minAvgBuyPerWallet} SOL, ` +
-      `liq/mcap>=${(current.minLiquidityToMcapRatio * 100).toFixed(1)}%, ` +
-      `liquidity>=${current.minLiquidityUsd}`,
-  );
-  return true;
-}
-
 export async function learnAdaptiveStrategy(): Promise<void> {
   if (running) return;
   running = true;
 
   try {
-    // A database correction must affect the running worker. Previously the row
-    // changed in Supabase while this module kept stale thresholds in memory.
-    if (await applyManualOverride()) return;
+    // Reset on every refresh so stale Supabase overrides or previous in-memory
+    // values cannot make the live paper strategy progressively stricter.
+    current = { ...BASE };
 
     const supabase = getSupabaseAdmin();
     const { data, error } = await supabase
@@ -147,34 +104,16 @@ export async function learnAdaptiveStrategy(): Promise<void> {
       .slice(0, 240);
 
     const overall = metrics(samples);
-
-    // Keep automatic changes conservative. The former grid search selected a
-    // narrow historical subset and raised the live liquidity ratio to 21.4%,
-    // which stopped normal paper-data collection.
-    const next: AdaptiveEntryThresholds =
-      overall.sample >= 80 && (overall.profitFactor < 1.3 || overall.pnl <= 0)
-        ? {
-            minScore: Math.max(20, BASE.minScore),
-            minAvgBuyPerWallet: Math.max(1.5, BASE.minAvgBuyPerWallet),
-            minLiquidityToMcapRatio: Math.max(0.12, BASE.minLiquidityToMcapRatio),
-            minLiquidityUsd: Math.max(15_000, BASE.minLiquidityUsd),
-          }
-        : { ...BASE };
-
-    current = next;
-    const reason =
-      overall.sample >= 80 && (overall.profitFactor < 1.3 || overall.pnl <= 0)
-        ? `conservative weak-edge profile from ${overall.sample} positions; PF ${overall.profitFactor.toFixed(2)}`
-        : `baseline retained from ${overall.sample} positions`;
+    const reason = `monitoring-only baseline from ${overall.sample} positions; PF ${overall.profitFactor.toFixed(2)}`;
 
     const { error: saveError } = await supabase.from('adaptive_strategy_state').upsert({
       id: 1,
-      enabled: true,
+      enabled: false,
       sample_size: overall.sample,
-      min_score: next.minScore,
-      min_avg_buy_per_wallet: next.minAvgBuyPerWallet,
-      min_liquidity_to_mcap_ratio: next.minLiquidityToMcapRatio,
-      min_liquidity_usd: next.minLiquidityUsd,
+      min_score: BASE.minScore,
+      min_avg_buy_per_wallet: BASE.minAvgBuyPerWallet,
+      min_liquidity_to_mcap_ratio: BASE.minLiquidityToMcapRatio,
+      min_liquidity_usd: BASE.minLiquidityUsd,
       profit_factor: overall.profitFactor,
       win_rate: overall.winRate,
       total_pnl_sol: overall.pnl,
@@ -185,13 +124,13 @@ export async function learnAdaptiveStrategy(): Promise<void> {
     if (saveError) throw new Error(saveError.message);
 
     console.log(
-      `[adaptive-strategy] ${reason}; score>=${next.minScore}, ` +
-        `avgBuy>=${next.minAvgBuyPerWallet} SOL, ` +
-        `liq/mcap>=${(next.minLiquidityToMcapRatio * 100).toFixed(1)}%, ` +
-        `liquidity>=${next.minLiquidityUsd}`,
+      `[adaptive-strategy] live tuning disabled; baseline restored: ` +
+        `score>=${BASE.minScore}, avgBuy>=${BASE.minAvgBuyPerWallet} SOL, ` +
+        `liq/mcap>=${(BASE.minLiquidityToMcapRatio * 100).toFixed(1)}%, ` +
+        `liquidity>=${BASE.minLiquidityUsd}; observed PF ${overall.profitFactor.toFixed(2)}`,
     );
   } catch (error) {
-    console.error('[adaptive-strategy] learning failed safely:', error);
+    console.error('[adaptive-strategy] monitoring failed safely:', error);
     current = { ...BASE };
   } finally {
     running = false;
@@ -201,5 +140,5 @@ export async function learnAdaptiveStrategy(): Promise<void> {
 export function startAdaptiveStrategyScheduler(): void {
   void learnAdaptiveStrategy();
   setInterval(() => void learnAdaptiveStrategy(), 6 * 60 * 60 * 1000);
-  console.log('[adaptive-strategy] enabled; refreshes guarded entries every 6h from paper trades only');
+  console.log('[adaptive-strategy] monitoring-only mode; live entry thresholds stay fixed');
 }
