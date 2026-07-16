@@ -1,14 +1,8 @@
 // lib/telegram.ts
 //
-// CHANGE FROM PREVIOUS VERSION: formatConsensusAlert() now accepts
-// optional trust/confidence fields (Phase 3). All new fields are
-// optional, so any existing call site that doesn't pass them keeps
-// working exactly as before, with the new message lines simply omitted.
 // Telegram delivery is bounded so a network problem cannot freeze the worker.
 
-const configuredTelegramTimeoutMs = Number(
-  process.env.TELEGRAM_TIMEOUT_MS ?? 10_000
-);
+const configuredTelegramTimeoutMs = Number(process.env.TELEGRAM_TIMEOUT_MS ?? 10_000);
 const TELEGRAM_TIMEOUT_MS = Number.isFinite(configuredTelegramTimeoutMs)
   ? Math.max(3_000, configuredTelegramTimeoutMs)
   : 10_000;
@@ -18,29 +12,26 @@ function cleanEnv(value: string | undefined): string {
 }
 
 export async function sendTelegramAlert(message: string): Promise<void> {
-  const token = cleanEnv(
-    process.env.TELEGRAM_COMMAND_BOT_TOKEN ?? process.env.TELEGRAM_BOT_TOKEN
-  );
+  // One shared token for alerts and inbound commands.
+  const token = cleanEnv(process.env.TELEGRAM_BOT_TOKEN);
   const chatId = cleanEnv(process.env.TELEGRAM_CHAT_ID);
   if (!token || !chatId) {
-    console.log("Telegram not configured. Alert skipped:");
+    console.log('Telegram not configured. Alert skipped:');
     console.log(message);
     return;
   }
+
   const controller = new AbortController();
-  const timeout = setTimeout(
-    () => controller.abort(),
-    TELEGRAM_TIMEOUT_MS
-  );
+  const timeout = setTimeout(() => controller.abort(), TELEGRAM_TIMEOUT_MS);
 
   try {
     const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         chat_id: chatId,
         text: message,
-        parse_mode: "HTML",
+        parse_mode: 'HTML',
         disable_web_page_preview: false,
       }),
       signal: controller.signal,
@@ -48,18 +39,16 @@ export async function sendTelegramAlert(message: string): Promise<void> {
 
     if (!res.ok) {
       const text = await res.text();
-      console.error("Telegram send failed:", res.status, text);
+      console.error('Telegram send failed:', res.status, text);
     }
   } catch (error) {
     const reason =
-      error instanceof Error && error.name === "AbortError"
+      error instanceof Error && error.name === 'AbortError'
         ? `timed out after ${TELEGRAM_TIMEOUT_MS}ms`
         : error instanceof Error
           ? error.message
           : String(error);
-
-    // Telegram notifications must never stop wallet monitoring or paper entry.
-    console.error("Telegram send failed:", reason);
+    console.error('Telegram send failed:', reason);
   } finally {
     clearTimeout(timeout);
   }
@@ -81,10 +70,10 @@ export function formatConsensusAlert(data: {
   const gmgn = `https://gmgn.ai/sol/token/${data.tokenMint}`;
 
   const lines = [
-    "🚨 <b>Smart Wallet Consensus</b>",
-    "",
-    `🪙 <b>${data.symbol ?? "Unknown"}</b>`,
-    "",
+    '🚨 <b>Smart Wallet Consensus</b>',
+    '',
+    `🪙 <b>${data.symbol ?? 'Unknown'}</b>`,
+    '',
     `⭐ Score: <b>${data.score}/100</b>`,
     `👥 Wallets: <b>${data.walletsCount}</b>`,
     `◎ Total Bought: <b>${data.totalSol.toFixed(2)} SOL</b>`,
@@ -98,7 +87,7 @@ export function formatConsensusAlert(data: {
     data.confidenceGrade !== undefined;
 
   if (hasTrustData) {
-    lines.push("");
+    lines.push('');
     if (data.weightedWalletScore !== undefined) {
       lines.push(`⚖️ Weighted Score: <b>${data.weightedWalletScore.toFixed(2)}</b> (raw ${data.walletsCount})`);
     }
@@ -112,14 +101,14 @@ export function formatConsensusAlert(data: {
   }
 
   lines.push(
-    "",
-    "🧬 Mint",
+    '',
+    '🧬 Mint',
     `<code>${data.tokenMint}</code>`,
-    "",
+    '',
     `📈 DexScreener\n${dex}`,
-    "",
+    '',
     `⚡ GMGN\n${gmgn}`,
   );
 
-  return lines.join("\n");
+  return lines.join('\n');
 }
