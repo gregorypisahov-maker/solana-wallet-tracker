@@ -29,7 +29,7 @@ const TELEGRAM_CHAT_ID = cleanEnv(process.env.TELEGRAM_CHAT_ID);
 const POLL_TIMEOUT_SECONDS = 30;
 const CONFLICT_BACKOFF_MIN_MS = 65_000;
 const CONFLICT_BACKOFF_JITTER_MS = 30_000;
-const TELEGRAM_WORKER_VERSION = '2026-07-16-walletscan-v4-isolated-token';
+const TELEGRAM_WORKER_VERSION = '2026-07-16-walletscan-v5-fresh-build';
 
 if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
   console.error(
@@ -64,6 +64,20 @@ interface TelegramUpdatesResponse {
   description?: string;
 }
 
+async function validateToken(): Promise<void> {
+  const response = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getMe`);
+  const text = await response.text();
+
+  if (!response.ok) {
+    throw new Error(
+      `Telegram rejected TELEGRAM_COMMAND_BOT_TOKEN (${tokenFingerprint}) during startup: ` +
+      `${response.status} ${text}`
+    );
+  }
+
+  console.log(`[telegram-bot] Token accepted by Telegram (${tokenFingerprint}).`);
+}
+
 async function getUpdates(): Promise<TelegramUpdate[]> {
   const url =
     `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getUpdates` +
@@ -75,12 +89,6 @@ async function getUpdates(): Promise<TelegramUpdate[]> {
 
   if (!response.ok) {
     const text = await response.text();
-    if (response.status === 401) {
-      throw new Error(
-        `Telegram rejected TELEGRAM_COMMAND_BOT_TOKEN (${tokenFingerprint}). ` +
-        'Generate a current token in BotFather and replace only this Railway variable.'
-      );
-    }
     throw new Error(`Telegram getUpdates failed: ${response.status} ${text}`);
   }
 
@@ -161,6 +169,8 @@ async function pollLoop(): Promise<void> {
   console.log(`[telegram-bot] Command-token fingerprint: ${tokenFingerprint}; chat configured: yes`);
   console.log('[telegram-bot] Commands ready: /paperstats /walletstats /exitstats /scorestats /heliusstats /helius /readiness /resume /walletscan');
 
+  await validateToken();
+
   while (true) {
     try {
       const updates = await getUpdates();
@@ -182,6 +192,6 @@ async function pollLoop(): Promise<void> {
 }
 
 pollLoop().catch((error) => {
-  console.error('[telegram-bot] Fatal error:', error);
+  console.error('[telegram-bot] Fatal startup error:', error);
   process.exit(1);
 });
