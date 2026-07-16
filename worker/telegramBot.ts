@@ -50,7 +50,7 @@ const AUTHORIZED_CHAT_IDS = new Set([TELEGRAM_CHAT_ID, ...EXTRA_CHAT_IDS].filter
 const POLL_TIMEOUT_SECONDS = 30;
 const CONFLICT_BACKOFF_MIN_MS = 65_000;
 const CONFLICT_BACKOFF_JITTER_MS = 30_000;
-const TELEGRAM_WORKER_VERSION = '2026-07-17-multi-chat-v11';
+const TELEGRAM_WORKER_VERSION = '2026-07-17-chat-id-setup-v12';
 
 if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
   console.error('[telegram-bot] TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID must be set. Exiting.');
@@ -196,14 +196,13 @@ async function handleUpdate(update: TelegramUpdate): Promise<void> {
   const incomingChatId = String(message.chat.id);
   const command = normalizeCommand(message.text);
 
-  // Safe setup command: reveals only the current chat's own ID.
   if (command === '/chatid') {
     await sendToChat(incomingChatId, [
       '🆔 <b>Telegram chat ID</b>', '',
       `<code>${incomingChatId}</code>`, '',
       AUTHORIZED_CHAT_IDS.has(incomingChatId)
         ? '✅ This chat is already authorized.'
-        : '⚠️ Add this ID to TELEGRAM_ALLOWED_CHAT_IDS on the dedicated Telegram Railway service, then redeploy.',
+        : `⚠️ Add this Railway variable on the dedicated Telegram Bot service:\n\n<code>TELEGRAM_ALLOWED_CHAT_IDS=${incomingChatId}</code>\n\nThen redeploy.`,
     ].join('\n'));
     return;
   }
@@ -211,7 +210,13 @@ async function handleUpdate(update: TelegramUpdate): Promise<void> {
   if (!AUTHORIZED_CHAT_IDS.has(incomingChatId)) {
     console.warn(`[telegram-bot] Ignored message from unauthorized chat ${incomingChatId}`);
     if (command.startsWith('/')) {
-      await sendToChat(incomingChatId, '🔒 This chat is not authorized.\n\nUse /chatid to get its ID, then add it to TELEGRAM_ALLOWED_CHAT_IDS.');
+      await sendToChat(incomingChatId, [
+        '🔒 <b>This chat is not authorized yet.</b>', '',
+        `Chat ID: <code>${incomingChatId}</code>`, '',
+        'Add this exact Railway variable on the dedicated Telegram Bot service:', '',
+        `<code>TELEGRAM_ALLOWED_CHAT_IDS=${incomingChatId}</code>`, '',
+        'Then redeploy and send /help again.',
+      ].join('\n'));
     }
     return;
   }
