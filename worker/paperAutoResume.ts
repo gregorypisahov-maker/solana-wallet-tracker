@@ -2,7 +2,7 @@ import { loadState, saveState } from "../paper-trader/storage";
 import { sendTelegramAlert } from "../lib/telegram";
 
 const CHECK_INTERVAL_MS = 60_000;
-const DEFAULT_COOLDOWN_MINUTES = 60;
+const DEFAULT_COOLDOWN_MINUTES = 30;
 
 let cooldownStartedAt: number | null = null;
 let checkRunning = false;
