@@ -3,12 +3,14 @@ import { startAuditedWalletDiscoveryScheduler } from "./walletDiscoveryAudit";
 import { startWalletIntelligenceScheduler } from "./walletIntelligence";
 import { startShadowStrategyScheduler } from "./shadowStrategyScheduler";
 import { startAdaptiveStrategyScheduler } from "../paper-trader/adaptiveStrategy";
+import { startPaperAutoResumeScheduler } from "./paperAutoResume";
 
 async function bootstrap(): Promise<void> {
   startAuditedWalletDiscoveryScheduler();
   startWalletIntelligenceScheduler();
   startAdaptiveStrategyScheduler();
   startShadowStrategyScheduler();
+  startPaperAutoResumeScheduler();
   await import("./monitor");
 }
 
