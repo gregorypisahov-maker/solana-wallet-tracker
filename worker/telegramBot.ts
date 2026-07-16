@@ -23,6 +23,7 @@ const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 
 const POLL_TIMEOUT_SECONDS = 30;
 const RETRY_DELAY_MS = 5_000;
+const TELEGRAM_WORKER_VERSION = '2026-07-16-heliusstats-v2';
 
 if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
   console.error(
@@ -83,6 +84,8 @@ const COMMAND_HANDLERS: Record<string, () => Promise<string>> = {
   '/exitstats': handleExitStats,
   '/scorestats': handleScoreStats,
   '/heliusstats': handleHeliusStats,
+  '/helius_stats': handleHeliusStats,
+  '/helius': handleHeliusStats,
   '/readiness': handleReadiness,
   '/resume': handleResume,
 };
@@ -99,13 +102,9 @@ async function handleUpdate(update: TelegramUpdate): Promise<void> {
   lastUpdateId = Math.max(lastUpdateId, update.update_id);
 
   const message = update.message;
-
-  if (!message?.text) {
-    return;
-  }
+  if (!message?.text) return;
 
   const incomingChatId = String(message.chat.id);
-
   if (incomingChatId !== TELEGRAM_CHAT_ID) {
     console.warn(
       `[telegram-bot] Ignored message from unauthorized chat ${incomingChatId}`
@@ -117,6 +116,9 @@ async function handleUpdate(update: TelegramUpdate): Promise<void> {
   const handler = COMMAND_HANDLERS[command];
 
   if (!handler) {
+    if (command.startsWith('/')) {
+      console.log(`[telegram-bot] Unknown command: ${command}`);
+    }
     return;
   }
 
@@ -143,12 +145,16 @@ async function handleUpdate(update: TelegramUpdate): Promise<void> {
 }
 
 async function pollLoop(): Promise<void> {
-  console.log('[telegram-bot] Starting inbound command listener...');
+  console.log(
+    `[telegram-bot] Starting inbound command listener (${TELEGRAM_WORKER_VERSION})...`
+  );
+  console.log(
+    '[telegram-bot] Commands ready: /paperstats /walletstats /exitstats /scorestats /heliusstats /helius /readiness /resume'
+  );
 
   while (true) {
     try {
       const updates = await getUpdates();
-
       for (const update of updates) {
         await handleUpdate(update);
       }
