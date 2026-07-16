@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { FormEvent, useCallback, useEffect, useState } from "react";
 import WalletManager from "./WalletManager";
 
 type DashboardData = {
@@ -43,13 +43,24 @@ export default function Dashboard() {
   const [data, setData] = useState<DashboardData | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+  const [needsLogin, setNeedsLogin] = useState(false);
+  const [password, setPassword] = useState("");
+  const [loggingIn, setLoggingIn] = useState(false);
+  const [loginError, setLoginError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     setRefreshing(true);
     try {
       const response = await fetch("/api/dashboard", { cache: "no-store" });
-      if (!response.ok) throw new Error(response.status === 401 ? "Share link expired" : "Could not load live data");
+      if (response.status === 401) {
+        setNeedsLogin(true);
+        setData(null);
+        setError(null);
+        return;
+      }
+      if (!response.ok) throw new Error("Could not load live data");
       setData(await response.json());
+      setNeedsLogin(false);
       setError(null);
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : "Could not load live data");
@@ -58,6 +69,27 @@ export default function Dashboard() {
     }
   }, []);
 
+  const login = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setLoggingIn(true);
+    setLoginError(null);
+    try {
+      const response = await fetch("/api/viewer-login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password }),
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(result.error ?? "Could not sign in");
+      setPassword("");
+      await refresh();
+    } catch (requestError) {
+      setLoginError(requestError instanceof Error ? requestError.message : "Could not sign in");
+    } finally {
+      setLoggingIn(false);
+    }
+  };
+
   useEffect(() => {
     refresh();
     const timer = window.setInterval(refresh, 10_000);
@@ -65,6 +97,33 @@ export default function Dashboard() {
   }, [refresh]);
 
   if (!data) {
+    if (needsLogin) {
+      return (
+        <main className="shell">
+          <div className="loading" style={{ maxWidth: 460, margin: "12vh auto", textAlign: "left" }}>
+            <div className="eyebrow">PRIVATE • VIEW ONLY</div>
+            <h1 style={{ marginBottom: 8 }}>Smart Wallet Command Center</h1>
+            <p style={{ marginBottom: 24 }}>Enter your dashboard key to view the live paper-trading dashboard.</p>
+            <form onSubmit={login} style={{ display: "grid", gap: 12 }}>
+              <input
+                type="password"
+                value={password}
+                onChange={(event) => setPassword(event.target.value)}
+                placeholder="Dashboard key"
+                autoComplete="current-password"
+                autoFocus
+                required
+                style={{ width: "100%", padding: "14px 16px", borderRadius: 10, border: "1px solid rgba(255,255,255,.18)", background: "rgba(0,0,0,.25)", color: "inherit", fontSize: 16 }}
+              />
+              <button type="submit" disabled={loggingIn} style={{ padding: "14px 16px", borderRadius: 10, border: 0, fontWeight: 800, cursor: "pointer" }}>
+                {loggingIn ? "Unlocking…" : "Open view-only dashboard"}
+              </button>
+              {loginError && <div className="errorBanner">{loginError}</div>}
+            </form>
+          </div>
+        </main>
+      );
+    }
     return <main className="shell"><div className="loading">{error ?? "Connecting to live bot data…"}</div></main>;
   }
 
@@ -86,29 +145,12 @@ export default function Dashboard() {
       </header>
 
       {error && <div className="errorBanner">{error}. Showing the last successful snapshot.</div>}
-      {halted && <div className="haltBanner">Paper entries are paused: {state.halt_reason ?? "risk limit reached"}. Use <code>/resume</code> in the authorized Telegram chat.</div>}
+      {halted && <div className="haltBanner">Paper entries are paused: {state?.halt_reason ?? "risk limit reached"}. Use <code>/resume</code> in the authorized Telegram chat.</div>}
 
       <section className="metrics">
-        <Metric
-          label="Cash balance"
-          value={`${data.summary.cashSol.toFixed(3)} SOL`}
-          sub="Available simulated cash"
-        />
-        <Metric
-          label="Open position value"
-          value={`${data.summary.openPositionValueSol.toFixed(3)} SOL`}
-          sub={
-            data.summary.livePricesUnavailable > 0
-              ? `${data.summary.livePricesUnavailable} live price${data.summary.livePricesUnavailable === 1 ? "" : "s"} unavailable • estimated`
-              : `Unrealized ${sol(data.summary.unrealizedPnlSol)}`
-          }
-        />
-        <Metric
-          label="Live equity"
-          value={`${data.summary.liveEquitySol.toFixed(3)} SOL`}
-          sub="Cash + open position value"
-          tone="cyan"
-        />
+        <Metric label="Cash balance" value={`${data.summary.cashSol.toFixed(3)} SOL`} sub="Available simulated cash" />
+        <Metric label="Open position value" value={`${data.summary.openPositionValueSol.toFixed(3)} SOL`} sub={data.summary.livePricesUnavailable > 0 ? `${data.summary.livePricesUnavailable} live price${data.summary.livePricesUnavailable === 1 ? "" : "s"} unavailable • estimated` : `Unrealized ${sol(data.summary.unrealizedPnlSol)}`} />
+        <Metric label="Live equity" value={`${data.summary.liveEquitySol.toFixed(3)} SOL`} sub="Cash + open position value" tone="cyan" />
         <Metric label="Realized PnL" value={sol(data.summary.totalPnlSol)} tone={data.summary.totalPnlSol >= 0 ? "green" : "red"} />
         <Metric label="Win rate" value={`${(data.summary.winRate * 100).toFixed(1)}%`} sub={`${data.summary.wins}W / ${data.summary.losses}L`} />
         <Metric label="Profit factor" value={data.summary.profitFactor == null ? "—" : data.summary.profitFactor.toFixed(2)} />
@@ -120,57 +162,20 @@ export default function Dashboard() {
 
       <section className="grid two">
         <Panel title="Open paper positions" badge={`${data.positions.length} LIVE`}>
-          {data.positions.length === 0 ? <Empty text="Waiting for the next qualified consensus alert." /> : (
-            <div className="stack">{data.positions.map((position) => (
-              <div className="position" key={position.mint}>
-                <div><strong>{position.token_symbol}</strong><a href={`https://dexscreener.com/solana/${position.mint}`} target="_blank" rel="noreferrer">{short(position.mint)}</a></div>
-                <div><span>Size</span><b>{Number(position.size_sol).toFixed(3)} SOL</b></div>
-                <div><span>Remaining</span><b>{(Number(position.remaining_pct) * 100).toFixed(0)}%</b></div>
-                <div><span>Peak</span><b>{Number(position.peak_multiple).toFixed(2)}x</b></div>
-                <div><span>Opened</span><b>{time(position.entry_time)}</b></div>
-              </div>
-            ))}</div>
-          )}
+          {data.positions.length === 0 ? <Empty text="Waiting for the next qualified consensus alert." /> : <div className="stack">{data.positions.map((position) => <div className="position" key={position.mint}><div><strong>{position.token_symbol}</strong><a href={`https://dexscreener.com/solana/${position.mint}`} target="_blank" rel="noreferrer">{short(position.mint)}</a></div><div><span>Size</span><b>{Number(position.size_sol).toFixed(3)} SOL</b></div><div><span>Remaining</span><b>{(Number(position.remaining_pct) * 100).toFixed(0)}%</b></div><div><span>Peak</span><b>{Number(position.peak_multiple).toFixed(2)}x</b></div><div><span>Opened</span><b>{time(position.entry_time)}</b></div></div>)}</div>}
         </Panel>
-
         <Panel title="Wallet leaderboard" badge="TRUST SCORE">
-          {data.performance.length === 0 ? <Empty text="Wallet scores appear after matched paper positions close." /> : (
-            <div className="leaderboard">{data.performance.slice(0, 8).map((wallet, index) => (
-              <div className="leader" key={wallet.wallet_address}>
-                <span className="rank">{index + 1}</span>
-                <code>{wallet.wallet_address}</code>
-                <div className="bar"><i style={{ width: `${Math.max(2, Number(wallet.trust_score))}%` }} /></div>
-                <strong>{Number(wallet.trust_score).toFixed(0)}</strong>
-                <small>{(Number(wallet.win_rate) * 100).toFixed(0)}% win</small>
-              </div>
-            ))}</div>
-          )}
+          {data.performance.length === 0 ? <Empty text="Wallet scores appear after matched paper positions close." /> : <div className="leaderboard">{data.performance.slice(0, 8).map((wallet, index) => <div className="leader" key={wallet.wallet_address}><span className="rank">{index + 1}</span><code>{wallet.wallet_address}</code><div className="bar"><i style={{ width: `${Math.max(2, Number(wallet.trust_score))}%` }} /></div><strong>{Number(wallet.trust_score).toFixed(0)}</strong><small>{(Number(wallet.win_rate) * 100).toFixed(0)}% win</small></div>)}</div>}
         </Panel>
       </section>
 
       <Panel title="Consensus radar" badge="LATEST TOKENS">
-        <div className="tableWrap"><table>
-          <thead><tr><th>Token</th><th>Wallets</th><th>Total buy</th><th>Score</th><th>Market cap</th><th>Liquidity</th><th>Last signal</th><th>Flags</th></tr></thead>
-          <tbody>{data.tokens.slice(0, 15).map((token) => (
-            <tr key={token.token_mint}>
-              <td><a href={`https://dexscreener.com/solana/${token.token_mint}`} target="_blank" rel="noreferrer"><strong>{token.token_symbol ?? "UNKNOWN"}</strong><small>{short(token.token_mint)}</small></a></td>
-              <td>{token.wallets_count}</td><td>{Number(token.total_sol_bought).toFixed(2)} SOL</td>
-              <td><span className={`score score${Math.floor(Number(token.score) / 20)}`}>{token.score}</span></td>
-              <td>{usd(token.market_cap == null ? null : Number(token.market_cap))}</td><td>{usd(token.liquidity_usd == null ? null : Number(token.liquidity_usd))}</td>
-              <td>{time(token.last_buy_time)}</td>
-              <td>{token.dump_flag ? <em className="flag red">DUMP</em> : null}{token.scalp_flag ? <em className="flag amber">SCALP</em> : null}{!token.dump_flag && !token.scalp_flag ? "—" : null}</td>
-            </tr>
-          ))}</tbody>
-        </table>{data.tokens.length === 0 && <Empty text="No token consensus has been recorded yet." />}</div>
+        <div className="tableWrap"><table><thead><tr><th>Token</th><th>Wallets</th><th>Total buy</th><th>Score</th><th>Market cap</th><th>Liquidity</th><th>Last signal</th><th>Flags</th></tr></thead><tbody>{data.tokens.slice(0, 15).map((token) => <tr key={token.token_mint}><td><a href={`https://dexscreener.com/solana/${token.token_mint}`} target="_blank" rel="noreferrer"><strong>{token.token_symbol ?? "UNKNOWN"}</strong><small>{short(token.token_mint)}</small></a></td><td>{token.wallets_count}</td><td>{Number(token.total_sol_bought).toFixed(2)} SOL</td><td><span className={`score score${Math.floor(Number(token.score) / 20)}`}>{token.score}</span></td><td>{usd(token.market_cap == null ? null : Number(token.market_cap))}</td><td>{usd(token.liquidity_usd == null ? null : Number(token.liquidity_usd))}</td><td>{time(token.last_buy_time)}</td><td>{token.dump_flag ? <em className="flag red">DUMP</em> : null}{token.scalp_flag ? <em className="flag amber">SCALP</em> : null}{!token.dump_flag && !token.scalp_flag ? "—" : null}</td></tr>)}</tbody></table>{data.tokens.length === 0 && <Empty text="No token consensus has been recorded yet." />}</div>
       </Panel>
 
       <section className="grid two">
-        <Panel title="Recent paper exits" badge="REALIZED">
-          <Feed rows={data.trades.slice(0, 10)} type="trade" />
-        </Panel>
-        <Panel title="Smart-wallet activity" badge="ON CHAIN">
-          <Feed rows={data.transactions.slice(0, 10)} type="transaction" />
-        </Panel>
+        <Panel title="Recent paper exits" badge="REALIZED"><Feed rows={data.trades.slice(0, 10)} type="trade" /></Panel>
+        <Panel title="Smart-wallet activity" badge="ON CHAIN"><Feed rows={data.transactions.slice(0, 10)} type="transaction" /></Panel>
       </section>
 
       <footer>This dashboard can observe and simulate trades only. It cannot access a wallet or execute real transactions.</footer>
@@ -189,10 +194,6 @@ function Feed({ rows, type }: { rows: any[]; type: "trade" | "transaction" }) {
   if (!rows.length) return <Empty text="No activity recorded yet." />;
   return <div className="feed">{rows.map((row, index) => {
     const positive = type === "trade" ? Number(row.pnl_sol) >= 0 : row.side === "buy";
-    return <div className="feedRow" key={`${row.id ?? row.token_mint}:${index}`}>
-      <i className={positive ? "up" : "down"}>{positive ? "↗" : "↘"}</i>
-      <div><strong>{type === "trade" ? row.token_symbol : short(row.token_mint)}</strong><small>{type === "trade" ? row.reason.replaceAll("_", " ") : `${row.wallet_address} • ${row.side}`}</small></div>
-      <div className="feedValue"><b className={positive ? "green" : "red"}>{type === "trade" ? sol(Number(row.pnl_sol)) : `${Number(row.sol_amount).toFixed(3)} SOL`}</b><small>{time(type === "trade" ? row.happened_at : row.tx_time)}</small></div>
-    </div>;
+    return <div className="feedRow" key={`${row.id ?? row.token_mint}:${index}`}><i className={positive ? "up" : "down"}>{positive ? "↗" : "↘"}</i><div><strong>{type === "trade" ? row.token_symbol : short(row.token_mint)}</strong><small>{type === "trade" ? row.reason.replaceAll("_", " ") : `${row.wallet_address} • ${row.side}`}</small></div><div className="feedValue"><b className={positive ? "green" : "red"}>{type === "trade" ? sol(Number(row.pnl_sol)) : `${Number(row.sol_amount).toFixed(3)} SOL`}</b><small>{time(type === "trade" ? row.happened_at : row.tx_time)}</small></div></div>;
   })}</div>;
 }
