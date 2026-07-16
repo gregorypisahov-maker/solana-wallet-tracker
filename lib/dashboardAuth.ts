@@ -3,6 +3,14 @@ import { timingSafeEqual } from "crypto";
 
 export const VIEWER_COOKIE = "swt_viewer";
 
+export function getViewerSecret(): string | undefined {
+  return (
+    process.env.VIEWER_SHARE_TOKEN?.trim() ||
+    process.env.DASHBOARD_KEY?.trim() ||
+    process.env.DASHBOARD_ADMIN_PASSWORD?.trim()
+  );
+}
+
 function safeEqual(left: string | undefined, right: string | undefined): boolean {
   if (!left || !right) return false;
   const a = Buffer.from(left);
@@ -11,8 +19,7 @@ function safeEqual(left: string | undefined, right: string | undefined): boolean
 }
 
 export function hasViewerAccess(request: NextRequest): boolean {
-  const expected = process.env.VIEWER_SHARE_TOKEN;
-  return safeEqual(request.cookies.get(VIEWER_COOKIE)?.value, expected);
+  return safeEqual(request.cookies.get(VIEWER_COOKIE)?.value, getViewerSecret());
 }
 
 export function hasAdminAccess(request: NextRequest): boolean {
