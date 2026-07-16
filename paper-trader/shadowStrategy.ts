@@ -11,7 +11,7 @@ const RULES = {
   minAvgBuySol: 0.75,
   minAvgTrustScore: 55, // trust 60+ entries were strongly profitable, <55 net negative
   eliteTwoWalletMinAvgBuySol: 1.25,
-  eliteTwoWalletMinAvgTrustScore: 70,
+  eliteTwoWalletMinAvgTrustScore: 60,
   minLiquidityUsd: 15_000,
   minLiqToMcapRatio: 0.15, // liq/mcap 30%+ was the most profitable band, <15% negative
   minMarketCapUsd: 20_000,
