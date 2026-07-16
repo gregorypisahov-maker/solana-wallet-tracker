@@ -8,6 +8,7 @@
 import 'dotenv/config';
 
 import { sendTelegramAlert } from '../lib/telegram';
+import { loadState } from '../paper-trader/storage';
 import {
   handlePaperStats,
   handleWalletStats,
@@ -47,7 +48,7 @@ const TELEGRAM_CHAT_ID = cleanEnv(process.env.TELEGRAM_CHAT_ID);
 const POLL_TIMEOUT_SECONDS = 30;
 const CONFLICT_BACKOFF_MIN_MS = 65_000;
 const CONFLICT_BACKOFF_JITTER_MS = 30_000;
-const TELEGRAM_WORKER_VERSION = '2026-07-17-elite-wallets-v9';
+const TELEGRAM_WORKER_VERSION = '2026-07-17-help-menu-v10';
 
 if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
   console.error('[telegram-bot] TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID must be set. Exiting.');
@@ -103,7 +104,56 @@ async function getUpdates(): Promise<TelegramUpdate[]> {
   return body.result ?? [];
 }
 
+async function handleHelp(): Promise<string> {
+  let status = '🟡 Paper Trader: status unavailable';
+  let resumeHint = '/resume — Resume paper trading if halted';
+
+  try {
+    const state = await loadState();
+    if (state.halted) {
+      status = `🔴 Paper Trader: HALTED${state.haltReason ? ` — ${state.haltReason}` : ''}`;
+      resumeHint = '/resume — Resume paper trading now';
+    } else {
+      status = '🟢 Paper Trader: ACTIVE';
+      resumeHint = '/resume — Not needed while active';
+    }
+  } catch (error) {
+    console.warn('[telegram-bot] Help status check failed:', error);
+  }
+
+  return [
+    '🤖 <b>SOLANA WALLET TRACKER</b>',
+    '',
+    status,
+    '',
+    '<b>📊 Status</b>',
+    '/paperstats — Paper trading performance',
+    '/readiness — Bot readiness check',
+    '/heliusstats — Helius credit usage',
+    '',
+    '<b>📈 Analytics</b>',
+    '/walletstats — Wallet performance',
+    '/scorestats — Performance by score range',
+    '/exitstats — Performance by exit reason',
+    '/elite_wallets — Elite wallet rankings',
+    '',
+    '<b>🧠 Wallet intelligence</b>',
+    '/auto_wallets — Automatic wallet-manager status',
+    '/walletscan — Run wallet scan',
+    '/discover_now — Search for new trial wallets now',
+    '/intelligence_now — Re-score and rotate wallets now',
+    '',
+    '<b>🛠 Control</b>',
+    resumeHint,
+    '/help — Show this command menu',
+    '/commands — Same as /help',
+  ].join('\n');
+}
+
 const COMMAND_HANDLERS: Record<string, () => Promise<string>> = {
+  '/help': handleHelp,
+  '/commands': handleHelp,
+  '/start': handleHelp,
   '/paperstats': handlePaperStats,
   '/walletstats': handleWalletStats,
   '/exitstats': handleExitStats,
@@ -143,7 +193,10 @@ async function handleUpdate(update: TelegramUpdate): Promise<void> {
   const command = normalizeCommand(message.text);
   const handler = COMMAND_HANDLERS[command];
   if (!handler) {
-    if (command.startsWith('/')) console.log(`[telegram-bot] Unknown command: ${command}`);
+    if (command.startsWith('/')) {
+      console.log(`[telegram-bot] Unknown command: ${command}`);
+      await sendTelegramAlert(`❓ Unknown command: ${command}\n\nUse /help to see all available commands.`);
+    }
     return;
   }
 
@@ -170,7 +223,7 @@ async function sleep(ms: number): Promise<void> {
 async function pollLoop(): Promise<void> {
   console.log(`[telegram-bot] Starting inbound command listener (${TELEGRAM_WORKER_VERSION})...`);
   console.log(`[telegram-bot] Bot-token fingerprint: ${tokenFingerprint}; chat configured: yes`);
-  console.log('[telegram-bot] Commands ready: /paperstats /walletstats /exitstats /scorestats /heliusstats /readiness /resume /walletscan /auto_wallets /elite_wallets /discover_now /intelligence_now');
+  console.log('[telegram-bot] Commands ready: /help /commands /paperstats /walletstats /exitstats /scorestats /heliusstats /readiness /resume /walletscan /auto_wallets /elite_wallets /discover_now /intelligence_now');
 
   await validateToken();
 
