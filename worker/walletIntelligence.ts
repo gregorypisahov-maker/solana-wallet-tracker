@@ -40,6 +40,35 @@ const MAX_DISABLE_PER_RUN = Math.floor(
   boundedNumber(process.env.WALLET_DISABLE_MAX_PER_RUN, 3, 1, 10)
 );
 
+// A trial wallet can be slightly profitable yet still consume a scarce slot
+// without contributing enough edge. Review only after a large sample so normal
+// variance cannot remove a potentially good wallet too early.
+const MIN_TRADES_TO_DISABLE_MEDIOCRE = Math.floor(
+  boundedNumber(process.env.WALLET_DISABLE_MEDIOCRE_MIN_TRADES, 40, 30, 300)
+);
+const MAX_PROFIT_FACTOR_MEDIOCRE = boundedNumber(
+  process.env.WALLET_DISABLE_MEDIOCRE_MAX_PROFIT_FACTOR,
+  1.1,
+  1,
+  1.3
+);
+const MAX_TRUST_MEDIOCRE = boundedNumber(
+  process.env.WALLET_DISABLE_MEDIOCRE_MAX_TRUST,
+  45,
+  25,
+  60
+);
+
+// Trial wallets that never produce a matched paper trade eventually block
+// discovery from testing fresh candidates. Proven wallets are never disabled
+// by this inactivity rule.
+const INACTIVE_TRIAL_DAYS = boundedNumber(
+  process.env.WALLET_DISABLE_INACTIVE_TRIAL_DAYS,
+  3,
+  1,
+  30
+);
+
 function boundedNumber(raw: string | undefined, fallback: number, min: number, max: number): number {
   const parsed = Number(raw);
   return Number.isFinite(parsed) ? Math.max(min, Math.min(max, parsed)) : fallback;
@@ -57,11 +86,42 @@ interface WalletRow {
   address: string;
   active: boolean;
   management_status: "trial" | "proven" | "disabled";
+  discovered_at: string | null;
+  created_at?: string | null;
 }
 
 function n(value: unknown, fallback = 0): number {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function ageDays(value: string | null | undefined, nowMs: number): number | null {
+  if (!value) return null;
+  const timestamp = new Date(value).getTime();
+  if (!Number.isFinite(timestamp)) return null;
+  return Math.max(0, (nowMs - timestamp) / 86_400_000);
+}
+
+async function disableWallet(address: string, reason: string, now: string): Promise<boolean> {
+  const { error } = await supabase
+    .from("wallets")
+    .update({
+      active: false,
+      management_status: "disabled",
+      auto_disabled_at: now,
+      auto_disable_reason: reason,
+      management_updated_at: now,
+    })
+    .eq("address", address)
+    .eq("active", true)
+    .eq("management_status", "trial");
+
+  if (error) {
+    console.error(`[wallet-intelligence] Failed to disable ${address}:`, error);
+    return false;
+  }
+
+  return true;
 }
 
 export async function runWalletIntelligence(): Promise<{
@@ -73,7 +133,7 @@ export async function runWalletIntelligence(): Promise<{
 
   const [{ data: wallets, error: walletError }, { data: performance, error: perfError }] =
     await Promise.all([
-      supabase.from("wallets").select("address, active, management_status"),
+      supabase.from("wallets").select("address, active, management_status, discovered_at, created_at"),
       supabase
         .from("wallet_performance")
         .select("wallet_address, completed_trades, realized_pnl_sol, profit_factor, trust_score"),
@@ -82,10 +142,15 @@ export async function runWalletIntelligence(): Promise<{
   if (walletError) throw new Error(`Failed to load wallets: ${walletError.message}`);
   if (perfError) throw new Error(`Failed to load wallet performance: ${perfError.message}`);
 
-  const walletMap = new Map((wallets ?? []).map((row: WalletRow) => [row.address, row]));
+  const walletRows = (wallets ?? []) as WalletRow[];
+  const walletMap = new Map(walletRows.map((row) => [row.address, row]));
+  const performanceMap = new Map(
+    ((performance ?? []) as PerformanceRow[]).map((row) => [row.wallet_address, row])
+  );
   const promoted: string[] = [];
   const disabled: string[] = [];
   const now = new Date().toISOString();
+  const nowMs = Date.now();
 
   const ranked = ((performance ?? []) as PerformanceRow[])
     .map((row) => ({
@@ -103,38 +168,57 @@ export async function runWalletIntelligence(): Promise<{
       return aPf - bPf || a.pnl - b.pnl || b.trades - a.trades;
     });
 
-  // Disable only the worst confirmed underperformers and cap removals per run.
-  // This avoids a temporary market regime wiping out the full wallet set at once.
+  // First free slots held by trial wallets that have produced no usable evidence.
+  // Old manually-added rows may lack discovered_at, so created_at is used as a fallback.
+  const inactiveTrials = walletRows
+    .filter((wallet) => wallet.active && wallet.management_status === "trial")
+    .map((wallet) => {
+      const perf = performanceMap.get(wallet.address);
+      const trades = n(perf?.completed_trades);
+      const age = ageDays(wallet.discovered_at ?? wallet.created_at, nowMs);
+      return { wallet, trades, age };
+    })
+    .filter((item) => item.trades === 0 && item.age !== null && item.age >= INACTIVE_TRIAL_DAYS)
+    .sort((a, b) => (b.age ?? 0) - (a.age ?? 0));
+
+  for (const item of inactiveTrials) {
+    if (disabled.length >= MAX_DISABLE_PER_RUN) break;
+    const reason =
+      `Auto-disabled inactive trial wallet after ${(item.age ?? 0).toFixed(1)} days ` +
+      `with 0 matched paper trades, freeing a slot for a fresh candidate`;
+    if (await disableWallet(item.wallet.address, reason, now)) {
+      disabled.push(item.wallet.address);
+    }
+  }
+
+  // Then remove confirmed losing or persistently weak TRIAL wallets. Proven
+  // wallets are protected from automatic removal and require manual review.
   for (const item of ranked) {
     if (disabled.length >= MAX_DISABLE_PER_RUN) break;
-    const { row, trades, pnl, trust, profitFactor } = item;
-    const shouldDisable =
+    const { row, wallet, trades, pnl, trust, profitFactor } = item;
+    if (!wallet || wallet.management_status !== "trial" || !wallet.active) continue;
+
+    const confirmedLoser =
       trades >= MIN_TRADES_TO_DISABLE &&
       pnl < 0 &&
       profitFactor !== null &&
       profitFactor < MAX_PROFIT_FACTOR_TO_DISABLE;
 
-    if (!shouldDisable) continue;
+    const confirmedMediocre =
+      trades >= MIN_TRADES_TO_DISABLE_MEDIOCRE &&
+      profitFactor !== null &&
+      profitFactor < MAX_PROFIT_FACTOR_MEDIOCRE &&
+      trust < MAX_TRUST_MEDIOCRE;
 
-    const reason =
-      `Auto-disabled as a confirmed bottom performer after ${trades} completed trades: ` +
-      `${pnl.toFixed(4)} SOL PnL, PF ${profitFactor.toFixed(3)}, trust ${trust.toFixed(1)}`;
+    if (!confirmedLoser && !confirmedMediocre) continue;
 
-    const { error } = await supabase
-      .from("wallets")
-      .update({
-        active: false,
-        management_status: "disabled",
-        auto_disabled_at: now,
-        auto_disable_reason: reason,
-        management_updated_at: now,
-      })
-      .eq("address", row.wallet_address)
-      .neq("management_status", "disabled");
+    const reason = confirmedLoser
+      ? `Auto-disabled confirmed losing trial after ${trades} trades: ${pnl.toFixed(4)} SOL PnL, ` +
+        `PF ${profitFactor!.toFixed(3)}, trust ${trust.toFixed(1)}`
+      : `Auto-disabled persistently weak trial after ${trades} trades: ${pnl.toFixed(4)} SOL PnL, ` +
+        `PF ${profitFactor!.toFixed(3)}, trust ${trust.toFixed(1)}`;
 
-    if (error) {
-      console.error(`[wallet-intelligence] Failed to disable ${row.wallet_address}:`, error);
-    } else {
+    if (await disableWallet(row.wallet_address, reason, now)) {
       disabled.push(row.wallet_address);
     }
   }
@@ -191,7 +275,12 @@ export async function runWalletIntelligence(): Promise<{
         min_trades: MIN_TRADES_TO_DISABLE,
         max_profit_factor: MAX_PROFIT_FACTOR_TO_DISABLE,
         negative_pnl_required: true,
+        mediocre_min_trades: MIN_TRADES_TO_DISABLE_MEDIOCRE,
+        mediocre_max_profit_factor: MAX_PROFIT_FACTOR_MEDIOCRE,
+        mediocre_max_trust: MAX_TRUST_MEDIOCRE,
+        inactive_trial_days: INACTIVE_TRIAL_DAYS,
         max_disabled_per_run: MAX_DISABLE_PER_RUN,
+        trial_wallets_only: true,
         bottom_performers_first: true,
       },
     },
@@ -209,8 +298,15 @@ export async function runWalletIntelligence(): Promise<{
 }
 
 let running = false;
+let schedulerStarted = false;
 
 export function startWalletIntelligenceScheduler(): void {
+  if (schedulerStarted) {
+    console.warn("[wallet-intelligence] scheduler already started in this process; duplicate ignored");
+    return;
+  }
+  schedulerStarted = true;
+
   const run = async () => {
     if (running) return;
     running = true;
@@ -229,6 +325,6 @@ export function startWalletIntelligenceScheduler(): void {
   console.log(
     `[wallet-intelligence] enabled every ${RUN_INTERVAL_HOURS}h; ` +
       `promote after ${MIN_TRADES_TO_PROMOTE}+ trades at PF ${MIN_PROFIT_FACTOR_TO_PROMOTE}+; ` +
-      `disable up to ${MAX_DISABLE_PER_RUN} confirmed losers after ${MIN_TRADES_TO_DISABLE}+ trades`
+      `disable up to ${MAX_DISABLE_PER_RUN} weak/inactive trial wallets per run`
   );
 }
