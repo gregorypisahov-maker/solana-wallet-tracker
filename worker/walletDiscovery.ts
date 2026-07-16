@@ -4,10 +4,6 @@ import { getSupabaseAdmin } from "../lib/supabase";
 
 const supabase = getSupabaseAdmin();
 
-const GMGN_ENDPOINT =
-  process.env.GMGN_WALLET_DISCOVERY_URL ??
-  "https://gmgn.ai/defi/quotation/v1/rank/sol/wallets/7d?orderby=realized_profit_7d&direction=desc";
-
 const DISCOVERY_INTERVAL_HOURS = boundedNumber(
   process.env.WALLET_DISCOVERY_INTERVAL_HOURS,
   6,
@@ -20,41 +16,41 @@ const MAX_NEW_PER_RUN = Math.floor(
 const MAX_ACTIVE_TRIALS = Math.floor(
   boundedNumber(process.env.WALLET_DISCOVERY_MAX_ACTIVE_TRIALS, 20, 5, 40)
 );
-const MIN_PNL_7D_USD = boundedNumber(
-  process.env.WALLET_DISCOVERY_MIN_PNL_7D_USD,
-  1_000,
-  0,
-  1_000_000
+const SEED_TOKEN_LIMIT = Math.floor(
+  boundedNumber(process.env.WALLET_DISCOVERY_SEED_TOKENS, 6, 2, 10)
 );
-const MAX_PNL_7D_USD = boundedNumber(
-  process.env.WALLET_DISCOVERY_MAX_PNL_7D_USD,
-  2_000_000,
-  10_000,
-  100_000_000
+const TRANSACTIONS_PER_TOKEN = Math.floor(
+  boundedNumber(process.env.WALLET_DISCOVERY_TXS_PER_TOKEN, 20, 5, 50)
 );
-const MIN_WIN_RATE = boundedNumber(
-  process.env.WALLET_DISCOVERY_MIN_WIN_RATE,
-  0.5,
-  0,
-  1
-);
-const MIN_TRADES_7D = Math.floor(
-  boundedNumber(process.env.WALLET_DISCOVERY_MIN_TRADES_7D, 10, 1, 10_000)
-);
-const MAX_TRADES_7D = Math.floor(
-  boundedNumber(process.env.WALLET_DISCOVERY_MAX_TRADES_7D, 1_000, 10, 100_000)
+const MIN_SEED_SCORE = Math.floor(
+  boundedNumber(process.env.WALLET_DISCOVERY_MIN_SEED_SCORE, 8, 6, 20)
 );
 const REQUEST_TIMEOUT_MS = Math.floor(
   boundedNumber(process.env.WALLET_DISCOVERY_TIMEOUT_MS, 15_000, 3_000, 60_000)
 );
 
+interface SeedToken {
+  token_mint: string;
+  token_symbol: string | null;
+  score: number | string;
+}
+
+interface EnhancedTransaction {
+  feePayer?: string;
+  source?: string;
+  type?: string;
+  signature?: string;
+  timestamp?: number;
+}
+
 interface Candidate {
   address: string;
-  pnl7d: number;
-  winRate: number;
-  trades7d: number;
+  tokenCount: number;
+  transactionCount: number;
+  seedScoreTotal: number;
+  maxSeedScore: number;
   score: number;
-  raw: Record<string, unknown>;
+  seedTokens: string[];
 }
 
 function boundedNumber(
@@ -67,28 +63,6 @@ function boundedNumber(
   return Number.isFinite(parsed) ? Math.max(min, Math.min(max, parsed)) : fallback;
 }
 
-function firstNumber(record: Record<string, unknown>, keys: string[]): number | null {
-  for (const key of keys) {
-    const value = record[key];
-    const parsed = typeof value === "string" ? Number(value) : value;
-    if (typeof parsed === "number" && Number.isFinite(parsed)) return parsed;
-  }
-  return null;
-}
-
-function firstString(record: Record<string, unknown>, keys: string[]): string | null {
-  for (const key of keys) {
-    const value = record[key];
-    if (typeof value === "string" && value.length > 0) return value;
-  }
-  return null;
-}
-
-function normalizeRate(value: number | null): number {
-  if (value === null) return 0;
-  return value > 1 ? value / 100 : value;
-}
-
 function isSolanaAddress(value: string): boolean {
   try {
     return new PublicKey(value).toBase58() === value;
@@ -97,111 +71,165 @@ function isSolanaAddress(value: string): boolean {
   }
 }
 
-function collectObjects(value: unknown, output: Record<string, unknown>[]): void {
-  if (Array.isArray(value)) {
-    for (const item of value) collectObjects(item, output);
-    return;
+function getHeliusApiKey(): string {
+  const explicit = process.env.HELIUS_API_KEY?.trim();
+  if (explicit) return explicit;
+
+  const rpcUrl = process.env.HELIUS_RPC_URL?.trim();
+  if (!rpcUrl) {
+    throw new Error("HELIUS_RPC_URL is required for wallet discovery");
   }
-  if (!value || typeof value !== "object") return;
-
-  const record = value as Record<string, unknown>;
-  const address = firstString(record, [
-    "wallet_address",
-    "wallet",
-    "address",
-    "owner",
-    "maker",
-  ]);
-  if (address && isSolanaAddress(address)) output.push(record);
-
-  for (const nested of Object.values(record)) collectObjects(nested, output);
-}
-
-function toCandidate(record: Record<string, unknown>): Candidate | null {
-  const address = firstString(record, [
-    "wallet_address",
-    "wallet",
-    "address",
-    "owner",
-    "maker",
-  ]);
-  if (!address || !isSolanaAddress(address)) return null;
-
-  const pnl7d =
-    firstNumber(record, [
-      "realized_profit_7d",
-      "pnl_7d",
-      "profit_7d",
-      "realized_pnl_7d",
-    ]) ?? 0;
-  const winRate = normalizeRate(
-    firstNumber(record, ["winrate_7d", "win_rate_7d", "winrate", "win_rate"])
-  );
-  const trades7d = Math.round(
-    firstNumber(record, [
-      "txs_7d",
-      "trades_7d",
-      "trade_count_7d",
-      "buy_7d",
-      "token_num_7d",
-    ]) ?? 0
-  );
-
-  if (pnl7d < MIN_PNL_7D_USD || pnl7d > MAX_PNL_7D_USD) return null;
-  if (winRate < MIN_WIN_RATE || winRate > 0.95) return null;
-  if (trades7d < MIN_TRADES_7D || trades7d > MAX_TRADES_7D) return null;
-
-  // Prefer repeatable performance, not a single giant outlier or hyperactive bot.
-  const pnlScore = Math.min(50, Math.log10(Math.max(10, pnl7d)) * 10);
-  const winScore = winRate * 35;
-  const activityScore = Math.min(15, Math.log10(Math.max(10, trades7d)) * 7.5);
-
-  return {
-    address,
-    pnl7d,
-    winRate,
-    trades7d,
-    score: pnlScore + winScore + activityScore,
-    raw: record,
-  };
-}
-
-async function fetchCandidates(): Promise<Candidate[]> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
   try {
-    const response = await fetch(GMGN_ENDPOINT, {
+    const parsed = new URL(rpcUrl);
+    const key = parsed.searchParams.get("api-key");
+    if (key) return key;
+  } catch {
+    // Report a safe configuration error below.
+  }
+
+  throw new Error(
+    "Could not read the Helius API key from HELIUS_RPC_URL; optionally set HELIUS_API_KEY"
+  );
+}
+
+async function loadSeedTokens(): Promise<SeedToken[]> {
+  const cutoff = new Date(Date.now() - 7 * 24 * 60 * 60_000).toISOString();
+  const { data, error } = await supabase
+    .from("token_scores")
+    .select("token_mint, token_symbol, score")
+    .gte("score", MIN_SEED_SCORE)
+    .eq("dump_flag", false)
+    .gte("liquidity_usd", 10_000)
+    .gte("updated_at", cutoff)
+    .order("score", { ascending: false })
+    .order("updated_at", { ascending: false })
+    .limit(SEED_TOKEN_LIMIT);
+
+  if (error) throw new Error(`Failed to load discovery seed tokens: ${error.message}`);
+
+  return ((data ?? []) as SeedToken[]).filter((row) => isSolanaAddress(row.token_mint));
+}
+
+async function fetchEnhancedTransactions(
+  mint: string,
+  apiKey: string
+): Promise<EnhancedTransaction[]> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const url =
+    `https://api-mainnet.helius-rpc.com/v0/addresses/${mint}/transactions` +
+    `?api-key=${encodeURIComponent(apiKey)}` +
+    `&type=SWAP&limit=${TRANSACTIONS_PER_TOKEN}`;
+
+  try {
+    const response = await fetch(url, {
       signal: controller.signal,
-      headers: {
-        accept: "application/json, text/plain, */*",
-        "user-agent":
-          "Mozilla/5.0 (compatible; SolanaWalletTracker/1.0; trial-wallet-discovery)",
-      },
+      headers: { accept: "application/json" },
     });
 
     if (!response.ok) {
-      throw new Error(`GMGN leaderboard returned HTTP ${response.status}`);
+      const body = (await response.text()).slice(0, 160).replace(/\s+/g, " ");
+      throw new Error(`Helius returned HTTP ${response.status}${body ? `: ${body}` : ""}`);
     }
 
     const payload: unknown = await response.json();
-    const objects: Record<string, unknown>[] = [];
-    collectObjects(payload, objects);
-
-    const byAddress = new Map<string, Candidate>();
-    for (const record of objects) {
-      const candidate = toCandidate(record);
-      if (!candidate) continue;
-      const previous = byAddress.get(candidate.address);
-      if (!previous || candidate.score > previous.score) {
-        byAddress.set(candidate.address, candidate);
-      }
+    if (!Array.isArray(payload)) {
+      throw new Error("Helius returned an unexpected wallet-discovery response");
     }
 
-    return [...byAddress.values()].sort((a, b) => b.score - a.score);
+    return payload as EnhancedTransaction[];
   } finally {
     clearTimeout(timeout);
   }
+}
+
+async function fetchCandidates(): Promise<Candidate[]> {
+  const [seedTokens, apiKey] = await Promise.all([
+    loadSeedTokens(),
+    Promise.resolve(getHeliusApiKey()),
+  ]);
+
+  if (seedTokens.length === 0) {
+    console.log("[wallet-discovery] no recent safe seed tokens available");
+    return [];
+  }
+
+  const evidence = new Map<
+    string,
+    { tokens: Set<string>; transactionCount: number; seedScoreTotal: number; maxSeedScore: number }
+  >();
+  let successfulSeeds = 0;
+  const failures: string[] = [];
+
+  for (const seed of seedTokens) {
+    try {
+      const transactions = await fetchEnhancedTransactions(seed.token_mint, apiKey);
+      successfulSeeds += 1;
+      const seenForSeed = new Set<string>();
+      const seedScore = Number(seed.score) || 0;
+
+      for (const transaction of transactions) {
+        const address = transaction.feePayer?.trim();
+        if (!address || !isSolanaAddress(address)) continue;
+
+        const current = evidence.get(address) ?? {
+          tokens: new Set<string>(),
+          transactionCount: 0,
+          seedScoreTotal: 0,
+          maxSeedScore: 0,
+        };
+
+        current.transactionCount += 1;
+        current.maxSeedScore = Math.max(current.maxSeedScore, seedScore);
+        if (!seenForSeed.has(address)) {
+          current.tokens.add(seed.token_mint);
+          current.seedScoreTotal += seedScore;
+          seenForSeed.add(address);
+        }
+        evidence.set(address, current);
+      }
+    } catch (error) {
+      failures.push(
+        `${seed.token_symbol ?? seed.token_mint.slice(0, 6)}: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+    }
+  }
+
+  if (successfulSeeds === 0) {
+    throw new Error(
+      `Helius wallet discovery could not inspect any seed token: ${failures.join(" | ")}`
+    );
+  }
+
+  const candidates: Candidate[] = [];
+  for (const [address, row] of evidence) {
+    const tokenCount = row.tokens.size;
+    const hasRepeatedEvidence = tokenCount >= 2;
+    const hasStrongSingleTokenEvidence =
+      tokenCount === 1 && row.transactionCount >= 2 && row.maxSeedScore >= 12;
+
+    if (!hasRepeatedEvidence && !hasStrongSingleTokenEvidence) continue;
+
+    candidates.push({
+      address,
+      tokenCount,
+      transactionCount: row.transactionCount,
+      seedScoreTotal: row.seedScoreTotal,
+      maxSeedScore: row.maxSeedScore,
+      score: tokenCount * 100 + row.seedScoreTotal * 3 + Math.min(25, row.transactionCount),
+      seedTokens: [...row.tokens],
+    });
+  }
+
+  console.log(
+    `[wallet-discovery] Helius inspected ${successfulSeeds}/${seedTokens.length} seed tokens; ` +
+      `${candidates.length} candidates passed repeated-evidence rules`
+  );
+
+  return candidates.sort((a, b) => b.score - a.score);
 }
 
 export async function discoverTrialWallets(): Promise<{
@@ -211,19 +239,22 @@ export async function discoverTrialWallets(): Promise<{
 }> {
   const candidates = await fetchCandidates();
 
-  const [{ data: existingRows, error: existingError }, { count: activeTrialCount, error: countError }] =
-    await Promise.all([
-      supabase.from("wallets").select("address, active, management_status"),
-      supabase
-        .from("wallets")
-        .select("id", { count: "exact", head: true })
-        .eq("active", true)
-        .eq("management_status", "trial"),
-    ]);
+  const [
+    { data: existingRows, error: existingError },
+    { count: activeTrialCount, error: countError },
+  ] = await Promise.all([
+    supabase.from("wallets").select("address, active, management_status"),
+    supabase
+      .from("wallets")
+      .select("id", { count: "exact", head: true })
+      .eq("active", true)
+      .eq("management_status", "trial"),
+  ]);
 
   if (existingError) throw new Error(`Failed to load existing wallets: ${existingError.message}`);
   if (countError) throw new Error(`Failed to count trial wallets: ${countError.message}`);
 
+  // Include disabled wallets in this set so a previously rejected wallet is never rediscovered.
   const existing = new Set((existingRows ?? []).map((row) => row.address));
   const availableSlots = Math.max(0, MAX_ACTIVE_TRIALS - (activeTrialCount ?? 0));
   const selected = candidates
@@ -232,7 +263,7 @@ export async function discoverTrialWallets(): Promise<{
 
   if (selected.length === 0) {
     console.log(
-      `[wallet-discovery] ${candidates.length} eligible; no safe new trial slots available`
+      `[wallet-discovery] ${candidates.length} eligible; no safe new trial slots/candidates available`
     );
     return { fetched: candidates.length, eligible: candidates.length, added: [] };
   }
@@ -240,16 +271,18 @@ export async function discoverTrialWallets(): Promise<{
   const discoveredAt = new Date().toISOString();
   const rows = selected.map((candidate, index) => ({
     address: candidate.address,
-    label: `GMGN Trial ${discoveredAt.slice(0, 10)} #${index + 1}`,
+    label: `Helius Trial ${discoveredAt.slice(0, 10)} #${index + 1}`,
     active: true,
     management_status: "trial",
-    discovery_source: "gmgn_smart_money_7d",
+    discovery_source: "helius_seed_token_cotrader",
     discovered_at: discoveredAt,
     discovery_metrics: {
-      pnl_7d_usd: candidate.pnl7d,
-      win_rate_7d: candidate.winRate,
-      trades_7d: candidate.trades7d,
+      seed_token_count: candidate.tokenCount,
+      observed_swap_count: candidate.transactionCount,
+      seed_score_total: candidate.seedScoreTotal,
+      max_seed_score: candidate.maxSeedScore,
       discovery_score: Number(candidate.score.toFixed(2)),
+      seed_tokens: candidate.seedTokens,
     },
   }));
 
@@ -262,7 +295,7 @@ export async function discoverTrialWallets(): Promise<{
 
   const added = (data ?? []).map((row) => row.address);
   console.log(
-    `[wallet-discovery] added ${added.length} GMGN trial wallet(s): ` +
+    `[wallet-discovery] added ${added.length} Helius trial wallet(s): ` +
       added.map((address) => `${address.slice(0, 6)}…`).join(", ")
   );
 
@@ -278,8 +311,7 @@ export function startWalletDiscoveryScheduler(): void {
     try {
       await discoverTrialWallets();
     } catch (error) {
-      // Fail closed: a changed endpoint, malformed response, or network error
-      // must never add unverified addresses.
+      // Fail closed: external/API/database failures must never add unverified addresses.
       console.error("[wallet-discovery] skipped safely:", error);
     } finally {
       running = false;
@@ -290,7 +322,7 @@ export function startWalletDiscoveryScheduler(): void {
   setInterval(() => void run(), DISCOVERY_INTERVAL_HOURS * 3_600_000);
 
   console.log(
-    `[wallet-discovery] enabled every ${DISCOVERY_INTERVAL_HOURS}h; ` +
+    `[wallet-discovery] Helius discovery enabled every ${DISCOVERY_INTERVAL_HOURS}h; ` +
       `max ${MAX_NEW_PER_RUN} new wallets/run; trial cap ${MAX_ACTIVE_TRIALS}`
   );
 }
