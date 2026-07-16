@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { timingSafeEqual } from "crypto";
-import { VIEWER_COOKIE } from "@/lib/dashboardAuth";
+import { getViewerSecret, VIEWER_COOKIE } from "@/lib/dashboardAuth";
 
 export const dynamic = "force-dynamic";
 
@@ -12,13 +12,9 @@ function safeEqual(left: string | undefined, right: string | undefined): boolean
 }
 
 export async function POST(request: NextRequest) {
-  const viewerToken = process.env.VIEWER_SHARE_TOKEN;
-  const expectedPassword =
-    process.env.DASHBOARD_KEY?.trim() ||
-    process.env.DASHBOARD_ADMIN_PASSWORD?.trim() ||
-    viewerToken;
+  const expectedPassword = getViewerSecret();
 
-  if (!viewerToken || viewerToken.length < 32 || !expectedPassword) {
+  if (!expectedPassword) {
     return NextResponse.json(
       { error: "Dashboard login is not configured" },
       { status: 503, headers: { "Cache-Control": "no-store" } }
@@ -44,7 +40,7 @@ export async function POST(request: NextRequest) {
   }
 
   const response = NextResponse.json({ ok: true });
-  response.cookies.set(VIEWER_COOKIE, viewerToken, {
+  response.cookies.set(VIEWER_COOKIE, expectedPassword, {
     httpOnly: true,
     secure: process.env.NODE_ENV === "production",
     sameSite: "strict",
