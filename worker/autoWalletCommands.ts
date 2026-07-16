@@ -76,6 +76,39 @@ export async function handleAutoWallets(): Promise<string> {
   return lines.join('\n');
 }
 
+export async function handleEliteWallets(): Promise<string> {
+  const { data, error } = await supabase
+    .from('wallet_performance')
+    .select('wallet_address, completed_trades, win_rate, avg_return_pct, profit_factor, trust_score, wallets!inner(active, management_status)')
+    .eq('wallets.active', true)
+    .order('trust_score', { ascending: false })
+    .limit(15);
+
+  if (error) throw new Error(`Failed to load elite wallets: ${error.message}`);
+
+  const rows = (data ?? []) as any[];
+  const proven = rows.filter((row) => row.wallets?.management_status === 'proven').slice(0, 5);
+  const trials = rows.filter((row) => row.wallets?.management_status === 'trial').slice(0, 5);
+
+  const formatRow = (row: any, icon: string) => {
+    const trades = Number(row.completed_trades ?? 0);
+    const winRate = Number(row.win_rate ?? 0);
+    const avgReturn = Number(row.avg_return_pct ?? 0);
+    const trust = Number(row.trust_score ?? 0);
+    const pf = row.profit_factor == null ? 'n/a' : Number(row.profit_factor).toFixed(2);
+    const sign = avgReturn > 0 ? '+' : '';
+    return `${icon} <code>${shortAddress(row.wallet_address)}</code> — trust ${trust.toFixed(0)}, ${trades} trades, ${winRate.toFixed(0)}% win, ${sign}${avgReturn.toFixed(1)}% avg, PF ${pf}`;
+  };
+
+  const lines = ['🏆 <b>ELITE WALLET RANKINGS</b>'];
+  lines.push('', '<b>🥇 Proven leaders</b>');
+  lines.push(...(proven.length ? proven.map((row) => formatRow(row, '✅')) : ['No proven wallet performance available yet.']));
+  lines.push('', '<b>🧪 Best trials</b>');
+  lines.push(...(trials.length ? trials.map((row) => formatRow(row, '🔬')) : ['No trial wallet performance available yet.']));
+  lines.push('', 'Ranked by current trust score. Promotion still requires enough trades, positive PnL, and profit factor.');
+  return lines.join('\n');
+}
+
 export async function handleDiscoverNow(): Promise<string> {
   if (discoveryRunning) return '⏳ <b>DISCOVERY ALREADY RUNNING</b>\n\nWait for the current wallet discovery scan to finish.';
   discoveryRunning = true;
