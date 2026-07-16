@@ -33,8 +33,14 @@ export const config = {
   },
 
   risk: {
+    // Keep the daily drawdown circuit breaker active.
     dailyLossLimitPct: 0.10,
-    maxLossesInARow: 4,
+
+    // Paper trading must keep collecting data automatically. Setting this
+    // to Infinity disables the old permanent halt after four consecutive
+    // losses, so /resume is no longer required for a loss streak. Re-enable
+    // a finite limit before using real funds.
+    maxLossesInARow: Number.POSITIVE_INFINITY,
   },
 
   polling: {
