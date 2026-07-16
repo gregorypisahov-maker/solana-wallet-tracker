@@ -25,9 +25,19 @@ export function middleware(request: NextRequest) {
     return response;
   }
 
+  // The root page must remain reachable so it can display the private login form.
+  // The login endpoint must also remain reachable so it can issue the viewer cookie.
+  if (request.nextUrl.pathname === "/" || request.nextUrl.pathname === "/api/viewer-login") {
+    const response = NextResponse.next();
+    response.headers.set("Cache-Control", "no-store");
+    response.headers.set("X-Content-Type-Options", "nosniff");
+    response.headers.set("Referrer-Policy", "no-referrer");
+    return response;
+  }
+
   if (request.cookies.get(VIEWER_COOKIE)?.value !== expected) {
     return new NextResponse(
-      "This is a private, view-only dashboard. Open the complete share link.",
+      "This is a private, view-only dashboard. Sign in from the dashboard page.",
       { status: 401, headers: { "Cache-Control": "no-store" } }
     );
   }
