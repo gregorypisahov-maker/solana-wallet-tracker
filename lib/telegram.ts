@@ -14,11 +14,13 @@ const TELEGRAM_TIMEOUT_MS = Number.isFinite(configuredTelegramTimeoutMs)
   : 10_000;
 
 function cleanEnv(value: string | undefined): string {
-  return (value ?? '').trim().replace(/^['"]|['"]$/g, '').trim();
+  return (value ?? '').trim().replace(/^[\'\"]|[\'\"]$/g, '').trim();
 }
 
 export async function sendTelegramAlert(message: string): Promise<void> {
-  const token = cleanEnv(process.env.TELEGRAM_BOT_TOKEN);
+  const token = cleanEnv(
+    process.env.TELEGRAM_COMMAND_BOT_TOKEN ?? process.env.TELEGRAM_BOT_TOKEN
+  );
   const chatId = cleanEnv(process.env.TELEGRAM_CHAT_ID);
   if (!token || !chatId) {
     console.log("Telegram not configured. Alert skipped:");
