@@ -21,6 +21,7 @@ import { handleWalletScan } from './walletScanCommand';
 import {
   handleAutoWallets,
   handleDiscoverNow,
+  handleEliteWallets,
   handleIntelligenceNow,
 } from './autoWalletCommands';
 
@@ -46,7 +47,7 @@ const TELEGRAM_CHAT_ID = cleanEnv(process.env.TELEGRAM_CHAT_ID);
 const POLL_TIMEOUT_SECONDS = 30;
 const CONFLICT_BACKOFF_MIN_MS = 65_000;
 const CONFLICT_BACKOFF_JITTER_MS = 30_000;
-const TELEGRAM_WORKER_VERSION = '2026-07-17-auto-wallet-controls-v8';
+const TELEGRAM_WORKER_VERSION = '2026-07-17-elite-wallets-v9';
 
 if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
   console.error('[telegram-bot] TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID must be set. Exiting.');
@@ -116,6 +117,8 @@ const COMMAND_HANDLERS: Record<string, () => Promise<string>> = {
   '/scanwallets': handleWalletScan,
   '/auto_wallets': handleAutoWallets,
   '/autowallets': handleAutoWallets,
+  '/elite_wallets': handleEliteWallets,
+  '/elitewallets': handleEliteWallets,
   '/discover_now': handleDiscoverNow,
   '/discovernow': handleDiscoverNow,
   '/intelligence_now': handleIntelligenceNow,
@@ -167,7 +170,7 @@ async function sleep(ms: number): Promise<void> {
 async function pollLoop(): Promise<void> {
   console.log(`[telegram-bot] Starting inbound command listener (${TELEGRAM_WORKER_VERSION})...`);
   console.log(`[telegram-bot] Bot-token fingerprint: ${tokenFingerprint}; chat configured: yes`);
-  console.log('[telegram-bot] Commands ready: /paperstats /walletstats /exitstats /scorestats /heliusstats /readiness /resume /walletscan /auto_wallets /discover_now /intelligence_now');
+  console.log('[telegram-bot] Commands ready: /paperstats /walletstats /exitstats /scorestats /heliusstats /readiness /resume /walletscan /auto_wallets /elite_wallets /discover_now /intelligence_now');
 
   await validateToken();
 
