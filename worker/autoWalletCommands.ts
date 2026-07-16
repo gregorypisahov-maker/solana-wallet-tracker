@@ -77,18 +77,30 @@ export async function handleAutoWallets(): Promise<string> {
 }
 
 export async function handleEliteWallets(): Promise<string> {
-  const { data, error } = await supabase
-    .from('wallet_performance')
-    .select('wallet_address, completed_trades, win_rate, avg_return_pct, profit_factor, trust_score, wallets!inner(active, management_status)')
-    .eq('wallets.active', true)
-    .order('trust_score', { ascending: false })
-    .limit(15);
+  const [walletResult, performanceResult] = await Promise.all([
+    supabase
+      .from('wallets')
+      .select('address, management_status')
+      .eq('active', true),
+    supabase
+      .from('wallet_performance')
+      .select('wallet_address, completed_trades, win_rate, avg_return_pct, profit_factor, trust_score')
+      .order('trust_score', { ascending: false }),
+  ]);
 
-  if (error) throw new Error(`Failed to load elite wallets: ${error.message}`);
+  if (walletResult.error) throw new Error(`Failed to load active wallets: ${walletResult.error.message}`);
+  if (performanceResult.error) throw new Error(`Failed to load elite wallets: ${performanceResult.error.message}`);
 
-  const rows = (data ?? []) as any[];
-  const proven = rows.filter((row) => row.wallets?.management_status === 'proven').slice(0, 5);
-  const trials = rows.filter((row) => row.wallets?.management_status === 'trial').slice(0, 5);
+  const statusByAddress = new Map(
+    (walletResult.data ?? []).map((wallet) => [wallet.address, wallet.management_status])
+  );
+
+  const rows = (performanceResult.data ?? [])
+    .map((row) => ({ ...row, management_status: statusByAddress.get(row.wallet_address) }))
+    .filter((row) => row.management_status === 'proven' || row.management_status === 'trial');
+
+  const proven = rows.filter((row) => row.management_status === 'proven').slice(0, 5);
+  const trials = rows.filter((row) => row.management_status === 'trial').slice(0, 5);
 
   const formatRow = (row: any, icon: string) => {
     const trades = Number(row.completed_trades ?? 0);
