@@ -1,6 +1,7 @@
 import "dotenv/config";
 import { getSupabaseAdmin } from "../lib/supabase";
 import { computeAndStoreWalletPerformance } from "../paper-trader/walletPerformance";
+import { discoverTrialWallets } from "./walletDiscovery";
 
 const supabase = getSupabaseAdmin();
 
@@ -128,6 +129,7 @@ export async function runWalletIntelligence(): Promise<{
   walletsScored: number;
   promoted: string[];
   disabled: string[];
+  replacementsAdded: string[];
 }> {
   const { walletsUpdated } = await computeAndStoreWalletPerformance();
 
@@ -258,6 +260,19 @@ export async function runWalletIntelligence(): Promise<{
     }
   }
 
+  // Do not leave newly freed trial slots empty until the separate discovery timer.
+  // Refill immediately after removals; discovery still applies all candidate-quality
+  // checks, trial caps, duplicate protection, and fail-closed behavior.
+  let replacementsAdded: string[] = [];
+  if (disabled.length > 0) {
+    try {
+      const replacementResult = await discoverTrialWallets();
+      replacementsAdded = replacementResult.added;
+    } catch (error) {
+      console.error("[wallet-intelligence] immediate replacement discovery failed safely:", error);
+    }
+  }
+
   const { error: auditError } = await supabase.from("wallet_intelligence_runs").insert({
     wallets_scored: walletsUpdated,
     promoted_count: promoted.length,
@@ -283,6 +298,11 @@ export async function runWalletIntelligence(): Promise<{
         trial_wallets_only: true,
         bottom_performers_first: true,
       },
+      immediate_replacement: {
+        attempted: disabled.length > 0,
+        added_count: replacementsAdded.length,
+        added_addresses: replacementsAdded,
+      },
     },
   });
 
@@ -291,10 +311,11 @@ export async function runWalletIntelligence(): Promise<{
   }
 
   console.log(
-    `[wallet-intelligence] scored ${walletsUpdated}; promoted ${promoted.length}; disabled ${disabled.length}`
+    `[wallet-intelligence] scored ${walletsUpdated}; promoted ${promoted.length}; ` +
+      `disabled ${disabled.length}; replacements ${replacementsAdded.length}`
   );
 
-  return { walletsScored: walletsUpdated, promoted, disabled };
+  return { walletsScored: walletsUpdated, promoted, disabled, replacementsAdded };
 }
 
 let running = false;
@@ -325,6 +346,6 @@ export function startWalletIntelligenceScheduler(): void {
   console.log(
     `[wallet-intelligence] enabled every ${RUN_INTERVAL_HOURS}h; ` +
       `promote after ${MIN_TRADES_TO_PROMOTE}+ trades at PF ${MIN_PROFIT_FACTOR_TO_PROMOTE}+; ` +
-      `disable up to ${MAX_DISABLE_PER_RUN} weak/inactive trial wallets per run`
+      `disable up to ${MAX_DISABLE_PER_RUN} weak/inactive trial wallets per run and refill freed slots immediately`
   );
 }
