@@ -4,21 +4,23 @@
 
 export const config = {
   entry: {
-    // Paper-only sample-collection profile. Real trading remains disabled.
-    // Two-wallet signals are allowed only when the entry filter's stronger
-    // score, liquidity and trust safeguards also pass.
-    minScore: 12,
-    minWalletCount: 2,
+    // Paper-only quality profile based on the completed-trade sample. Real
+    // trading remains disabled. Three-wallet consensus is standard; a very
+    // strong two-wallet signal may still pass in entryFilter.ts.
+    minScore: 10,
+    maxScore: 65,
+    minWalletCount: 3,
     minAvgBuyPerWallet: 0.75,
-    minLiquidityToMcapRatio: 0.06,
-    maxMarketCapUsd: 3_000_000,
-    minLiquidityUsd: 10_000,
+    minLiquidityToMcapRatio: 0.15,
+    maxMarketCapUsd: 200_000,
+    minLiquidityUsd: 15_000,
+    minAverageTrustScore: 55,
   },
 
   position: {
     simulatedBankrollSol: 10,
     sizePctPerTrade: 0.03,
-    maxConcurrentPositions: 5,
+    maxConcurrentPositions: 3,
   },
 
   exit: {
@@ -26,8 +28,8 @@ export const config = {
       { atMultiple: 1.3, sellPct: 0.5 },
       { atMultiple: 1.6, sellPct: 0.5 },
     ],
-    trailingStopPct: 0.15,
-    hardStopLossPct: 0.15,
+    trailingStopPct: 0.12,
+    hardStopLossPct: 0.12,
     maxHoldMinutes: 45,
   },
 
