@@ -41,6 +41,11 @@ if (!envFlag('ENABLE_TELEGRAM_POLLING')) {
 
 const TELEGRAM_BOT_TOKEN = cleanEnv(process.env.TELEGRAM_BOT_TOKEN);
 const TELEGRAM_CHAT_ID = cleanEnv(process.env.TELEGRAM_CHAT_ID);
+const DASHBOARD_URL = cleanEnv(
+  process.env.DASHBOARD_URL ??
+  process.env.COMMAND_CENTER_URL ??
+  process.env.NEXT_PUBLIC_DASHBOARD_URL
+);
 const EXTRA_CHAT_IDS = cleanEnv(process.env.TELEGRAM_ALLOWED_CHAT_IDS)
   .split(/[\s,;]+/)
   .map((value) => value.trim())
@@ -50,7 +55,7 @@ const AUTHORIZED_CHAT_IDS = new Set([TELEGRAM_CHAT_ID, ...EXTRA_CHAT_IDS].filter
 const POLL_TIMEOUT_SECONDS = 30;
 const CONFLICT_BACKOFF_MIN_MS = 65_000;
 const CONFLICT_BACKOFF_JITTER_MS = 30_000;
-const TELEGRAM_WORKER_VERSION = '2026-07-17-chat-id-setup-v12';
+const TELEGRAM_WORKER_VERSION = '2026-07-17-help-buttons-v13';
 
 if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
   console.error('[telegram-bot] TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID must be set. Exiting.');
@@ -65,12 +70,21 @@ if (!/^\d+:[A-Za-z0-9_-]+$/.test(TELEGRAM_BOT_TOKEN)) {
 const tokenFingerprint = `${TELEGRAM_BOT_TOKEN.slice(0, 6)}…${TELEGRAM_BOT_TOKEN.slice(-4)}`;
 let lastUpdateId = 0;
 
+interface TelegramMessage {
+  chat: { id: number; title?: string; type?: string };
+  text?: string;
+}
+
+interface TelegramCallbackQuery {
+  id: string;
+  data?: string;
+  message?: TelegramMessage;
+}
+
 interface TelegramUpdate {
   update_id: number;
-  message?: {
-    chat: { id: number; title?: string; type?: string };
-    text?: string;
-  };
+  message?: TelegramMessage;
+  callback_query?: TelegramCallbackQuery;
 }
 
 interface TelegramUpdatesResponse {
@@ -79,15 +93,36 @@ interface TelegramUpdatesResponse {
   description?: string;
 }
 
-async function sendToChat(chatId: string, text: string): Promise<void> {
+type InlineButton = { text: string; callback_data?: string; url?: string };
+type InlineKeyboard = { inline_keyboard: InlineButton[][] };
+
+async function sendToChat(chatId: string, text: string, replyMarkup?: InlineKeyboard): Promise<void> {
   const response = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ chat_id: chatId, text, parse_mode: 'HTML', disable_web_page_preview: true }),
+    body: JSON.stringify({
+      chat_id: chatId,
+      text,
+      parse_mode: 'HTML',
+      disable_web_page_preview: true,
+      ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
+    }),
   });
   if (!response.ok) {
     const body = await response.text();
     throw new Error(`Telegram sendMessage failed: ${response.status} ${body}`);
+  }
+}
+
+async function answerCallback(callbackQueryId: string): Promise<void> {
+  try {
+    await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/answerCallbackQuery`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ callback_query_id: callbackQueryId }),
+    });
+  } catch (error) {
+    console.warn('[telegram-bot] Could not acknowledge callback:', error);
   }
 }
 
@@ -105,7 +140,7 @@ async function getUpdates(): Promise<TelegramUpdate[]> {
     `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getUpdates` +
     `?offset=${lastUpdateId + 1}` +
     `&timeout=${POLL_TIMEOUT_SECONDS}` +
-    `&allowed_updates=${encodeURIComponent(JSON.stringify(['message']))}`;
+    `&allowed_updates=${encodeURIComponent(JSON.stringify(['message', 'callback_query']))}`;
 
   const response = await fetch(url);
   if (!response.ok) {
@@ -155,8 +190,34 @@ async function handleHelp(): Promise<string> {
     resumeHint,
     '/help — Show this command menu',
     '/commands — Same as /help',
-    '/chatid — Show this chat ID for setup',
+    '/chatid — Show this chat ID for setup', '',
+    '<b>🌐 Command Center</b>',
+    DASHBOARD_URL
+      ? `<a href="${DASHBOARD_URL}">Open the live dashboard</a>`
+      : 'Dashboard link will appear after DASHBOARD_URL is set in Railway.',
   ].join('\n');
+}
+
+function helpKeyboard(): InlineKeyboard {
+  const rows: InlineButton[][] = [];
+  if (/^https:\/\//i.test(DASHBOARD_URL)) {
+    rows.push([{ text: '🌐 Command Center', url: DASHBOARD_URL }]);
+  }
+  rows.push(
+    [
+      { text: '📊 Paper Stats', callback_data: '/paperstats' },
+      { text: '🏆 Elite Wallets', callback_data: '/elite_wallets' },
+    ],
+    [
+      { text: '🧠 Auto Wallets', callback_data: '/auto_wallets' },
+      { text: '✅ Readiness', callback_data: '/readiness' },
+    ],
+    [
+      { text: '▶️ Resume', callback_data: '/resume' },
+      { text: '🔄 Wallet Scan', callback_data: '/walletscan' },
+    ],
+  );
+  return { inline_keyboard: rows };
 }
 
 const COMMAND_HANDLERS: Record<string, () => Promise<string>> = {
@@ -188,14 +249,7 @@ function normalizeCommand(text: string): string {
   return text.trim().split(/\s+/)[0].split('@')[0].toLowerCase();
 }
 
-async function handleUpdate(update: TelegramUpdate): Promise<void> {
-  lastUpdateId = Math.max(lastUpdateId, update.update_id);
-  const message = update.message;
-  if (!message?.text) return;
-
-  const incomingChatId = String(message.chat.id);
-  const command = normalizeCommand(message.text);
-
+async function processCommand(incomingChatId: string, command: string): Promise<void> {
   if (command === '/chatid') {
     await sendToChat(incomingChatId, [
       '🆔 <b>Telegram chat ID</b>', '',
@@ -233,12 +287,30 @@ async function handleUpdate(update: TelegramUpdate): Promise<void> {
   console.log(`[telegram-bot] Handling command ${command} from chat ${incomingChatId}`);
   try {
     const response = await handler();
-    await sendToChat(incomingChatId, response);
+    const isHelp = command === '/help' || command === '/commands' || command === '/start';
+    await sendToChat(incomingChatId, response, isHelp ? helpKeyboard() : undefined);
   } catch (error) {
     console.error(`[telegram-bot] Command ${command} failed:`, error);
     const errorMessage = error instanceof Error ? error.message : String(error);
     await sendToChat(incomingChatId, ['❌ <b>Command failed</b>', '', `Command: ${command}`, `Error: ${errorMessage}`].join('\n'));
   }
+}
+
+async function handleUpdate(update: TelegramUpdate): Promise<void> {
+  lastUpdateId = Math.max(lastUpdateId, update.update_id);
+
+  if (update.callback_query) {
+    const callback = update.callback_query;
+    await answerCallback(callback.id);
+    const chatId = callback.message ? String(callback.message.chat.id) : '';
+    const command = callback.data ? normalizeCommand(callback.data) : '';
+    if (chatId && command) await processCommand(chatId, command);
+    return;
+  }
+
+  const message = update.message;
+  if (!message?.text) return;
+  await processCommand(String(message.chat.id), normalizeCommand(message.text));
 }
 
 function isTelegramConflict(error: unknown): boolean {
@@ -253,6 +325,7 @@ async function sleep(ms: number): Promise<void> {
 async function pollLoop(): Promise<void> {
   console.log(`[telegram-bot] Starting inbound command listener (${TELEGRAM_WORKER_VERSION})...`);
   console.log(`[telegram-bot] Bot-token fingerprint: ${tokenFingerprint}; authorized chats: ${AUTHORIZED_CHAT_IDS.size}`);
+  console.log(`[telegram-bot] Dashboard button: ${DASHBOARD_URL ? 'configured' : 'not configured'}`);
   console.log('[telegram-bot] Commands ready: /help /commands /chatid /paperstats /walletstats /exitstats /scorestats /heliusstats /readiness /resume /walletscan /auto_wallets /elite_wallets /discover_now /intelligence_now');
 
   await validateToken();
