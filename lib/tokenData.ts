@@ -7,6 +7,22 @@ const TOKEN_DATA_TIMEOUT_MS = Number.isFinite(configuredTokenDataTimeoutMs)
   ? Math.max(3_000, configuredTokenDataTimeoutMs)
   : 12_000;
 
+const configuredCacheTtlMs = Number(
+  process.env.TOKEN_DATA_CACHE_TTL_SECONDS ?? 60
+) * 1_000;
+const TOKEN_DATA_CACHE_TTL_MS = Number.isFinite(configuredCacheTtlMs)
+  ? Math.min(5 * 60_000, Math.max(30_000, configuredCacheTtlMs))
+  : 60_000;
+
+const configuredNegativeCacheTtlMs = Number(
+  process.env.TOKEN_DATA_NEGATIVE_CACHE_TTL_SECONDS ?? 120
+) * 1_000;
+const TOKEN_DATA_NEGATIVE_CACHE_TTL_MS = Number.isFinite(
+  configuredNegativeCacheTtlMs
+)
+  ? Math.min(10 * 60_000, Math.max(60_000, configuredNegativeCacheTtlMs))
+  : 120_000;
+
 async function fetchWithTimeout(
   url: string,
   init: NonNullable<Parameters<typeof fetch>[1]> = {}
@@ -33,6 +49,35 @@ export interface TokenMarketData {
   marketCap: number | null;
   liquidityUsd: number | null;
   holders: number | null;
+}
+
+interface CachedTokenMarketData {
+  value: TokenMarketData;
+  expiresAt: number;
+}
+
+const tokenDataCache = new Map<string, CachedTokenMarketData>();
+const tokenDataInFlight = new Map<string, Promise<TokenMarketData>>();
+
+function isEmptyMarketData(value: TokenMarketData): boolean {
+  return (
+    value.symbol === null &&
+    value.name === null &&
+    value.marketCap === null &&
+    value.liquidityUsd === null &&
+    value.holders === null
+  );
+}
+
+function pruneExpiredCache(now: number): void {
+  // Keep memory bounded in a long-running Railway worker.
+  if (tokenDataCache.size < 1_000) return;
+
+  for (const [mint, cached] of tokenDataCache) {
+    if (cached.expiresAt <= now) {
+      tokenDataCache.delete(mint);
+    }
+  }
 }
 
 /**
@@ -86,8 +131,42 @@ export async function fetchBirdeyeHolders(tokenMint: string): Promise<number | n
   }
 }
 
-export async function fetchTokenMarketData(tokenMint: string): Promise<TokenMarketData> {
+async function loadTokenMarketData(tokenMint: string): Promise<TokenMarketData> {
   const base = await fetchDexScreenerData(tokenMint);
   const holders = await fetchBirdeyeHolders(tokenMint);
   return { ...base, holders: holders ?? base.holders };
+}
+
+export async function fetchTokenMarketData(tokenMint: string): Promise<TokenMarketData> {
+  const now = Date.now();
+  const cached = tokenDataCache.get(tokenMint);
+
+  if (cached && cached.expiresAt > now) {
+    return cached.value;
+  }
+
+  const existingRequest = tokenDataInFlight.get(tokenMint);
+  if (existingRequest) {
+    return existingRequest;
+  }
+
+  const request = loadTokenMarketData(tokenMint)
+    .then((value) => {
+      const ttl = isEmptyMarketData(value)
+        ? TOKEN_DATA_NEGATIVE_CACHE_TTL_MS
+        : TOKEN_DATA_CACHE_TTL_MS;
+
+      tokenDataCache.set(tokenMint, {
+        value,
+        expiresAt: Date.now() + ttl,
+      });
+      pruneExpiredCache(Date.now());
+      return value;
+    })
+    .finally(() => {
+      tokenDataInFlight.delete(tokenMint);
+    });
+
+  tokenDataInFlight.set(tokenMint, request);
+  return request;
 }
