@@ -20,28 +20,27 @@ import {
 import { handleWalletScan } from './walletScanCommand';
 
 function cleanEnv(value: string | undefined): string {
-  return (value ?? '').trim().replace(/^['"]|['"]$/g, '').trim();
+  return (value ?? '').trim().replace(/^[\'\"]|[\'\"]$/g, '').trim();
 }
 
-const TELEGRAM_BOT_TOKEN = cleanEnv(process.env.TELEGRAM_BOT_TOKEN);
+const TELEGRAM_BOT_TOKEN = cleanEnv(process.env.TELEGRAM_COMMAND_BOT_TOKEN);
 const TELEGRAM_CHAT_ID = cleanEnv(process.env.TELEGRAM_CHAT_ID);
 
 const POLL_TIMEOUT_SECONDS = 30;
-const RETRY_DELAY_MS = 5_000;
 const CONFLICT_BACKOFF_MIN_MS = 65_000;
 const CONFLICT_BACKOFF_JITTER_MS = 30_000;
-const TELEGRAM_WORKER_VERSION = '2026-07-16-walletscan-v3';
+const TELEGRAM_WORKER_VERSION = '2026-07-16-walletscan-v4-isolated-token';
 
 if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
   console.error(
-    '[telegram-bot] TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID must be set. Exiting.'
+    '[telegram-bot] TELEGRAM_COMMAND_BOT_TOKEN and TELEGRAM_CHAT_ID must be set. Exiting.'
   );
   process.exit(1);
 }
 
 if (!/^\d+:[A-Za-z0-9_-]+$/.test(TELEGRAM_BOT_TOKEN)) {
   console.error(
-    '[telegram-bot] TELEGRAM_BOT_TOKEN has an invalid shape. It must look like 123456789:AA...'
+    '[telegram-bot] TELEGRAM_COMMAND_BOT_TOKEN has an invalid shape. It must look like 123456789:AA...'
   );
   process.exit(1);
 }
@@ -76,6 +75,12 @@ async function getUpdates(): Promise<TelegramUpdate[]> {
 
   if (!response.ok) {
     const text = await response.text();
+    if (response.status === 401) {
+      throw new Error(
+        `Telegram rejected TELEGRAM_COMMAND_BOT_TOKEN (${tokenFingerprint}). ` +
+        'Generate a current token in BotFather and replace only this Railway variable.'
+      );
+    }
     throw new Error(`Telegram getUpdates failed: ${response.status} ${text}`);
   }
 
@@ -153,7 +158,7 @@ async function sleep(ms: number): Promise<void> {
 
 async function pollLoop(): Promise<void> {
   console.log(`[telegram-bot] Starting inbound command listener (${TELEGRAM_WORKER_VERSION})...`);
-  console.log(`[telegram-bot] Credential fingerprint: ${tokenFingerprint}; chat configured: yes`);
+  console.log(`[telegram-bot] Command-token fingerprint: ${tokenFingerprint}; chat configured: yes`);
   console.log('[telegram-bot] Commands ready: /paperstats /walletstats /exitstats /scorestats /heliusstats /helius /readiness /resume /walletscan');
 
   while (true) {
@@ -170,8 +175,8 @@ async function pollLoop(): Promise<void> {
         continue;
       }
 
-      console.error('[telegram-bot] Poll cycle failed:', error);
-      await sleep(RETRY_DELAY_MS);
+      console.error('[telegram-bot] Fatal polling error:', error);
+      process.exit(1);
     }
   }
 }
