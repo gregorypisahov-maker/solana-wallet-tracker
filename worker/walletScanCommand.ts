@@ -19,49 +19,50 @@ export async function handleWalletScan(): Promise<string> {
   scanRunning = true;
 
   try {
-    // Score existing wallets first so weak wallets are deactivated and trial
-    // capacity is freed before discovery looks for replacements.
     const intelligence = await runWalletIntelligence();
-    const discovery = await discoverTrialWallets();
+
+    let discovery: Awaited<ReturnType<typeof discoverTrialWallets>> | null = null;
+    let discoveryError: string | null = null;
+
+    try {
+      discovery = await discoverTrialWallets();
+    } catch (error) {
+      discoveryError = error instanceof Error ? error.message : String(error);
+      console.error('[wallet-scan] discovery failed safely:', error);
+    }
 
     const lines = [
-      '🔎 <b>WALLET SCAN COMPLETE</b>',
+      discoveryError ? '⚠️ <b>WALLET SCAN PARTIALLY COMPLETE</b>' : '🔎 <b>WALLET SCAN COMPLETE</b>',
       '',
       `<b>Existing wallets scored:</b> ${intelligence.walletsScored}`,
       `<b>Promoted to proven:</b> ${intelligence.promoted.length}`,
       `<b>Bad wallets deactivated:</b> ${intelligence.disabled.length}`,
-      `<b>Eligible GMGN candidates:</b> ${discovery.eligible}`,
-      `<b>New trial wallets added:</b> ${discovery.added.length}`,
+      `<b>Eligible new candidates:</b> ${discovery?.eligible ?? 0}`,
+      `<b>New trial wallets added:</b> ${discovery?.added.length ?? 0}`,
     ];
 
     if (intelligence.promoted.length > 0) {
-      lines.push(
-        '',
-        '<b>Promoted</b>',
-        ...intelligence.promoted.map((address) => `✅ <code>${shortAddress(address)}</code>`)
-      );
+      lines.push('', '<b>Promoted</b>', ...intelligence.promoted.map((address) => `✅ <code>${shortAddress(address)}</code>`));
     }
 
     if (intelligence.disabled.length > 0) {
+      lines.push('', '<b>Deactivated</b>', ...intelligence.disabled.map((address) => `🛑 <code>${shortAddress(address)}</code>`));
+    }
+
+    if (discovery?.added.length) {
+      lines.push('', '<b>Added for trial</b>', ...discovery.added.map((address) => `➕ <code>${shortAddress(address)}</code>`));
+    }
+
+    if (discoveryError) {
       lines.push(
         '',
-        '<b>Deactivated</b>',
-        ...intelligence.disabled.map((address) => `🛑 <code>${shortAddress(address)}</code>`)
+        '⚠️ <b>New-wallet discovery unavailable</b>',
+        `The existing-wallet cleanup completed, but the external candidate source rejected the request: ${discoveryError}`,
+        'No unverified wallet was added.'
       );
     }
 
-    if (discovery.added.length > 0) {
-      lines.push(
-        '',
-        '<b>Added for trial</b>',
-        ...discovery.added.map((address) => `➕ <code>${shortAddress(address)}</code>`)
-      );
-    }
-
-    lines.push(
-      '',
-      'Bad wallets are deactivated rather than permanently deleted, preserving their trade history and preventing accidental re-adding.'
-    );
+    lines.push('', 'Bad wallets are deactivated rather than permanently deleted, preserving their trade history.');
 
     return lines.join('\n');
   } finally {
