@@ -6,14 +6,16 @@ const supabase = getSupabaseAdmin();
 
 const RULES = {
   minScore: 10,
-  maxScore: 65,
+  maxScore: 65, // late-entry guard: score 65-79 entries were net negative
   minWallets: 3,
   minAvgBuySol: 0.75,
+  minAvgTrustScore: 55, // trust 60+ entries were strongly profitable, <55 net negative
   minLiquidityUsd: 15_000,
+  minLiqToMcapRatio: 0.15, // liq/mcap 30%+ was the most profitable band, <15% negative
   minMarketCapUsd: 20_000,
-  maxMarketCapUsd: 200_000,
+  maxMarketCapUsd: 200_000, // entries above ~200k mcap were net negative
   blockedConfidenceGrades: new Set(["D"]),
-  sizePct: 0.02,
+  sizePct: 0.03,
   maxPositions: 3,
   hardStopPct: 0.12,
   breakEvenActivationMultiple: 1.08,
@@ -76,11 +78,16 @@ async function loadPositions(): Promise<ShadowPosition[]> {
 
 function entryRejection(alert: AlertInput): string | null {
   const avgBuy = alert.walletCount > 0 ? alert.totalBoughtSol / alert.walletCount : 0;
+  const liqRatio = alert.marketCapUsd > 0 ? alert.liquidityUsd / alert.marketCapUsd : 0;
   if (alert.score < RULES.minScore) return `score ${alert.score} < ${RULES.minScore}`;
   if (alert.score > RULES.maxScore) return `score ${alert.score} > ${RULES.maxScore} (late-entry guard)`;
   if (alert.walletCount < RULES.minWallets) return `wallets ${alert.walletCount} < ${RULES.minWallets}`;
   if (avgBuy < RULES.minAvgBuySol) return `avg buy ${avgBuy.toFixed(2)} < ${RULES.minAvgBuySol}`;
+  if (alert.averageTrustScore === undefined || alert.averageTrustScore < RULES.minAvgTrustScore) {
+    return `avg trust ${alert.averageTrustScore ?? "n/a"} < ${RULES.minAvgTrustScore}`;
+  }
   if (alert.liquidityUsd < RULES.minLiquidityUsd) return `liquidity ${alert.liquidityUsd} < ${RULES.minLiquidityUsd}`;
+  if (liqRatio < RULES.minLiqToMcapRatio) return `liq/mcap ${(liqRatio * 100).toFixed(1)}% < ${RULES.minLiqToMcapRatio * 100}%`;
   if (alert.marketCapUsd < RULES.minMarketCapUsd) return `market cap ${alert.marketCapUsd} < ${RULES.minMarketCapUsd}`;
   if (alert.marketCapUsd > RULES.maxMarketCapUsd) return `market cap ${alert.marketCapUsd} > ${RULES.maxMarketCapUsd}`;
   if (alert.confidenceGrade && RULES.blockedConfidenceGrades.has(alert.confidenceGrade)) {
