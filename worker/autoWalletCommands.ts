@@ -84,7 +84,7 @@ export async function handleEliteWallets(): Promise<string> {
       .eq('active', true),
     supabase
       .from('wallet_performance')
-      .select('wallet_address, completed_trades, win_rate, avg_return_pct, profit_factor, trust_score')
+      .select('wallet_address, completed_trades, win_rate, average_return, profit_factor, trust_score')
       .order('trust_score', { ascending: false }),
   ]);
 
@@ -104,12 +104,12 @@ export async function handleEliteWallets(): Promise<string> {
 
   const formatRow = (row: any, icon: string) => {
     const trades = Number(row.completed_trades ?? 0);
-    const winRate = Number(row.win_rate ?? 0);
-    const avgReturn = Number(row.avg_return_pct ?? 0);
+    const winRatePct = Number(row.win_rate ?? 0) * 100;
+    const avgReturnPct = Number(row.average_return ?? 0) * 100;
     const trust = Number(row.trust_score ?? 0);
     const pf = row.profit_factor == null ? 'n/a' : Number(row.profit_factor).toFixed(2);
-    const sign = avgReturn > 0 ? '+' : '';
-    return `${icon} <code>${shortAddress(row.wallet_address)}</code> — trust ${trust.toFixed(0)}, ${trades} trades, ${winRate.toFixed(0)}% win, ${sign}${avgReturn.toFixed(1)}% avg, PF ${pf}`;
+    const sign = avgReturnPct > 0 ? '+' : '';
+    return `${icon} <code>${shortAddress(row.wallet_address)}</code> — trust ${trust.toFixed(0)}, ${trades} trades, ${winRatePct.toFixed(0)}% win, ${sign}${avgReturnPct.toFixed(1)}% avg, PF ${pf}`;
   };
 
   const lines = ['🏆 <b>ELITE WALLET RANKINGS</b>'];
