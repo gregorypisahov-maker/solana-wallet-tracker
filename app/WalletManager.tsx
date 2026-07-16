@@ -1,6 +1,7 @@
 "use client";
 
 import { FormEvent, useCallback, useEffect, useState } from "react";
+import LiveTimeline from "./LiveTimeline";
 
 type Wallet = {
   address: string;
@@ -128,6 +129,7 @@ export default function WalletManager({ onChanged }: Props) {
 
   return (
     <>
+      <LiveTimeline />
       <section className="grid two" style={{ marginBottom: 18 }}>
         <section className="panel">
           <div className="panelHead"><h2>Bot health</h2><span>{ops?.health.every((item) => item.ok) ? "ALL SYSTEMS" : "ATTENTION"}</span></div>
