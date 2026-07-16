@@ -26,15 +26,36 @@ export function evaluateEntry(alert: AlertInput): EntryEvaluation {
 
   const avgBuyPerWallet = walletCount > 0 ? totalBoughtSol / walletCount : 0;
   const liqToMcap = marketCapUsd > 0 ? liquidityUsd / marketCapUsd : 0;
+  const weightedConsensus =
+    weightedWalletScore !== undefined && walletCount > 0
+      ? weightedWalletScore / walletCount
+      : undefined;
 
   const trustAdjustedMinScore =
     confidenceGrade === 'C' ? adaptive.minScore + 1 : adaptive.minScore;
 
+  // Preserve some trade flow, but allow two-wallet entries only when both
+  // wallets are high-trust and their buying conviction is unusually strong.
+  const eliteTwoWalletSignal =
+    walletCount === 2 &&
+    avgBuyPerWallet >= 1.25 &&
+    averageTrustScore !== undefined &&
+    averageTrustScore >= 60 &&
+    (weightedConsensus === undefined || weightedConsensus >= 0.95) &&
+    confidenceGrade !== 'D';
+
   if (score < trustAdjustedMinScore) {
     reasons.push(`score ${score} below adaptive minimum ${trustAdjustedMinScore}`);
   }
-  if (walletCount < config.entry.minWalletCount) {
-    reasons.push(`walletCount ${walletCount} below minimum ${config.entry.minWalletCount}`);
+  if (score > config.entry.maxScore) {
+    reasons.push(`score ${score} above late-entry ceiling ${config.entry.maxScore}`);
+  }
+  if (walletCount < config.entry.minWalletCount && !eliteTwoWalletSignal) {
+    reasons.push(
+      walletCount === 2
+        ? 'two-wallet signal is not elite enough'
+        : `walletCount ${walletCount} below minimum ${config.entry.minWalletCount}`
+    );
   }
   if (avgBuyPerWallet < adaptive.minAvgBuyPerWallet) {
     reasons.push(
@@ -54,33 +75,20 @@ export function evaluateEntry(alert: AlertInput): EntryEvaluation {
   if (liquidityUsd < adaptive.minLiquidityUsd) {
     reasons.push(`liquidity $${liquidityUsd} below floor $${adaptive.minLiquidityUsd}`);
   }
-
-  // Grade D is normally rejected. For paper-data collection only, allow a
-  // strong two-wallet D signal when the objective market safeguards are much
-  // stronger than the baseline. This does not enable real trading.
-  const strongTwoWalletD =
-    confidenceGrade === 'D' &&
-    walletCount === 2 &&
-    score >= 30 &&
-    avgBuyPerWallet >= 1.5 &&
-    liquidityUsd >= 20_000 &&
-    liqToMcap >= 0.10 &&
-    (averageTrustScore === undefined || averageTrustScore >= 48) &&
-    (weightedWalletScore === undefined || weightedWalletScore / walletCount >= 0.95);
-
-  if (confidenceGrade === 'D' && !strongTwoWalletD) {
+  if (confidenceGrade === 'D') {
     reasons.push('wallet confidence grade D is not tradeable');
   }
-  if (averageTrustScore !== undefined && averageTrustScore < 40) {
-    reasons.push(`average wallet trust ${averageTrustScore.toFixed(1)} below minimum 40`);
-  }
   if (
-    weightedWalletScore !== undefined &&
-    walletCount > 0 &&
-    weightedWalletScore / walletCount < 0.8
+    averageTrustScore === undefined ||
+    averageTrustScore < config.entry.minAverageTrustScore
   ) {
     reasons.push(
-      `weighted wallet consensus ${(weightedWalletScore / walletCount).toFixed(2)} below minimum 0.80`
+      `average wallet trust ${averageTrustScore?.toFixed(1) ?? 'n/a'} below minimum ${config.entry.minAverageTrustScore}`
+    );
+  }
+  if (weightedConsensus !== undefined && weightedConsensus < 0.8) {
+    reasons.push(
+      `weighted wallet consensus ${weightedConsensus.toFixed(2)} below minimum 0.80`
     );
   }
 
