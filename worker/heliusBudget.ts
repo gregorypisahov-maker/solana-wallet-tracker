@@ -6,17 +6,7 @@ export function reduceWalletLimitForMonthlyBudget(options: {
   projectedMonthlyCredits: number;
   targetMonthlyCredits: number;
 }): number {
-  // Keep a hard safety ceiling even when Railway still has an older, larger
-  // MAX_HELIUS_WALLETS environment value. All other active wallets continue
-  // through the lower-cost reconciliation path.
-  const currentLimit = Math.max(
-    1,
-    Math.min(FREE_PLAN_SAFE_MAX_WALLETS, Math.floor(options.currentLimit))
-  );
-  const minimumLimit = Math.max(
-    1,
-    Math.min(currentLimit, Math.floor(options.minimumLimit))
-  );
+  const requestedLimit = Math.max(1, Math.floor(options.currentLimit));
 
   if (
     !Number.isFinite(options.projectedMonthlyCredits) ||
@@ -24,16 +14,24 @@ export function reduceWalletLimitForMonthlyBudget(options: {
     options.projectedMonthlyCredits <= options.targetMonthlyCredits ||
     options.targetMonthlyCredits <= 0
   ) {
-    return currentLimit;
+    return requestedLimit;
   }
 
+  // Once projected usage is above budget, apply a Free-plan safety ceiling even
+  // when Railway still has an older, larger MAX_HELIUS_WALLETS value. All other
+  // active wallets remain covered by lower-cost reconciliation.
+  const currentLimit = Math.min(FREE_PLAN_SAFE_MAX_WALLETS, requestedLimit);
+  const minimumLimit = Math.max(
+    1,
+    Math.min(currentLimit, Math.floor(options.minimumLimit))
+  );
   const proportionalLimit = Math.floor(
-    currentLimit *
+    requestedLimit *
       (options.targetMonthlyCredits / options.projectedMonthlyCredits)
   );
 
   return Math.max(
     minimumLimit,
-    Math.min(currentLimit - 1, proportionalLimit)
+    Math.min(currentLimit, requestedLimit - 1, proportionalLimit)
   );
 }
