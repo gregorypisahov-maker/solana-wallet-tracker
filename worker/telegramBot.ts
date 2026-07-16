@@ -17,13 +17,14 @@ import {
   handleReadiness,
   handleResume,
 } from '../paper-trader/telegramCommands';
+import { handleWalletScan } from './walletScanCommand';
 
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 
 const POLL_TIMEOUT_SECONDS = 30;
 const RETRY_DELAY_MS = 5_000;
-const TELEGRAM_WORKER_VERSION = '2026-07-16-heliusstats-v2';
+const TELEGRAM_WORKER_VERSION = '2026-07-16-walletscan-v1';
 
 if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
   console.error(
@@ -88,6 +89,8 @@ const COMMAND_HANDLERS: Record<string, () => Promise<string>> = {
   '/helius': handleHeliusStats,
   '/readiness': handleReadiness,
   '/resume': handleResume,
+  '/walletscan': handleWalletScan,
+  '/scanwallets': handleWalletScan,
 };
 
 function normalizeCommand(text: string): string {
@@ -149,7 +152,7 @@ async function pollLoop(): Promise<void> {
     `[telegram-bot] Starting inbound command listener (${TELEGRAM_WORKER_VERSION})...`
   );
   console.log(
-    '[telegram-bot] Commands ready: /paperstats /walletstats /exitstats /scorestats /heliusstats /helius /readiness /resume'
+    '[telegram-bot] Commands ready: /paperstats /walletstats /exitstats /scorestats /heliusstats /helius /readiness /resume /walletscan'
   );
 
   while (true) {
