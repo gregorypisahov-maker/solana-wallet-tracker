@@ -4,15 +4,15 @@
 
 export const config = {
   entry: {
-    // Restored productive paper-trading profile. This keeps basic safety
-    // protections while allowing the simulator to collect enough trades to
-    // measure whether the strategy really has an edge.
-    minScore: 8,
-    minWalletCount: 3,
-    minAvgBuyPerWallet: 1.0,
-    minLiquidityToMcapRatio: 0.08,
+    // Paper-only sample-collection profile. Real trading remains disabled.
+    // Two-wallet signals are allowed only when the entry filter's stronger
+    // score, liquidity and trust safeguards also pass.
+    minScore: 12,
+    minWalletCount: 2,
+    minAvgBuyPerWallet: 0.75,
+    minLiquidityToMcapRatio: 0.06,
     maxMarketCapUsd: 3_000_000,
-    minLiquidityUsd: 15_000,
+    minLiquidityUsd: 10_000,
   },
 
   position: {
