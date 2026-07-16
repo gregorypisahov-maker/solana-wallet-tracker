@@ -28,10 +28,10 @@ function decisionFor(token: any) {
   if (score > 65) reasons.push(`score ${score} above late-entry ceiling 65`);
   if (wallets < 3) reasons.push(`${wallets} wallets below 3-wallet consensus`);
   if (averageBuy < 0.75) reasons.push(`average buy ${averageBuy.toFixed(2)} SOL below 0.75`);
-  if (liquidity < 15_000) reasons.push(`liquidity below $15k`);
+  if (liquidity < 15_000) reasons.push("liquidity below $15k");
   if (ratio < 0.15) reasons.push(`liquidity/market-cap ${(ratio * 100).toFixed(0)}% below 15%`);
-  if (marketCap < 20_000) reasons.push(`market cap below $20k`);
-  if (marketCap > 200_000) reasons.push(`market cap above $200k`);
+  if (marketCap < 20_000) reasons.push("market cap below $20k");
+  if (marketCap > 200_000) reasons.push("market cap above $200k");
   if (token.dump_flag) reasons.push("dump flag detected");
 
   return {
@@ -51,7 +51,7 @@ export async function GET(request: NextRequest) {
   const supabase = getSupabaseAdmin({ noStore: true });
   const [state, latestTransaction, latestToken, intelligence, wallets, performance, trades, tokens] =
     await Promise.all([
-      supabase.from("paper_state").select("halted,halt_reason,updated_at").eq("id", 1).maybeSingle(),
+      supabase.from("paper_state").select("halted,halt_reason").eq("id", 1).maybeSingle(),
       supabase.from("wallet_transactions").select("tx_time").order("tx_time", { ascending: false }).limit(1).maybeSingle(),
       supabase.from("token_scores").select("updated_at").order("updated_at", { ascending: false }).limit(1).maybeSingle(),
       supabase.from("wallet_intelligence_runs").select("ran_at,promoted_count,disabled_count,notes").order("ran_at", { ascending: false }).limit(1).maybeSingle(),
@@ -61,28 +61,27 @@ export async function GET(request: NextRequest) {
       supabase.from("token_scores").select("token_mint,token_symbol,score,wallets_count,total_sol_bought,market_cap,liquidity_usd,dump_flag,updated_at,last_buy_time").order("updated_at", { ascending: false }).limit(12),
     ]);
 
-  const required = { state, latestTransaction, latestToken, intelligence, wallets, performance, trades, tokens };
-  const failed = Object.entries(required).find(([, result]) => result.error);
-  if (failed) {
-    console.error(`[command-center] ${failed[0]} query failed`, failed[1].error);
-    return NextResponse.json({ error: "Command Center data is temporarily unavailable" }, { status: 500 });
+  const results = { state, latestTransaction, latestToken, intelligence, wallets, performance, trades, tokens };
+  for (const [name, result] of Object.entries(results)) {
+    if (result.error) console.error(`[command-center] ${name} query failed`, result.error);
   }
 
-  const walletRows = wallets.data ?? [];
+  const walletRows = wallets.error ? [] : wallets.data ?? [];
   const active = walletRows.filter((wallet) => wallet.active);
   const proven = active.filter((wallet) => wallet.management_status === "proven");
   const trial = active.filter((wallet) => wallet.management_status === "trial");
   const activeSet = new Set(active.map((wallet) => wallet.address));
-  const ranked = (performance.data ?? []).filter((wallet) => activeSet.has(wallet.wallet_address));
+  const ranked = (performance.error ? [] : performance.data ?? []).filter((wallet) => activeSet.has(wallet.wallet_address));
 
   const grouped = new Map<string, { pnl: number; soldPct: number; happenedAt: string }>();
-  for (const row of trades.data ?? []) {
+  for (const row of trades.error ? [] : trades.data ?? []) {
     const key = row.position_id ?? `${row.token_symbol}:${row.happened_at}`;
     const current = grouped.get(key) ?? { pnl: 0, soldPct: 0, happenedAt: row.happened_at };
     current.pnl += Number(row.pnl_sol ?? 0);
     current.soldPct += Number(row.sold_pct ?? 0);
     grouped.set(key, current);
   }
+
   const closed = [...grouped.values()].filter((row) => row.soldPct >= 0.999);
   const recentCutoff = Date.now() - 24 * 60 * 60_000;
   const last24h = closed.filter((row) => Date.parse(row.happenedAt) >= recentCutoff);
@@ -93,7 +92,7 @@ export async function GET(request: NextRequest) {
   const weakestTrial = ranked
     .filter((row) => trial.some((wallet) => wallet.address === row.wallet_address))
     .sort((a, b) => Number(a.trust_score) - Number(b.trust_score))[0];
-  const decisions = (tokens.data ?? []).map(decisionFor);
+  const decisions = (tokens.error ? [] : tokens.data ?? []).map(decisionFor);
   const rejected = decisions.filter((decision) => !decision.accepted).length;
 
   const coach: string[] = [];
@@ -105,26 +104,26 @@ export async function GET(request: NextRequest) {
   if (state.data?.halted) coach.push(`Paper entries are halted: ${state.data.halt_reason ?? "risk limit reached"}.`);
   else coach.push("Paper trader is enabled; avoid changing thresholds until a meaningful fresh sample is complete.");
 
-  const transactionAge = ageMinutes(latestTransaction.data?.tx_time);
-  const tokenAge = ageMinutes(latestToken.data?.updated_at);
-  const intelligenceAge = ageMinutes(intelligence.data?.ran_at);
+  const transactionAge = ageMinutes(latestTransaction.error ? null : latestTransaction.data?.tx_time);
+  const tokenAge = ageMinutes(latestToken.error ? null : latestToken.data?.updated_at);
+  const intelligenceAge = ageMinutes(intelligence.error ? null : intelligence.data?.ran_at);
 
   return NextResponse.json({
     generatedAt: new Date().toISOString(),
     health: [
-      { name: "Paper trader", ok: !state.data?.halted, detail: state.data?.halted ? state.data.halt_reason ?? "halted" : "enabled" },
+      { name: "Paper trader", ok: !state.error && !state.data?.halted, detail: state.error ? "state unavailable" : state.data?.halted ? state.data.halt_reason ?? "halted" : "enabled" },
       { name: "Wallet monitor", ok: transactionAge !== null && transactionAge < 30, detail: transactionAge == null ? "no transaction heartbeat" : `last activity ${Math.floor(transactionAge)}m ago` },
       { name: "Consensus engine", ok: tokenAge !== null && tokenAge < 30, detail: tokenAge == null ? "no score heartbeat" : `last score ${Math.floor(tokenAge)}m ago` },
       { name: "Wallet intelligence", ok: intelligenceAge !== null && intelligenceAge < 90, detail: intelligenceAge == null ? "never run" : `last run ${Math.floor(intelligenceAge)}m ago` },
-      { name: "Supabase", ok: true, detail: "queries healthy" },
+      { name: "Supabase", ok: !Object.values(results).some((result) => result.error), detail: Object.values(results).some((result) => result.error) ? "some panels degraded" : "queries healthy" },
     ],
     wallets: {
       proven: proven.length,
       trial: trial.length,
       total: active.length,
-      promotedLastRun: Number(intelligence.data?.promoted_count ?? 0),
-      disabledLastRun: Number(intelligence.data?.disabled_count ?? 0),
-      replacementsLastRun: Number((intelligence.data as any)?.notes?.immediate_replacement?.added_count ?? 0),
+      promotedLastRun: Number(intelligence.error ? 0 : intelligence.data?.promoted_count ?? 0),
+      disabledLastRun: Number(intelligence.error ? 0 : intelligence.data?.disabled_count ?? 0),
+      replacementsLastRun: Number(intelligence.error ? 0 : (intelligence.data as any)?.notes?.immediate_replacement?.added_count ?? 0),
       leaders: ranked.slice(0, 5).map((row) => ({ ...row, wallet_address: short(row.wallet_address) })),
     },
     decisions,
