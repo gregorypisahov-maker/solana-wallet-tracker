@@ -23,6 +23,17 @@ function cleanEnv(value: string | undefined): string {
   return (value ?? '').trim().replace(/^[\'\"]|[\'\"]$/g, '').trim();
 }
 
+function envFlag(name: string): boolean {
+  return ['1', 'true', 'yes', 'on'].includes(cleanEnv(process.env[name]).toLowerCase());
+}
+
+// Hard safety gate: only the dedicated Railway Telegram service may poll.
+// Wallet Monitor and Web must leave this unset or set it to false.
+if (!envFlag('ENABLE_TELEGRAM_POLLING')) {
+  console.log('[telegram-bot] Polling disabled. Set ENABLE_TELEGRAM_POLLING=true only on the dedicated Telegram Bot & Alerts service.');
+  process.exit(0);
+}
+
 // One token only. The same TELEGRAM_BOT_TOKEN is used for alerts and commands.
 const TELEGRAM_BOT_TOKEN = cleanEnv(process.env.TELEGRAM_BOT_TOKEN);
 const TELEGRAM_CHAT_ID = cleanEnv(process.env.TELEGRAM_CHAT_ID);
@@ -30,7 +41,7 @@ const TELEGRAM_CHAT_ID = cleanEnv(process.env.TELEGRAM_CHAT_ID);
 const POLL_TIMEOUT_SECONDS = 30;
 const CONFLICT_BACKOFF_MIN_MS = 65_000;
 const CONFLICT_BACKOFF_JITTER_MS = 30_000;
-const TELEGRAM_WORKER_VERSION = '2026-07-16-single-token-v6';
+const TELEGRAM_WORKER_VERSION = '2026-07-16-single-poller-v7';
 
 if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
   console.error('[telegram-bot] TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID must be set. Exiting.');
