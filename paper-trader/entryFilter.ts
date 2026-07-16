@@ -55,7 +55,20 @@ export function evaluateEntry(alert: AlertInput): EntryEvaluation {
     reasons.push(`liquidity $${liquidityUsd} below floor $${adaptive.minLiquidityUsd}`);
   }
 
-  if (confidenceGrade === 'D') {
+  // Grade D is normally rejected. For paper-data collection only, allow a
+  // strong two-wallet D signal when the objective market safeguards are much
+  // stronger than the baseline. This does not enable real trading.
+  const strongTwoWalletD =
+    confidenceGrade === 'D' &&
+    walletCount === 2 &&
+    score >= 30 &&
+    avgBuyPerWallet >= 1.5 &&
+    liquidityUsd >= 20_000 &&
+    liqToMcap >= 0.10 &&
+    (averageTrustScore === undefined || averageTrustScore >= 48) &&
+    (weightedWalletScore === undefined || weightedWalletScore / walletCount >= 0.95);
+
+  if (confidenceGrade === 'D' && !strongTwoWalletD) {
     reasons.push('wallet confidence grade D is not tradeable');
   }
   if (averageTrustScore !== undefined && averageTrustScore < 40) {
