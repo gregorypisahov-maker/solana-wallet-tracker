@@ -1,12 +1,12 @@
 import "dotenv/config";
-import { startWalletDiscoveryScheduler } from "./walletDiscovery";
+import { startAuditedWalletDiscoveryScheduler } from "./walletDiscoveryAudit";
 
-async function main(): Promise<void> {
-  startWalletDiscoveryScheduler();
+async function bootstrap(): Promise<void> {
+  startAuditedWalletDiscoveryScheduler();
   await import("./monitor");
 }
 
-main().catch((error) => {
-  console.error("[monitor-bootstrap] Fatal startup error:", error);
+bootstrap().catch((error) => {
+  console.error("[monitor-bootstrap] startup failed:", error);
   process.exit(1);
 });
