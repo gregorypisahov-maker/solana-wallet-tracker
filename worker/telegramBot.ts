@@ -3,11 +3,11 @@
 // Inbound Telegram command listener using Telegram getUpdates long polling.
 // Run as a separate Railway process from worker/monitor.ts.
 //
-// Security: commands are accepted only from TELEGRAM_CHAT_ID.
+// Security: commands are accepted only from TELEGRAM_CHAT_ID and optional
+// TELEGRAM_ALLOWED_CHAT_IDS entries.
 
 import 'dotenv/config';
 
-import { sendTelegramAlert } from '../lib/telegram';
 import { loadState } from '../paper-trader/storage';
 import {
   handlePaperStats,
@@ -34,21 +34,23 @@ function envFlag(name: string): boolean {
   return ['1', 'true', 'yes', 'on'].includes(cleanEnv(process.env[name]).toLowerCase());
 }
 
-// Hard safety gate: only the dedicated Railway Telegram service may poll.
-// Wallet Monitor and Web must leave this unset or set it to false.
 if (!envFlag('ENABLE_TELEGRAM_POLLING')) {
   console.log('[telegram-bot] Polling disabled. Set ENABLE_TELEGRAM_POLLING=true only on the dedicated Telegram Bot & Alerts service.');
   process.exit(0);
 }
 
-// One token only. The same TELEGRAM_BOT_TOKEN is used for alerts and commands.
 const TELEGRAM_BOT_TOKEN = cleanEnv(process.env.TELEGRAM_BOT_TOKEN);
 const TELEGRAM_CHAT_ID = cleanEnv(process.env.TELEGRAM_CHAT_ID);
+const EXTRA_CHAT_IDS = cleanEnv(process.env.TELEGRAM_ALLOWED_CHAT_IDS)
+  .split(/[\s,;]+/)
+  .map((value) => value.trim())
+  .filter(Boolean);
+const AUTHORIZED_CHAT_IDS = new Set([TELEGRAM_CHAT_ID, ...EXTRA_CHAT_IDS].filter(Boolean));
 
 const POLL_TIMEOUT_SECONDS = 30;
 const CONFLICT_BACKOFF_MIN_MS = 65_000;
 const CONFLICT_BACKOFF_JITTER_MS = 30_000;
-const TELEGRAM_WORKER_VERSION = '2026-07-17-help-menu-v10';
+const TELEGRAM_WORKER_VERSION = '2026-07-17-multi-chat-v11';
 
 if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
   console.error('[telegram-bot] TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID must be set. Exiting.');
@@ -66,7 +68,7 @@ let lastUpdateId = 0;
 interface TelegramUpdate {
   update_id: number;
   message?: {
-    chat: { id: number };
+    chat: { id: number; title?: string; type?: string };
     text?: string;
   };
 }
@@ -75,6 +77,18 @@ interface TelegramUpdatesResponse {
   ok: boolean;
   result?: TelegramUpdate[];
   description?: string;
+}
+
+async function sendToChat(chatId: string, text: string): Promise<void> {
+  const response = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ chat_id: chatId, text, parse_mode: 'HTML', disable_web_page_preview: true }),
+  });
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(`Telegram sendMessage failed: ${response.status} ${body}`);
+  }
 }
 
 async function validateToken(): Promise<void> {
@@ -122,31 +136,26 @@ async function handleHelp(): Promise<string> {
   }
 
   return [
-    '🤖 <b>SOLANA WALLET TRACKER</b>',
-    '',
-    status,
-    '',
+    '🤖 <b>SOLANA WALLET TRACKER</b>', '', status, '',
     '<b>📊 Status</b>',
     '/paperstats — Paper trading performance',
     '/readiness — Bot readiness check',
-    '/heliusstats — Helius credit usage',
-    '',
+    '/heliusstats — Helius credit usage', '',
     '<b>📈 Analytics</b>',
     '/walletstats — Wallet performance',
     '/scorestats — Performance by score range',
     '/exitstats — Performance by exit reason',
-    '/elite_wallets — Elite wallet rankings',
-    '',
+    '/elite_wallets — Elite wallet rankings', '',
     '<b>🧠 Wallet intelligence</b>',
     '/auto_wallets — Automatic wallet-manager status',
     '/walletscan — Run wallet scan',
     '/discover_now — Search for new trial wallets now',
-    '/intelligence_now — Re-score and rotate wallets now',
-    '',
+    '/intelligence_now — Re-score and rotate wallets now', '',
     '<b>🛠 Control</b>',
     resumeHint,
     '/help — Show this command menu',
     '/commands — Same as /help',
+    '/chatid — Show this chat ID for setup',
   ].join('\n');
 }
 
@@ -185,29 +194,45 @@ async function handleUpdate(update: TelegramUpdate): Promise<void> {
   if (!message?.text) return;
 
   const incomingChatId = String(message.chat.id);
-  if (incomingChatId !== TELEGRAM_CHAT_ID) {
-    console.warn(`[telegram-bot] Ignored message from unauthorized chat ${incomingChatId}`);
+  const command = normalizeCommand(message.text);
+
+  // Safe setup command: reveals only the current chat's own ID.
+  if (command === '/chatid') {
+    await sendToChat(incomingChatId, [
+      '🆔 <b>Telegram chat ID</b>', '',
+      `<code>${incomingChatId}</code>`, '',
+      AUTHORIZED_CHAT_IDS.has(incomingChatId)
+        ? '✅ This chat is already authorized.'
+        : '⚠️ Add this ID to TELEGRAM_ALLOWED_CHAT_IDS on the dedicated Telegram Railway service, then redeploy.',
+    ].join('\n'));
     return;
   }
 
-  const command = normalizeCommand(message.text);
-  const handler = COMMAND_HANDLERS[command];
-  if (!handler) {
+  if (!AUTHORIZED_CHAT_IDS.has(incomingChatId)) {
+    console.warn(`[telegram-bot] Ignored message from unauthorized chat ${incomingChatId}`);
     if (command.startsWith('/')) {
-      console.log(`[telegram-bot] Unknown command: ${command}`);
-      await sendTelegramAlert(`❓ Unknown command: ${command}\n\nUse /help to see all available commands.`);
+      await sendToChat(incomingChatId, '🔒 This chat is not authorized.\n\nUse /chatid to get its ID, then add it to TELEGRAM_ALLOWED_CHAT_IDS.');
     }
     return;
   }
 
-  console.log(`[telegram-bot] Handling command: ${command}`);
+  const handler = COMMAND_HANDLERS[command];
+  if (!handler) {
+    if (command.startsWith('/')) {
+      console.log(`[telegram-bot] Unknown command: ${command}`);
+      await sendToChat(incomingChatId, `❓ Unknown command: ${command}\n\nUse /help to see all available commands.`);
+    }
+    return;
+  }
+
+  console.log(`[telegram-bot] Handling command ${command} from chat ${incomingChatId}`);
   try {
     const response = await handler();
-    await sendTelegramAlert(response);
+    await sendToChat(incomingChatId, response);
   } catch (error) {
     console.error(`[telegram-bot] Command ${command} failed:`, error);
     const errorMessage = error instanceof Error ? error.message : String(error);
-    await sendTelegramAlert(['❌ <b>Command failed</b>', '', `Command: ${command}`, `Error: ${errorMessage}`].join('\n'));
+    await sendToChat(incomingChatId, ['❌ <b>Command failed</b>', '', `Command: ${command}`, `Error: ${errorMessage}`].join('\n'));
   }
 }
 
@@ -222,8 +247,8 @@ async function sleep(ms: number): Promise<void> {
 
 async function pollLoop(): Promise<void> {
   console.log(`[telegram-bot] Starting inbound command listener (${TELEGRAM_WORKER_VERSION})...`);
-  console.log(`[telegram-bot] Bot-token fingerprint: ${tokenFingerprint}; chat configured: yes`);
-  console.log('[telegram-bot] Commands ready: /help /commands /paperstats /walletstats /exitstats /scorestats /heliusstats /readiness /resume /walletscan /auto_wallets /elite_wallets /discover_now /intelligence_now');
+  console.log(`[telegram-bot] Bot-token fingerprint: ${tokenFingerprint}; authorized chats: ${AUTHORIZED_CHAT_IDS.size}`);
+  console.log('[telegram-bot] Commands ready: /help /commands /chatid /paperstats /walletstats /exitstats /scorestats /heliusstats /readiness /resume /walletscan /auto_wallets /elite_wallets /discover_now /intelligence_now');
 
   await validateToken();
 
