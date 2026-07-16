@@ -1,5 +1,6 @@
 // paper-trader/entryFilter.ts
 import { config } from './config';
+import { getAdaptiveEntryThresholds } from './adaptiveStrategy';
 import { AlertInput } from './types';
 
 export interface EntryEvaluation {
@@ -11,6 +12,7 @@ export interface EntryEvaluation {
 
 export function evaluateEntry(alert: AlertInput): EntryEvaluation {
   const reasons: string[] = [];
+  const adaptive = getAdaptiveEntryThresholds();
   const {
     score,
     walletCount,
@@ -25,39 +27,34 @@ export function evaluateEntry(alert: AlertInput): EntryEvaluation {
   const avgBuyPerWallet = walletCount > 0 ? totalBoughtSol / walletCount : 0;
   const liqToMcap = marketCapUsd > 0 ? liquidityUsd / marketCapUsd : 0;
 
-  // Require stronger raw consensus when learned wallet quality is only average.
-  // A/B setups keep the normal threshold; C setups need +1 score. D setups are
-  // rejected because the participating wallets have weak or insufficient trust.
   const trustAdjustedMinScore =
-    confidenceGrade === 'C' ? config.entry.minScore + 1 : config.entry.minScore;
+    confidenceGrade === 'C' ? adaptive.minScore + 1 : adaptive.minScore;
 
   if (score < trustAdjustedMinScore) {
-    reasons.push(`score ${score} below trust-adjusted minimum ${trustAdjustedMinScore}`);
+    reasons.push(`score ${score} below adaptive minimum ${trustAdjustedMinScore}`);
   }
   if (walletCount < config.entry.minWalletCount) {
     reasons.push(`walletCount ${walletCount} below minimum ${config.entry.minWalletCount}`);
   }
-  if (avgBuyPerWallet < config.entry.minAvgBuyPerWallet) {
+  if (avgBuyPerWallet < adaptive.minAvgBuyPerWallet) {
     reasons.push(
-      `avg buy/wallet ${avgBuyPerWallet.toFixed(2)} SOL below minimum ${config.entry.minAvgBuyPerWallet}`
+      `avg buy/wallet ${avgBuyPerWallet.toFixed(2)} SOL below adaptive minimum ${adaptive.minAvgBuyPerWallet}`
     );
   }
-  if (liqToMcap < config.entry.minLiquidityToMcapRatio) {
+  if (liqToMcap < adaptive.minLiquidityToMcapRatio) {
     reasons.push(
       `liquidity/mcap ratio ${(liqToMcap * 100).toFixed(1)}% below minimum ${
-        config.entry.minLiquidityToMcapRatio * 100
+        adaptive.minLiquidityToMcapRatio * 100
       }%`
     );
   }
   if (marketCapUsd > config.entry.maxMarketCapUsd) {
     reasons.push(`marketCap $${marketCapUsd} above ceiling $${config.entry.maxMarketCapUsd}`);
   }
-  if (liquidityUsd < config.entry.minLiquidityUsd) {
-    reasons.push(`liquidity $${liquidityUsd} below floor $${config.entry.minLiquidityUsd}`);
+  if (liquidityUsd < adaptive.minLiquidityUsd) {
+    reasons.push(`liquidity $${liquidityUsd} below floor $${adaptive.minLiquidityUsd}`);
   }
 
-  // These fields are optional for backward compatibility. When the worker has
-  // learned wallet-performance data, use it to stop repeating low-quality setups.
   if (confidenceGrade === 'D') {
     reasons.push('wallet confidence grade D is not tradeable');
   }
