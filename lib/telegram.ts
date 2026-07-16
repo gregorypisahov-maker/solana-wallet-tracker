@@ -13,9 +13,13 @@ const TELEGRAM_TIMEOUT_MS = Number.isFinite(configuredTelegramTimeoutMs)
   ? Math.max(3_000, configuredTelegramTimeoutMs)
   : 10_000;
 
+function cleanEnv(value: string | undefined): string {
+  return (value ?? '').trim().replace(/^['"]|['"]$/g, '').trim();
+}
+
 export async function sendTelegramAlert(message: string): Promise<void> {
-  const token = process.env.TELEGRAM_BOT_TOKEN;
-  const chatId = process.env.TELEGRAM_CHAT_ID;
+  const token = cleanEnv(process.env.TELEGRAM_BOT_TOKEN);
+  const chatId = cleanEnv(process.env.TELEGRAM_CHAT_ID);
   if (!token || !chatId) {
     console.log("Telegram not configured. Alert skipped:");
     console.log(message);
@@ -67,7 +71,6 @@ export function formatConsensusAlert(data: {
   marketCap?: number | null;
   liquidityUsd?: number | null;
   score: number;
-  // Phase 3 — all optional, backward compatible with existing callers.
   weightedWalletScore?: number;
   averageTrustScore?: number;
   confidenceGrade?: 'A' | 'B' | 'C' | 'D';
