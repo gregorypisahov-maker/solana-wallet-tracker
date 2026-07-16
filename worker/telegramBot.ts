@@ -23,25 +23,22 @@ function cleanEnv(value: string | undefined): string {
   return (value ?? '').trim().replace(/^[\'\"]|[\'\"]$/g, '').trim();
 }
 
-const TELEGRAM_BOT_TOKEN = cleanEnv(process.env.TELEGRAM_COMMAND_BOT_TOKEN);
+// One token only. The same TELEGRAM_BOT_TOKEN is used for alerts and commands.
+const TELEGRAM_BOT_TOKEN = cleanEnv(process.env.TELEGRAM_BOT_TOKEN);
 const TELEGRAM_CHAT_ID = cleanEnv(process.env.TELEGRAM_CHAT_ID);
 
 const POLL_TIMEOUT_SECONDS = 30;
 const CONFLICT_BACKOFF_MIN_MS = 65_000;
 const CONFLICT_BACKOFF_JITTER_MS = 30_000;
-const TELEGRAM_WORKER_VERSION = '2026-07-16-walletscan-v5-fresh-build';
+const TELEGRAM_WORKER_VERSION = '2026-07-16-single-token-v6';
 
 if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
-  console.error(
-    '[telegram-bot] TELEGRAM_COMMAND_BOT_TOKEN and TELEGRAM_CHAT_ID must be set. Exiting.'
-  );
+  console.error('[telegram-bot] TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID must be set. Exiting.');
   process.exit(1);
 }
 
 if (!/^\d+:[A-Za-z0-9_-]+$/.test(TELEGRAM_BOT_TOKEN)) {
-  console.error(
-    '[telegram-bot] TELEGRAM_COMMAND_BOT_TOKEN has an invalid shape. It must look like 123456789:AA...'
-  );
+  console.error('[telegram-bot] TELEGRAM_BOT_TOKEN has an invalid shape. It must look like 123456789:AA...');
   process.exit(1);
 }
 
@@ -51,9 +48,7 @@ let lastUpdateId = 0;
 interface TelegramUpdate {
   update_id: number;
   message?: {
-    chat: {
-      id: number;
-    };
+    chat: { id: number };
     text?: string;
   };
 }
@@ -67,14 +62,9 @@ interface TelegramUpdatesResponse {
 async function validateToken(): Promise<void> {
   const response = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getMe`);
   const text = await response.text();
-
   if (!response.ok) {
-    throw new Error(
-      `Telegram rejected TELEGRAM_COMMAND_BOT_TOKEN (${tokenFingerprint}) during startup: ` +
-      `${response.status} ${text}`
-    );
+    throw new Error(`Telegram rejected TELEGRAM_BOT_TOKEN (${tokenFingerprint}) during startup: ${response.status} ${text}`);
   }
-
   console.log(`[telegram-bot] Token accepted by Telegram (${tokenFingerprint}).`);
 }
 
@@ -86,17 +76,13 @@ async function getUpdates(): Promise<TelegramUpdate[]> {
     `&allowed_updates=${encodeURIComponent(JSON.stringify(['message']))}`;
 
   const response = await fetch(url);
-
   if (!response.ok) {
     const text = await response.text();
     throw new Error(`Telegram getUpdates failed: ${response.status} ${text}`);
   }
 
   const body = (await response.json()) as TelegramUpdatesResponse;
-  if (!body.ok) {
-    throw new Error(body.description ?? 'Telegram getUpdates returned an unknown error');
-  }
-
+  if (!body.ok) throw new Error(body.description ?? 'Telegram getUpdates returned an unknown error');
   return body.result ?? [];
 }
 
@@ -120,7 +106,6 @@ function normalizeCommand(text: string): string {
 
 async function handleUpdate(update: TelegramUpdate): Promise<void> {
   lastUpdateId = Math.max(lastUpdateId, update.update_id);
-
   const message = update.message;
   if (!message?.text) return;
 
@@ -132,26 +117,19 @@ async function handleUpdate(update: TelegramUpdate): Promise<void> {
 
   const command = normalizeCommand(message.text);
   const handler = COMMAND_HANDLERS[command];
-
   if (!handler) {
     if (command.startsWith('/')) console.log(`[telegram-bot] Unknown command: ${command}`);
     return;
   }
 
   console.log(`[telegram-bot] Handling command: ${command}`);
-
   try {
     const response = await handler();
     await sendTelegramAlert(response);
   } catch (error) {
     console.error(`[telegram-bot] Command ${command} failed:`, error);
     const errorMessage = error instanceof Error ? error.message : String(error);
-    await sendTelegramAlert([
-      '❌ <b>Command failed</b>',
-      '',
-      `Command: ${command}`,
-      `Error: ${errorMessage}`,
-    ].join('\n'));
+    await sendTelegramAlert(['❌ <b>Command failed</b>', '', `Command: ${command}`, `Error: ${errorMessage}`].join('\n'));
   }
 }
 
@@ -166,7 +144,7 @@ async function sleep(ms: number): Promise<void> {
 
 async function pollLoop(): Promise<void> {
   console.log(`[telegram-bot] Starting inbound command listener (${TELEGRAM_WORKER_VERSION})...`);
-  console.log(`[telegram-bot] Command-token fingerprint: ${tokenFingerprint}; chat configured: yes`);
+  console.log(`[telegram-bot] Bot-token fingerprint: ${tokenFingerprint}; chat configured: yes`);
   console.log('[telegram-bot] Commands ready: /paperstats /walletstats /exitstats /scorestats /heliusstats /helius /readiness /resume /walletscan');
 
   await validateToken();
@@ -178,13 +156,10 @@ async function pollLoop(): Promise<void> {
     } catch (error) {
       if (isTelegramConflict(error)) {
         const backoff = CONFLICT_BACKOFF_MIN_MS + Math.floor(Math.random() * CONFLICT_BACKOFF_JITTER_MS);
-        console.warn(
-          `[telegram-bot] Another poller owns this bot token; backing off ${Math.round(backoff / 1000)}s before retry.`
-        );
+        console.warn(`[telegram-bot] Another poller owns this bot token; backing off ${Math.round(backoff / 1000)}s before retry.`);
         await sleep(backoff);
         continue;
       }
-
       console.error('[telegram-bot] Fatal polling error:', error);
       process.exit(1);
     }
