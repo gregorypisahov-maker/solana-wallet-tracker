@@ -4,16 +4,15 @@
 
 export const config = {
   entry: {
-    // Keep the paper engine aligned with the monitor's consensus gate.
-    // Previously the monitor accepted a signal and sent an alert, but the
-    // simulator silently rejected many of the same tokens because these
-    // limits were stricter and inconsistent.
+    // Restored productive paper-trading profile. This keeps basic safety
+    // protections while allowing the simulator to collect enough trades to
+    // measure whether the strategy really has an edge.
     minScore: 8,
     minWalletCount: 3,
-    minAvgBuyPerWallet: 0.5,
-    minLiquidityToMcapRatio: 0.05,
+    minAvgBuyPerWallet: 1.0,
+    minLiquidityToMcapRatio: 0.08,
     maxMarketCapUsd: 3_000_000,
-    minLiquidityUsd: 10_000,
+    minLiquidityUsd: 15_000,
   },
 
   position: {
