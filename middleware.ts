@@ -2,10 +2,18 @@ import { NextRequest, NextResponse } from "next/server";
 
 const VIEWER_COOKIE = "swt_viewer";
 
-export function middleware(request: NextRequest) {
-  const expected = process.env.VIEWER_SHARE_TOKEN;
+function getViewerSecret(): string | undefined {
+  return (
+    process.env.VIEWER_SHARE_TOKEN?.trim() ||
+    process.env.DASHBOARD_KEY?.trim() ||
+    process.env.DASHBOARD_ADMIN_PASSWORD?.trim()
+  );
+}
 
-  if (!expected || expected.length < 32) {
+export function middleware(request: NextRequest) {
+  const expected = getViewerSecret();
+
+  if (!expected) {
     return new NextResponse("Dashboard is not configured", { status: 503 });
   }
 
@@ -25,8 +33,6 @@ export function middleware(request: NextRequest) {
     return response;
   }
 
-  // The root page must remain reachable so it can display the private login form.
-  // The login endpoint must also remain reachable so it can issue the viewer cookie.
   if (request.nextUrl.pathname === "/" || request.nextUrl.pathname === "/api/viewer-login") {
     const response = NextResponse.next();
     response.headers.set("Cache-Control", "no-store");
