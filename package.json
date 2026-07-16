@@ -6,9 +6,9 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "worker": "sed -i 's/const MIN_WALLETS_FOR_ALERT = 3;/const MIN_WALLETS_FOR_ALERT = 2;/' worker/monitor.ts && sed -i 's/const MIN_TOTAL_SOL = 1;/const MIN_TOTAL_SOL = 0.5;/' worker/monitor.ts && SIGNAL_MAX_AGE_MINUTES=20 CONSENSUS_REFRESH_INTERVAL_SECONDS=10 tsx worker/monitorBootstrap.ts",
-    "paper-trader": "sed -i 's/const MIN_WALLETS_FOR_ALERT = 3;/const MIN_WALLETS_FOR_ALERT = 2;/' worker/monitor.ts && sed -i 's/const MIN_TOTAL_SOL = 1;/const MIN_TOTAL_SOL = 0.5;/' worker/monitor.ts && SIGNAL_MAX_AGE_MINUTES=20 CONSENSUS_REFRESH_INTERVAL_SECONDS=10 tsx worker/monitorBootstrap.ts",
-    "worker:dev": "sed -i 's/const MIN_WALLETS_FOR_ALERT = 3;/const MIN_WALLETS_FOR_ALERT = 2;/' worker/monitor.ts && sed -i 's/const MIN_TOTAL_SOL = 1;/const MIN_TOTAL_SOL = 0.5;/' worker/monitor.ts && SIGNAL_MAX_AGE_MINUTES=20 CONSENSUS_REFRESH_INTERVAL_SECONDS=10 tsx watch worker/monitorBootstrap.ts",
+    "worker": "sed -i 's/const MIN_WALLETS_FOR_ALERT = 3;/const MIN_WALLETS_FOR_ALERT = 2;/' worker/monitor.ts && sed -i 's/const MIN_TOTAL_SOL = 1;/const MIN_TOTAL_SOL = 0.5;/' worker/monitor.ts && node scripts/patch-profit-protection.mjs && SIGNAL_MAX_AGE_MINUTES=20 CONSENSUS_REFRESH_INTERVAL_SECONDS=10 tsx worker/monitorBootstrap.ts",
+    "paper-trader": "sed -i 's/const MIN_WALLETS_FOR_ALERT = 3;/const MIN_WALLETS_FOR_ALERT = 2;/' worker/monitor.ts && sed -i 's/const MIN_TOTAL_SOL = 1;/const MIN_TOTAL_SOL = 0.5;/' worker/monitor.ts && node scripts/patch-profit-protection.mjs && SIGNAL_MAX_AGE_MINUTES=20 CONSENSUS_REFRESH_INTERVAL_SECONDS=10 tsx worker/monitorBootstrap.ts",
+    "worker:dev": "sed -i 's/const MIN_WALLETS_FOR_ALERT = 3;/const MIN_WALLETS_FOR_ALERT = 2;/' worker/monitor.ts && sed -i 's/const MIN_TOTAL_SOL = 1;/const MIN_TOTAL_SOL = 0.5;/' worker/monitor.ts && node scripts/patch-profit-protection.mjs && SIGNAL_MAX_AGE_MINUTES=20 CONSENSUS_REFRESH_INTERVAL_SECONDS=10 tsx watch worker/monitorBootstrap.ts",
     "telegram-bot": "tsx worker/telegramBot.ts",
     "test": "node --import tsx --test lib/*.test.ts worker/*.test.ts paper-trader/*.test.ts",
     "typecheck": "tsc --noEmit"
