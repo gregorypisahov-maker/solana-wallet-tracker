@@ -1,8 +1,10 @@
 import "dotenv/config";
 import { startAuditedWalletDiscoveryScheduler } from "./walletDiscoveryAudit";
+import { startAdaptiveStrategyScheduler } from "../paper-trader/adaptiveStrategy";
 
 async function bootstrap(): Promise<void> {
   startAuditedWalletDiscoveryScheduler();
+  startAdaptiveStrategyScheduler();
   await import("./monitor");
 }
 
