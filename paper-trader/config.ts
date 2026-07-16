@@ -4,23 +4,18 @@
 
 export const config = {
   entry: {
-    // Paper-only quality profile based on the completed-trade sample. Real
-    // trading remains disabled. Three-wallet consensus is standard; a very
-    // strong two-wallet signal may still pass in entryFilter.ts.
-    minScore: 10,
-    maxScore: 65,
+    minScore: 8,
     minWalletCount: 3,
-    minAvgBuyPerWallet: 0.75,
-    minLiquidityToMcapRatio: 0.15,
-    maxMarketCapUsd: 200_000,
+    minAvgBuyPerWallet: 1.5,
+    minLiquidityToMcapRatio: 0.08,
+    maxMarketCapUsd: 1_000_000,
     minLiquidityUsd: 15_000,
-    minAverageTrustScore: 55,
   },
 
   position: {
     simulatedBankrollSol: 10,
     sizePctPerTrade: 0.03,
-    maxConcurrentPositions: 3,
+    maxConcurrentPositions: 5,
   },
 
   exit: {
@@ -28,19 +23,16 @@ export const config = {
       { atMultiple: 1.3, sellPct: 0.5 },
       { atMultiple: 1.6, sellPct: 0.5 },
     ],
-    trailingStopPct: 0.12,
-    hardStopLossPct: 0.12,
+    trailingStopPct: 0.15,
+    hardStopLossPct: 0.15,
     maxHoldMinutes: 45,
   },
 
   risk: {
-    // Keep the daily drawdown circuit breaker active.
     dailyLossLimitPct: 0.10,
 
-    // Paper trading must keep collecting data automatically. Setting this
-    // to Infinity disables the old permanent halt after four consecutive
-    // losses, so /resume is no longer required for a loss streak. Re-enable
-    // a finite limit before using real funds.
+    // Keep automatic paper-data collection running. This preserves the newer
+    // no-manual-resume safeguard while restoring the profitable strategy profile.
     maxLossesInARow: Number.POSITIVE_INFINITY,
   },
 
