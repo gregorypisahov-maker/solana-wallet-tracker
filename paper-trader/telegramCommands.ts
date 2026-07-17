@@ -13,7 +13,7 @@ import { getTopWallets, getBottomWallets, WalletPerformanceRow } from './walletP
 import { getSupabaseAdmin } from '../lib/supabase';
 import { estimateHeliusCredits } from '../worker/heliusUsage';
 import { evaluatePaperReadiness } from './readiness';
-import { calculateNetMultiple } from './momentumScalperRules';
+import { calculateNetMultiple, SCALP_RULES } from './momentumScalperRules';
 
 function signedSol(value: number): string {
   return `${value >= 0 ? '+' : ''}${value.toFixed(3)} SOL`;
@@ -89,6 +89,7 @@ export async function handleScalpStats(): Promise<string> {
     `Profit factor: ${grossLoss > 0 ? (grossProfit / grossLoss).toFixed(2) : 'N/A'}`,
     `Open positions: ${positions.length}/1`,
     `Entries today: ${state?.entries_today ?? 0}/8`,
+    `Rules v3: +${SCALP_RULES.takeProfitNetPct.toFixed(1)}% net target / ${SCALP_RULES.hardStopNetPct.toFixed(1)}% net stop / pullback required`,
     '',
   ];
 

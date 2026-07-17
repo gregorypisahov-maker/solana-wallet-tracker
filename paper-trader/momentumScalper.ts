@@ -2,22 +2,32 @@ import { randomUUID } from "node:crypto";
 import { getSupabaseAdmin } from "../lib/supabase";
 import { sendTelegramAlert } from "../lib/telegram";
 import {
-  CandidateEvaluation,
-  calculateNetMultiple,
   decideScalpExit,
   evaluateScalpCandidate,
-  evaluateScalpConfirmation,
   SCALP_RULES,
+} from "./momentumScalperRules";
+import { fetchJsonWithBackoff, RateLimitGate } from "./httpBackoff";
+import { parseGeckoMinuteCandles } from "./momentumPullback";
+import {
+  assertScalpEntryDecision,
+  buildScalpEntryDecision,
+} from "./scalpEntryDecision";
+import { buildScalpScanAudit } from "./scalpScanAudit";
+import type {
+  CandidateEvaluation,
+  ConfirmationEvaluation,
   ScalpCandidate,
   ScalpMarketConfirmation,
 } from "./momentumScalperRules";
+import type { PullbackEvaluation } from "./momentumPullback";
+import type { ScalpEntryDecision } from "./scalpEntryDecision";
 
 const supabase = getSupabaseAdmin();
 const GECKO_TRENDING_URL =
   "https://api.geckoterminal.com/api/v2/networks/solana/trending_pools?page=1";
 const DEX_TOKEN_URL = "https://api.dexscreener.com/tokens/v1/solana";
 const REQUEST_TIMEOUT_MS = 12_000;
-const STRATEGY_VERSION = "momentum_quality_v2_2026_07_17";
+const STRATEGY_VERSION = "momentum_quality_v3_2026_07_17";
 const WRAPPED_SOL_MINT = "So11111111111111111111111111111111111111112";
 const STABLE_MINTS = new Set([
   WRAPPED_SOL_MINT,
@@ -51,17 +61,25 @@ type ScalpPositionRow = {
   entry_snapshot: Record<string, unknown>;
 };
 
-type DexSnapshot = ScalpMarketConfirmation & {
-  pairAddress: string;
-};
+type DexSnapshot = ScalpMarketConfirmation;
 
 type EvaluatedCandidate = {
   candidate: ScalpCandidate;
   evaluation: CandidateEvaluation;
 };
 
+type CandidateAudit = EvaluatedCandidate & {
+  cooldown: "not_checked" | "passed" | "rejected";
+  confirmation: ConfirmationEvaluation | null;
+  pullback: PullbackEvaluation | null;
+  bindingChecks: ScalpEntryDecision["bindingChecks"] | null;
+  acceptedForEntry: boolean;
+  reasons: string[];
+};
+
 let scanRunning = false;
 let positionCheckRunning = false;
+const geckoRateLimitGate = new RateLimitGate();
 
 function boundedInterval(
   value: string | undefined,
@@ -115,22 +133,19 @@ function signed(value: number, digits = 3): string {
   return `${value >= 0 ? "+" : ""}${value.toFixed(digits)}`;
 }
 
-async function fetchJson(url: string, headers?: HeadersInit): Promise<unknown> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-  try {
-    const response = await fetch(url, {
-      cache: "no-store",
-      headers,
-      signal: controller.signal,
-    });
-    if (!response.ok) {
-      throw new Error(`${response.status} ${response.statusText}`);
-    }
-    return await response.json();
-  } finally {
-    clearTimeout(timeout);
-  }
+async function fetchJson(
+  url: string,
+  headers?: HeadersInit,
+  geckoRequest = false
+): Promise<unknown> {
+  return fetchJsonWithBackoff(url, {
+    headers,
+    timeoutMs: REQUEST_TIMEOUT_MS,
+    maxAttempts: geckoRequest ? 4 : 2,
+    baseDelayMs: geckoRequest ? 1_500 : 750,
+    maximumDelayMs: geckoRequest ? 30_000 : 5_000,
+    rateLimitGate: geckoRequest ? geckoRateLimitGate : undefined,
+  });
 }
 
 function parseTrendingCandidate(row: any): ScalpCandidate | null {
@@ -150,7 +165,7 @@ function parseTrendingCandidate(row: any): ScalpCandidate | null {
   const createdAt = Date.parse(String(attributes.pool_created_at ?? ""));
   const poolAgeMinutes = Number.isFinite(createdAt)
     ? Math.max(0, Date.now() - createdAt) / 60_000
-    : 0;
+    : Number.NaN;
 
   if (
     !pairAddress ||
@@ -174,17 +189,25 @@ function parseTrendingCandidate(row: any): ScalpCandidate | null {
     liquidityUsd,
     marketCapUsd,
     fiveMinuteChangePct: numberValue(
-      attributes.price_change_percentage?.m5
+      attributes.price_change_percentage?.m5,
+      Number.NaN
     ),
     fifteenMinuteChangePct: numberValue(
-      attributes.price_change_percentage?.m15
+      attributes.price_change_percentage?.m15,
+      Number.NaN
     ),
-    fiveMinuteVolumeUsd: numberValue(attributes.volume_usd?.m5),
-    fiveMinuteBuys: Math.max(0, Math.floor(numberValue(transactions.buys))),
-    fiveMinuteSells: Math.max(0, Math.floor(numberValue(transactions.sells))),
+    fiveMinuteVolumeUsd: numberValue(attributes.volume_usd?.m5, Number.NaN),
+    fiveMinuteBuys: Math.max(
+      0,
+      Math.floor(numberValue(transactions.buys, Number.NaN))
+    ),
+    fiveMinuteSells: Math.max(
+      0,
+      Math.floor(numberValue(transactions.sells, Number.NaN))
+    ),
     fiveMinuteBuyers: Math.max(
       0,
-      Math.floor(numberValue(transactions.buyers))
+      Math.floor(numberValue(transactions.buyers, Number.NaN))
     ),
     poolAgeMinutes,
   };
@@ -194,7 +217,7 @@ async function loadTrendingCandidates(): Promise<ScalpCandidate[]> {
   const body = (await fetchJson(GECKO_TRENDING_URL, {
     Accept: "application/vnd.api+json;version=20230302",
     "User-Agent": "solana-wallet-tracker-paper-scalper/1.0",
-  })) as any;
+  }, true)) as any;
   const rows = Array.isArray(body?.data) ? body.data : [];
   const byMint = new Map<string, ScalpCandidate>();
 
@@ -207,6 +230,22 @@ async function loadTrendingCandidates(): Promise<ScalpCandidate[]> {
     }
   }
   return [...byMint.values()];
+}
+
+async function fetchMinuteCandles(pairAddress: string) {
+  const url =
+    "https://api.geckoterminal.com/api/v2/networks/solana/pools/" +
+    `${encodeURIComponent(pairAddress)}/ohlcv/minute` +
+    "?aggregate=1&limit=5&currency=usd&token=base";
+  const body = await fetchJson(
+    url,
+    {
+      Accept: "application/vnd.api+json;version=20230302",
+      "User-Agent": "solana-wallet-tracker-paper-scalper/1.0",
+    },
+    true
+  );
+  return parseGeckoMinuteCandles(body);
 }
 
 async function fetchDexSnapshot(mint: string): Promise<DexSnapshot> {
@@ -232,6 +271,7 @@ async function fetchDexSnapshot(mint: string): Promise<DexSnapshot> {
   if (!pair) throw new Error(`No liquid DexScreener pair for ${mint}`);
 
   return {
+    mint,
     pairAddress: String(pair.pairAddress ?? ""),
     priceUsd: numberValue(pair.priceUsd),
     liquidityUsd: numberValue(pair.liquidity?.usd),
@@ -306,24 +346,30 @@ async function recordScan(input: {
   scannedCount?: number;
   qualifiedCount?: number;
   top?: EvaluatedCandidate | null;
-  selectedMint?: string | null;
+  selectedDecision?: ScalpEntryDecision | null;
+  candidateAudits?: CandidateAudit[];
   message?: string;
 }): Promise<void> {
   const now = new Date().toISOString();
+  const selected = input.selectedDecision ?? null;
+  const audit = buildScalpScanAudit({
+    strategyVersion: STRATEGY_VERSION,
+    topBeforeSelection: input.top ?? null,
+    selectedDecision: selected,
+    candidateDecisions: input.candidateAudits ?? [],
+  });
   const { error } = await supabase.from("scalp_scan_runs").insert({
     started_at: input.startedAt,
     finished_at: now,
     status: input.status,
     scanned_count: input.scannedCount ?? 0,
     qualified_count: input.qualifiedCount ?? 0,
-    top_symbol: input.top?.candidate.symbol ?? null,
-    top_mint: input.top?.candidate.mint ?? null,
-    top_score: input.top?.evaluation.score ?? null,
-    selected_mint: input.selectedMint ?? null,
+    top_symbol: audit.topSymbol,
+    top_mint: audit.topMint,
+    top_score: audit.topScore,
+    selected_mint: audit.selectedMint,
     message: input.message ?? null,
-    top_snapshot: input.top
-      ? { ...input.top, strategyVersion: STRATEGY_VERSION }
-      : { strategyVersion: STRATEGY_VERSION },
+    top_snapshot: audit.snapshot,
   });
   if (error) {
     console.error("[momentum-scalper] scan audit insert failed:", error);
@@ -344,10 +390,11 @@ async function recordScan(input: {
 
 async function openScalp(
   state: ScalpStateRow,
-  selected: EvaluatedCandidate,
-  market: DexSnapshot
+  decision: ScalpEntryDecision
 ): Promise<void> {
-  const candidate = selected.candidate;
+  assertScalpEntryDecision(decision);
+  const candidate = decision.candidate;
+  const market = decision.market;
 
   const sizeSol = Math.min(
     SCALP_RULES.fixedSizeSol,
@@ -362,15 +409,18 @@ async function openScalp(
   const entrySnapshot = {
     strategyVersion: STRATEGY_VERSION,
     source: "geckoterminal_trending",
-    candidate,
-    score: selected.evaluation.score,
-    dexConfirmation: market,
+    selectedMint: decision.selectedMint,
+    candidate: decision.candidate,
+    score: decision.discovery.score,
+    filterDecision: decision,
     friction: {
       entryPct: SCALP_RULES.entryFrictionPct * 100,
       exitPct: SCALP_RULES.exitFrictionPct * 100,
     },
   };
 
+  // Re-check the immutable decision immediately before the state-changing RPC.
+  assertScalpEntryDecision(decision);
   const { error } = await supabase.rpc("open_paper_scalp", {
     p_position_id: positionId,
     p_mint: candidate.mint,
@@ -385,11 +435,12 @@ async function openScalp(
 
   console.log(
     `[MOMENTUM SCALP OPEN] ${candidate.symbol} | ${sizeSol.toFixed(3)} SOL | ` +
-      `m5 ${signed(candidate.fiveMinuteChangePct, 1)}% | score ${selected.evaluation.score}`
+      `m5 ${signed(candidate.fiveMinuteChangePct, 1)}% | score ${decision.discovery.score}`
   );
 
-  await sendTelegramAlert(
-    [
+  try {
+    await sendTelegramAlert(
+      [
       "⚡ <b>PAPER MOMENTUM SCALP OPENED</b>",
       "",
       `🪙 <b>${escapeHtml(candidate.symbol)}</b>`,
@@ -398,20 +449,29 @@ async function openScalp(
       `5m confirmation: <b>${signed(market.fiveMinuteChangePct, 1)}%</b>`,
       `5m volume: <b>$${Math.round(candidate.fiveMinuteVolumeUsd).toLocaleString()}</b>`,
       `Liquidity: <b>$${Math.round(market.liquidityUsd).toLocaleString()}</b>`,
-      `Signal score: <b>${selected.evaluation.score}/100</b>`,
+      `Signal score: <b>${decision.discovery.score}/100</b>`,
       "",
-      "Target: +2.5% net • Stop: -3.0% net • Max hold: 7 min",
+      "Target: +4.0% net • Stop: -2.5% net • Max hold: 7 min",
+      "Entry required a completed 1m pullback and hold above its short-term level.",
       "Includes 1.2% simulated round-trip friction.",
       "",
       `<a href="https://dexscreener.com/solana/${candidate.mint}">Open DexScreener</a>`,
       "",
       "🧪 Paper only — no real wallet or SOL is connected.",
-    ].join("\n")
-  );
+      ].join("\n")
+    );
+  } catch (error) {
+    console.warn("[momentum-scalper] open alert failed after position opened:", error);
+  }
 }
 
 export async function runMomentumScalperScan(): Promise<void> {
   const startedAt = new Date().toISOString();
+  let scannedCount = 0;
+  let qualifiedCount = 0;
+  let topForAudit: EvaluatedCandidate | null = null;
+  let candidateAudits: CandidateAudit[] = [];
+  let openedDecision: ScalpEntryDecision | null = null;
 
   try {
     let state = await loadState();
@@ -460,73 +520,121 @@ export async function runMomentumScalperScan(): Promise<void> {
       }))
       .sort((left, right) => right.evaluation.score - left.evaluation.score);
     const qualified = evaluated.filter((item) => item.evaluation.accepted);
-    let selected: EvaluatedCandidate | null = null;
-    let selectedMarket: DexSnapshot | null = null;
-    let confirmationRejections = 0;
+    scannedCount = candidates.length;
+    qualifiedCount = qualified.length;
+    topForAudit = evaluated[0] ?? null;
+    candidateAudits = evaluated.map((item) => ({
+      ...item,
+      cooldown: "not_checked",
+      confirmation: null,
+      pullback: null,
+      bindingChecks: null,
+      acceptedForEntry: false,
+      reasons: [...item.evaluation.reasons],
+    }));
+    let approvedDecision: ScalpEntryDecision | null = null;
+    let entryFilterRejections = 0;
     let cooldownRejections = 0;
 
     for (const item of qualified) {
+      const audit = candidateAudits.find(
+        (candidateAudit) => candidateAudit.candidate.mint === item.candidate.mint
+      );
       if (await isCoolingDown(item.candidate.mint)) {
         cooldownRejections += 1;
+        if (audit) {
+          audit.cooldown = "rejected";
+          audit.reasons = [...new Set([...audit.reasons, "candidate_in_cooldown"])];
+        }
         continue;
       }
+      if (audit) audit.cooldown = "passed";
 
       try {
         const market = await fetchDexSnapshot(item.candidate.mint);
-        const confirmationReasons = evaluateScalpConfirmation(market);
-        if (confirmationReasons.length > 0) {
-          confirmationRejections += 1;
+        const minuteCandles = await fetchMinuteCandles(item.candidate.pairAddress);
+        const decision = buildScalpEntryDecision({
+          candidate: item.candidate,
+          market,
+          minuteCandles,
+          pullbackPairAddress: item.candidate.pairAddress,
+        });
+        if (audit) {
+          audit.confirmation = decision.confirmation;
+          audit.pullback = decision.pullback;
+          audit.bindingChecks = decision.bindingChecks;
+          audit.acceptedForEntry = decision.accepted;
+          audit.reasons = [...decision.reasons];
+        }
+        if (!decision.accepted) {
+          entryFilterRejections += 1;
           console.log(
             `[MOMENTUM SCALP REJECT] ${item.candidate.symbol}: ` +
-              confirmationReasons.join(",")
+              decision.reasons.join(",")
           );
           continue;
         }
-        selected = item;
-        selectedMarket = market;
+        approvedDecision = decision;
         break;
       } catch (error) {
-        confirmationRejections += 1;
+        entryFilterRejections += 1;
+        const reason = error instanceof Error ? error.message : String(error);
+        if (audit) {
+          audit.acceptedForEntry = false;
+          audit.reasons = [
+            ...new Set([...audit.reasons, `entry_data_fetch_failed:${reason}`]),
+          ];
+        }
         console.warn(
-          `[momentum-scalper] Dex confirmation failed for ${item.candidate.symbol}:`,
+          `[momentum-scalper] entry confirmation failed for ${item.candidate.symbol}:`,
           error
         );
       }
     }
 
-    if (selected && selectedMarket) {
-      await openScalp(state, selected, selectedMarket);
+    if (approvedDecision) {
+      await openScalp(state, approvedDecision);
+      openedDecision = approvedDecision;
     }
 
-    const top = evaluated[0] ?? null;
-    const message = selected
+    const message = openedDecision
       ? "paper_scalp_opened"
-      : confirmationRejections > 0
-        ? `dex_confirmation_rejected:${confirmationRejections}`
+      : entryFilterRejections > 0
+        ? `entry_filters_rejected:${entryFilterRejections}`
         : cooldownRejections > 0
           ? "qualified_candidates_in_cooldown"
-          : top
-            ? `no_entry: ${top.evaluation.reasons.slice(0, 3).join(",")}`
+          : topForAudit
+            ? `no_entry: ${topForAudit.evaluation.reasons.slice(0, 3).join(",")}`
             : "no_trending_candidates";
 
     await recordScan({
       startedAt,
       status: "ok",
-      scannedCount: candidates.length,
-      qualifiedCount: qualified.length,
-      top,
-      selectedMint: selected?.candidate.mint ?? null,
+      scannedCount,
+      qualifiedCount,
+      top: topForAudit,
+      selectedDecision: openedDecision,
+      candidateAudits,
       message,
     });
 
     console.log(
-      `[momentum-scalper] scanned ${candidates.length}; qualified ${qualified.length}; ` +
-        `${selected ? `opened ${selected.candidate.symbol}` : message}`
+      `[momentum-scalper] scanned ${scannedCount}; qualified ${qualifiedCount}; ` +
+        `${openedDecision ? `opened ${openedDecision.candidate.symbol}` : message}`
     );
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.error("[momentum-scalper] scan failed:", error);
-    await recordScan({ startedAt, status: "error", message });
+    await recordScan({
+      startedAt,
+      status: "error",
+      scannedCount,
+      qualifiedCount,
+      top: topForAudit,
+      selectedDecision: openedDecision,
+      candidateAudits,
+      message,
+    });
   }
 }
 
