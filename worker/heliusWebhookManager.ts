@@ -3,6 +3,12 @@ import {
   extractHeliusApiKey,
 } from "../lib/heliusWebhook";
 
+// Cost guard: the monitor must not create, update, or reactivate Helius
+// webhooks. It will use its existing WebSocket intake and polling
+// reconciliation paths instead.
+process.env.HELIUS_EVENT_MODE = "websocket";
+console.log("[helius-webhook] registration disabled; using WebSocket + polling ingestion");
+
 interface HeliusWebhookRecord {
   webhookID?: string;
   webhookURL?: string;
