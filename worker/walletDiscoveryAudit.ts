@@ -4,13 +4,7 @@ import { discoverTrialWallets } from "./walletDiscovery";
 
 const supabase = getSupabaseAdmin();
 
-function boundedHours(raw: string | undefined): number {
-  const parsed = Number(raw);
-  if (!Number.isFinite(parsed)) return 6;
-  return Math.max(1, Math.min(24, parsed));
-}
-
-const INTERVAL_HOURS = boundedHours(process.env.WALLET_DISCOVERY_INTERVAL_HOURS);
+const INTERVAL_HOURS = 24;
 const ENDPOINT =
   process.env.GMGN_WALLET_DISCOVERY_URL ??
   "https://gmgn.ai/defi/quotation/v1/rank/sol/wallets/7d?orderby=realized_profit_7d&direction=desc";
@@ -74,9 +68,9 @@ async function runOnce(): Promise<void> {
 }
 
 export function startAuditedWalletDiscoveryScheduler(): void {
-  void runOnce();
   setInterval(() => void runOnce(), INTERVAL_HOURS * 3_600_000);
   console.log(
-    `[wallet-discovery-audit] enabled every ${INTERVAL_HOURS}h with persistent run logging`
+    `[wallet-discovery-audit] enabled every ${INTERVAL_HOURS}h with persistent run logging; ` +
+      `first scheduled run in ${INTERVAL_HOURS}h`
   );
 }
