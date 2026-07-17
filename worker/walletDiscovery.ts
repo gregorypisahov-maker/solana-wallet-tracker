@@ -11,17 +11,15 @@ const MIN_OBSERVED_SWAPS = 15;
 const MIN_MEDIAN_ENTRY_DELAY_MIN = 60;
 const TRIAL_MIN_MEDIAN_ENTRY_DELAY_MIN = 120;
 const MAX_PCT_BUYS_UNDER_30_MIN = 0.5;
+const MAX_SWAP_FREQUENCY_PER_DAY = 200;
+const MIN_OBSERVATION_WINDOW_HOURS = 24;
 const MAX_DISTINCT_TOKEN_CREATION_LOOKUPS = 24;
+const PROFILE_WALLET_DELAY_MS = 2_000;
+const RETRY_DELAYS_MS = [2_000, 8_000, 30_000];
+const MAX_CANDIDATES_TO_PROFILE = 12;
 
-const DISCOVERY_INTERVAL_HOURS = boundedNumber(
-  process.env.WALLET_DISCOVERY_INTERVAL_HOURS,
-  6,
-  1,
-  24
-);
-const MAX_NEW_PER_RUN = Math.floor(
-  boundedNumber(process.env.WALLET_DISCOVERY_MAX_NEW, 3, 1, 5)
-);
+const DISCOVERY_INTERVAL_HOURS = boundedNumber(process.env.WALLET_DISCOVERY_INTERVAL_HOURS, 6, 1, 24);
+const MAX_NEW_PER_RUN = Math.floor(boundedNumber(process.env.WALLET_DISCOVERY_MAX_NEW, 3, 1, 5));
 const MAX_ACTIVE_TRIALS = Math.floor(
   boundedNumber(process.env.WALLET_DISCOVERY_MAX_ACTIVE_TRIALS, 20, 5, 40)
 );
@@ -60,8 +58,6 @@ interface TokenTransfer {
 
 interface EnhancedTransaction {
   feePayer?: string;
-  source?: string;
-  type?: string;
   signature?: string;
   timestamp?: number;
   tokenTransfers?: TokenTransfer[];
@@ -76,10 +72,10 @@ interface SeedCandidate {
   seedTokens: string[];
 }
 
-interface TimedBuy {
-  mint: string;
-  timestamp: number;
-  entryDelayMin: number;
+interface ReasonCounts {
+  creation_ts_not_found: number;
+  not_a_buy: number;
+  parse_error: number;
 }
 
 interface EntryTimingProfile {
@@ -89,6 +85,8 @@ interface EntryTimingProfile {
   distinctTokenCount: number;
   profiledBuyCount: number;
   swapFrequencyPerDay: number;
+  observationWindowHours: number;
+  unprofiledReasonCounts: ReasonCounts;
   discoveryScore: number;
   rejectionReasons: string[];
 }
@@ -97,14 +95,20 @@ interface ProfiledCandidate extends SeedCandidate {
   profile: EntryTimingProfile;
 }
 
-function boundedNumber(
-  raw: string | undefined,
-  fallback: number,
-  min: number,
-  max: number
-): number {
+class HttpStatusError extends Error {
+  constructor(public readonly status: number, message: string) {
+    super(message);
+    this.name = "HttpStatusError";
+  }
+}
+
+function boundedNumber(raw: string | undefined, fallback: number, min: number, max: number): number {
   const parsed = Number(raw);
   return Number.isFinite(parsed) ? Math.max(min, Math.min(max, parsed)) : fallback;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function isSolanaAddress(value: string): boolean {
@@ -118,21 +122,16 @@ function isSolanaAddress(value: string): boolean {
 function getHeliusApiKey(): string {
   const explicit = process.env.HELIUS_API_KEY?.trim();
   if (explicit) return explicit;
-
   const rpcUrl = process.env.HELIUS_RPC_URL?.trim();
   if (!rpcUrl) throw new Error("HELIUS_RPC_URL is required for wallet discovery");
-
   try {
     const parsed = new URL(rpcUrl);
     const key = parsed.searchParams.get("api-key");
     if (key) return key;
   } catch {
-    // Report a safe configuration error below.
+    // Safe configuration error below.
   }
-
-  throw new Error(
-    "Could not read the Helius API key from HELIUS_RPC_URL; optionally set HELIUS_API_KEY"
-  );
+  throw new Error("Could not read Helius API key; set HELIUS_API_KEY or HELIUS_RPC_URL");
 }
 
 function median(values: number[]): number | null {
@@ -144,22 +143,37 @@ function median(values: number[]): number | null {
     : sorted[middle];
 }
 
-async function fetchJson(url: string): Promise<unknown> {
+function isRetryable(error: unknown): boolean {
+  return error instanceof HttpStatusError && (error.status === 429 || error.status >= 500);
+}
+
+async function fetchJsonOnce(url: string): Promise<unknown> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   try {
-    const response = await fetch(url, {
-      signal: controller.signal,
-      headers: { accept: "application/json" },
-    });
+    const response = await fetch(url, { signal: controller.signal, headers: { accept: "application/json" } });
     if (!response.ok) {
       const body = (await response.text()).slice(0, 160).replace(/\s+/g, " ");
-      throw new Error(`HTTP ${response.status}${body ? `: ${body}` : ""}`);
+      throw new HttpStatusError(response.status, `HTTP ${response.status}${body ? `: ${body}` : ""}`);
     }
     return await response.json();
   } finally {
     clearTimeout(timeout);
   }
+}
+
+async function fetchJsonWithRetry(url: string): Promise<unknown> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt += 1) {
+    try {
+      return await fetchJsonOnce(url);
+    } catch (error) {
+      lastError = error;
+      if (!isRetryable(error) || attempt === RETRY_DELAYS_MS.length) throw error;
+      await sleep(RETRY_DELAYS_MS[attempt]);
+    }
+  }
+  throw lastError;
 }
 
 async function loadSeedTokens(): Promise<SeedToken[]> {
@@ -174,7 +188,6 @@ async function loadSeedTokens(): Promise<SeedToken[]> {
     .order("score", { ascending: false })
     .order("updated_at", { ascending: false })
     .limit(SEED_TOKEN_LIMIT);
-
   if (error) throw new Error(`Failed to load discovery seed tokens: ${error.message}`);
   return ((data ?? []) as SeedToken[]).filter((row) => isSolanaAddress(row.token_mint));
 }
@@ -187,33 +200,40 @@ async function fetchEnhancedTransactions(
   const safeLimit = Math.min(PROFILE_MAX_SWAPS, Math.max(1, Math.floor(limit)));
   const url =
     `https://api-mainnet.helius-rpc.com/v0/addresses/${address}/transactions` +
-    `?api-key=${encodeURIComponent(apiKey)}` +
-    `&type=SWAP&limit=${safeLimit}`;
-  const payload = await fetchJson(url);
-  if (!Array.isArray(payload)) {
-    throw new Error("Helius returned an unexpected wallet-discovery response");
-  }
+    `?api-key=${encodeURIComponent(apiKey)}&type=SWAP&limit=${safeLimit}`;
+  const payload = await fetchJsonWithRetry(url);
+  if (!Array.isArray(payload)) throw new Error("Helius returned an unexpected discovery response");
   return payload as EnhancedTransaction[];
 }
 
-async function fetchTokenCreationTimestamp(mint: string): Promise<number | null> {
-  try {
-    const payload = await fetchJson(
-      `https://api.dexscreener.com/token-pairs/v1/solana/${encodeURIComponent(mint)}`
-    );
-    if (!Array.isArray(payload)) return null;
-    const timestamps = payload
-      .map((pair) => Number((pair as { pairCreatedAt?: unknown }).pairCreatedAt))
-      .filter((value) => Number.isFinite(value) && value > 0)
-      .map((value) => Math.floor(value / 1000));
-    return timestamps.length > 0 ? Math.min(...timestamps) : null;
-  } catch (error) {
-    console.warn(
-      `[wallet-discovery] token creation lookup failed for ${mint.slice(0, 6)}…:`,
-      error instanceof Error ? error.message : String(error)
-    );
-    return null;
+async function fetchCreationTimestamps(mints: string[]): Promise<Map<string, number | null>> {
+  const result = new Map<string, number | null>();
+  for (const mint of mints) result.set(mint, null);
+  if (mints.length === 0) return result;
+
+  // Dexscreener's token endpoint accepts comma-separated addresses and covers all listed pool types.
+  for (let offset = 0; offset < mints.length; offset += 30) {
+    const batch = mints.slice(offset, offset + 30);
+    try {
+      const payload = await fetchJsonWithRetry(
+        `https://api.dexscreener.com/tokens/v1/solana/${batch.map(encodeURIComponent).join(",")}`
+      );
+      if (!Array.isArray(payload)) continue;
+      for (const pair of payload as Array<{ baseToken?: { address?: string }; pairCreatedAt?: unknown }>) {
+        const mint = pair.baseToken?.address;
+        const createdMs = Number(pair.pairCreatedAt);
+        if (!mint || !Number.isFinite(createdMs) || createdMs <= 0) continue;
+        const createdSec = Math.floor(createdMs / 1000);
+        const current = result.get(mint);
+        if (current == null || createdSec < current) result.set(mint, createdSec);
+      }
+    } catch (error) {
+      if (isRetryable(error)) throw error;
+      console.warn("[wallet-discovery] creation timestamp batch lookup failed:", error);
+    }
+    if (offset + 30 < mints.length) await sleep(500);
   }
+  return result;
 }
 
 function extractBoughtMints(transaction: EnhancedTransaction, wallet: string): string[] {
@@ -236,58 +256,66 @@ function timingRejectionReasons(profile: EntryTimingProfile): string[] {
   if (profile.medianEntryDelayMin == null) {
     reasons.push("missing_entry_timing_data");
   } else if (profile.medianEntryDelayMin < MIN_MEDIAN_ENTRY_DELAY_MIN) {
-    reasons.push(
-      `median_entry_delay_too_low:${profile.medianEntryDelayMin.toFixed(2)}<${MIN_MEDIAN_ENTRY_DELAY_MIN}`
-    );
+    reasons.push(`median_entry_delay_too_low:${profile.medianEntryDelayMin.toFixed(2)}<60`);
   }
   if (profile.pctBuysUnder30Min == null) {
     reasons.push("missing_under_30m_share");
   } else if (profile.pctBuysUnder30Min > MAX_PCT_BUYS_UNDER_30_MIN) {
-    reasons.push(
-      `launch_sniper_share_too_high:${profile.pctBuysUnder30Min.toFixed(4)}>${MAX_PCT_BUYS_UNDER_30_MIN}`
-    );
+    reasons.push(`launch_sniper_share_too_high:${profile.pctBuysUnder30Min.toFixed(4)}>0.5`);
+  }
+  if (profile.swapFrequencyPerDay > MAX_SWAP_FREQUENCY_PER_DAY) {
+    reasons.push("churn_above_200_per_day");
   }
   return reasons;
 }
 
-function scoreProfile(
-  medianEntryDelayMin: number | null,
-  pctBuysUnder30Min: number | null,
-  observedSwapCount: number,
-  distinctTokenCount: number,
-  swapFrequencyPerDay: number
-): number {
+function scoreProfile(profile: Omit<EntryTimingProfile, "discoveryScore" | "rejectionReasons">): number {
   let score = 0;
-  if (medianEntryDelayMin != null) {
-    if (medianEntryDelayMin >= 120 && medianEntryDelayMin <= 720) score += 600;
-    else if (medianEntryDelayMin >= 60) score += 250;
-    if (medianEntryDelayMin > 1_440) score -= 100;
+  const medianDelay = profile.medianEntryDelayMin;
+  if (medianDelay != null) {
+    if (medianDelay >= 120 && medianDelay <= 720) score += 600;
+    else if (medianDelay >= 60) score += 250;
+    if (medianDelay > 1_440) score -= 100;
   }
-  score += Math.min(180, distinctTokenCount * 30);
-  score += Math.min(100, observedSwapCount * 4);
-  if (pctBuysUnder30Min != null) score -= Math.round(pctBuysUnder30Min * 500);
-  if (swapFrequencyPerDay > 20) score -= Math.min(250, Math.round((swapFrequencyPerDay - 20) * 8));
+  score += Math.min(180, profile.distinctTokenCount * 30);
+  score += Math.min(100, profile.observedSwapCount * 4);
+  if (profile.pctBuysUnder30Min != null) score -= Math.round(profile.pctBuysUnder30Min * 500);
+  if (profile.swapFrequencyPerDay > 20) {
+    score -= Math.min(250, Math.round((profile.swapFrequencyPerDay - 20) * 8));
+  }
   return Math.max(0, score);
 }
 
-async function buildEntryTimingProfile(
-  address: string,
-  apiKey: string,
-  prefetched?: EnhancedTransaction[]
-): Promise<EntryTimingProfile> {
+async function buildEntryTimingProfile(address: string, apiKey: string): Promise<EntryTimingProfile> {
   const cutoffSec = Math.floor(Date.now() / 1000) - PROFILE_LOOKBACK_DAYS * 86_400;
-  const transactions = (prefetched ?? (await fetchEnhancedTransactions(address, apiKey, PROFILE_MAX_SWAPS)))
+  const transactions = (await fetchEnhancedTransactions(address, apiKey, PROFILE_MAX_SWAPS))
     .filter((transaction) => Number(transaction.timestamp ?? 0) >= cutoffSec)
     .slice(0, PROFILE_MAX_SWAPS);
 
+  const reasons: ReasonCounts = { creation_ts_not_found: 0, not_a_buy: 0, parse_error: 0 };
   const buysByMint = new Map<string, number[]>();
+  const transactionBuys: Array<{ timestamp: number; mints: string[] }> = [];
+
   for (const transaction of transactions) {
     const timestamp = Number(transaction.timestamp ?? 0);
-    if (!Number.isFinite(timestamp) || timestamp <= 0) continue;
-    for (const mint of extractBoughtMints(transaction, address)) {
-      const times = buysByMint.get(mint) ?? [];
-      times.push(timestamp);
-      buysByMint.set(mint, times);
+    if (!Number.isFinite(timestamp) || timestamp <= 0) {
+      reasons.parse_error += 1;
+      continue;
+    }
+    try {
+      const mints = extractBoughtMints(transaction, address);
+      if (mints.length === 0) {
+        reasons.not_a_buy += 1;
+        continue;
+      }
+      transactionBuys.push({ timestamp, mints });
+      for (const mint of mints) {
+        const values = buysByMint.get(mint) ?? [];
+        values.push(timestamp);
+        buysByMint.set(mint, values);
+      }
+    } catch {
+      reasons.parse_error += 1;
     }
   }
 
@@ -295,60 +323,80 @@ async function buildEntryTimingProfile(
     .sort((a, b) => b[1].length - a[1].length)
     .slice(0, MAX_DISTINCT_TOKEN_CREATION_LOOKUPS)
     .map(([mint]) => mint);
+  const creationByMint = await fetchCreationTimestamps(prioritizedMints);
 
-  const creationEntries = await Promise.all(
-    prioritizedMints.map(async (mint) => [mint, await fetchTokenCreationTimestamp(mint)] as const)
-  );
-  const creationByMint = new Map(creationEntries);
-
-  const timedBuys: TimedBuy[] = [];
-  for (const [mint, timestamps] of buysByMint) {
-    const creationTimestamp = creationByMint.get(mint);
-    if (!creationTimestamp) continue;
-    for (const timestamp of timestamps) {
-      timedBuys.push({
-        mint,
-        timestamp,
-        entryDelayMin: Math.max(0, (timestamp - creationTimestamp) / 60),
-      });
+  // Fallback proxy: earliest observed swap for the mint in this capped history.
+  for (const mint of prioritizedMints) {
+    if (creationByMint.get(mint) == null) {
+      const earliestObserved = Math.min(...(buysByMint.get(mint) ?? []));
+      if (Number.isFinite(earliestObserved)) creationByMint.set(mint, earliestObserved);
     }
   }
 
-  const delays = timedBuys.map((buy) => buy.entryDelayMin);
+  const delays: number[] = [];
+  for (const buy of transactionBuys) {
+    let profiledThisSwap = false;
+    for (const mint of buy.mints) {
+      const created = creationByMint.get(mint);
+      if (created == null) continue;
+      delays.push(Math.max(0, (buy.timestamp - created) / 60));
+      profiledThisSwap = true;
+    }
+    if (!profiledThisSwap) reasons.creation_ts_not_found += 1;
+  }
+
+  const validTimestamps = transactions
+    .map((tx) => Number(tx.timestamp ?? 0))
+    .filter((value) => Number.isFinite(value) && value > 0);
+  const actualSpanHours =
+    validTimestamps.length > 1
+      ? (Math.max(...validTimestamps) - Math.min(...validTimestamps)) / 3_600
+      : 0;
+  const observationWindowHours = Math.max(MIN_OBSERVATION_WINDOW_HOURS, actualSpanHours);
+  const swapFrequencyPerDay = transactions.length / (observationWindowHours / 24);
   const medianEntryDelayMin = median(delays);
   const pctBuysUnder30Min =
     delays.length > 0 ? delays.filter((delay) => delay < 30).length / delays.length : null;
-  const spanDays =
-    transactions.length > 1
-      ? Math.max(
-          1 / 24,
-          (Math.max(...transactions.map((tx) => Number(tx.timestamp ?? 0))) -
-            Math.min(...transactions.map((tx) => Number(tx.timestamp ?? 0)))) /
-            86_400
-        )
-      : 1;
-  const swapFrequencyPerDay = transactions.length / spanDays;
-  const distinctTokenCount = buysByMint.size;
-  const discoveryScore = scoreProfile(
-    medianEntryDelayMin,
-    pctBuysUnder30Min,
-    transactions.length,
-    distinctTokenCount,
-    swapFrequencyPerDay
-  );
 
-  const profile: EntryTimingProfile = {
+  const base = {
     medianEntryDelayMin,
     pctBuysUnder30Min,
     observedSwapCount: transactions.length,
-    distinctTokenCount,
-    profiledBuyCount: timedBuys.length,
+    distinctTokenCount: buysByMint.size,
+    profiledBuyCount: delays.length,
     swapFrequencyPerDay,
-    discoveryScore,
+    observationWindowHours,
+    unprofiledReasonCounts: reasons,
+  };
+  const profile: EntryTimingProfile = {
+    ...base,
+    discoveryScore: scoreProfile(base),
     rejectionReasons: [],
   };
   profile.rejectionReasons = timingRejectionReasons(profile);
   return profile;
+}
+
+function metricsFor(candidate: SeedCandidate, profile: EntryTimingProfile): Record<string, unknown> {
+  return {
+    median_entry_delay_min:
+      profile.medianEntryDelayMin == null ? null : Number(profile.medianEntryDelayMin.toFixed(2)),
+    pct_buys_under_30min:
+      profile.pctBuysUnder30Min == null ? null : Number(profile.pctBuysUnder30Min.toFixed(4)),
+    observed_swap_count: profile.observedSwapCount,
+    distinct_token_count: profile.distinctTokenCount,
+    profiled_buy_count: profile.profiledBuyCount,
+    swap_frequency_per_day: Number(profile.swapFrequencyPerDay.toFixed(2)),
+    observation_window_hours: Number(profile.observationWindowHours.toFixed(2)),
+    unprofiled_reason_counts: profile.unprofiledReasonCounts,
+    seed_token_count: candidate.tokenCount,
+    seed_score_total: candidate.seedScoreTotal,
+    max_seed_score: candidate.maxSeedScore,
+    discovery_score: profile.discoveryScore,
+    seed_tokens: candidate.seedTokens,
+    profile_pending_retry: false,
+    profiled_at: new Date().toISOString(),
+  };
 }
 
 async function logDiscoveryRejection(
@@ -367,24 +415,36 @@ async function logDiscoveryRejection(
   if (error) console.error(`[wallet-discovery] failed to log rejection for ${address}:`, error.message);
 }
 
+async function markProfilePendingRetry(
+  address: string,
+  previousMetrics: Record<string, unknown>,
+  error: unknown
+): Promise<void> {
+  const metrics = {
+    ...previousMetrics,
+    profile_pending_retry: true,
+    profile_retry_error: error instanceof Error ? error.message : String(error),
+    profile_retry_marked_at: new Date().toISOString(),
+  };
+  const { error: updateError } = await supabase
+    .from("wallets")
+    .update({ discovery_metrics: metrics, management_updated_at: new Date().toISOString() })
+    .eq("address", address)
+    .eq("discovery_source", DISCOVERY_SOURCE);
+  if (updateError) throw new Error(`Failed to mark profile retry: ${updateError.message}`);
+}
+
 async function fetchSeedCandidates(): Promise<SeedCandidate[]> {
   const [seedTokens, apiKey] = await Promise.all([loadSeedTokens(), Promise.resolve(getHeliusApiKey())]);
-  if (seedTokens.length === 0) {
-    console.log("[wallet-discovery] no recent safe seed tokens available");
-    return [];
-  }
-
+  if (seedTokens.length === 0) return [];
   const evidence = new Map<
     string,
     { tokens: Set<string>; transactionCount: number; seedScoreTotal: number; maxSeedScore: number }
   >();
-  let successfulSeeds = 0;
-  const failures: string[] = [];
 
   for (const seed of seedTokens) {
     try {
       const transactions = await fetchEnhancedTransactions(seed.token_mint, apiKey, TRANSACTIONS_PER_TOKEN);
-      successfulSeeds += 1;
       const seenForSeed = new Set<string>();
       const seedScore = Number(seed.score) || 0;
       for (const transaction of transactions) {
@@ -406,109 +466,86 @@ async function fetchSeedCandidates(): Promise<SeedCandidate[]> {
         evidence.set(address, current);
       }
     } catch (error) {
-      failures.push(
-        `${seed.token_symbol ?? seed.token_mint.slice(0, 6)}: ${
-          error instanceof Error ? error.message : String(error)
-        }`
-      );
+      console.warn(`[wallet-discovery] seed ${seed.token_mint.slice(0, 6)}… skipped:`, error);
     }
   }
 
-  if (successfulSeeds === 0) {
-    throw new Error(`Helius wallet discovery could not inspect any seed token: ${failures.join(" | ")}`);
-  }
-
-  const candidates: SeedCandidate[] = [];
-  for (const [address, row] of evidence) {
-    if (row.tokens.size === 0) continue;
-    candidates.push({
+  return [...evidence.entries()]
+    .map(([address, row]) => ({
       address,
       tokenCount: row.tokens.size,
       transactionCount: row.transactionCount,
       seedScoreTotal: row.seedScoreTotal,
       maxSeedScore: row.maxSeedScore,
       seedTokens: [...row.tokens],
-    });
-  }
-  console.log(
-    `[wallet-discovery] Helius inspected ${successfulSeeds}/${seedTokens.length} seed tokens; ` +
-      `${candidates.length} raw co-trader candidates`
-  );
-  return candidates;
-}
-
-function metricsFor(candidate: SeedCandidate, profile: EntryTimingProfile): Record<string, unknown> {
-  return {
-    median_entry_delay_min:
-      profile.medianEntryDelayMin == null ? null : Number(profile.medianEntryDelayMin.toFixed(2)),
-    pct_buys_under_30min:
-      profile.pctBuysUnder30Min == null ? null : Number(profile.pctBuysUnder30Min.toFixed(4)),
-    observed_swap_count: profile.observedSwapCount,
-    distinct_token_count: profile.distinctTokenCount,
-    profiled_buy_count: profile.profiledBuyCount,
-    swap_frequency_per_day: Number(profile.swapFrequencyPerDay.toFixed(2)),
-    seed_token_count: candidate.tokenCount,
-    seed_score_total: candidate.seedScoreTotal,
-    max_seed_score: candidate.maxSeedScore,
-    discovery_score: profile.discoveryScore,
-    seed_tokens: candidate.seedTokens,
-  };
+    }))
+    .sort(
+      (a, b) =>
+        b.tokenCount * 100 + b.seedScoreTotal * 3 + b.transactionCount -
+        (a.tokenCount * 100 + a.seedScoreTotal * 3 + a.transactionCount)
+    );
 }
 
 async function profileCandidates(candidates: SeedCandidate[]): Promise<ProfiledCandidate[]> {
   const apiKey = getHeliusApiKey();
   const profiled: ProfiledCandidate[] = [];
-  for (const candidate of candidates) {
+  for (const candidate of candidates.slice(0, MAX_CANDIDATES_TO_PROFILE)) {
     try {
       const profile = await buildEntryTimingProfile(candidate.address, apiKey);
       const metrics = metricsFor(candidate, profile);
       if (profile.rejectionReasons.length > 0) {
         await logDiscoveryRejection(candidate.address, "candidate", profile.rejectionReasons, metrics);
-        console.log(
-          `[wallet-discovery] rejected ${candidate.address.slice(0, 6)}…: ${profile.rejectionReasons.join(", ")}`
-        );
-        continue;
+      } else {
+        profiled.push({ ...candidate, profile });
       }
-      profiled.push({ ...candidate, profile });
     } catch (error) {
-      const reasons = [`profile_error:${error instanceof Error ? error.message : String(error)}`];
-      await logDiscoveryRejection(candidate.address, "candidate", reasons, {});
+      // New candidates are not inserted and API errors are not treated as wallet verdicts.
+      console.warn(`[wallet-discovery] candidate profile pending retry ${candidate.address}:`, error);
     }
+    await sleep(PROFILE_WALLET_DELAY_MS);
   }
   return profiled.sort((a, b) => b.profile.discoveryScore - a.profile.discoveryScore);
+}
+
+function candidateFromRow(row: { address: string; discovery_metrics: unknown }): SeedCandidate {
+  const prior = (row.discovery_metrics ?? {}) as Record<string, unknown>;
+  return {
+    address: row.address,
+    tokenCount: Number(prior.seed_token_count ?? 0),
+    transactionCount: Number(prior.observed_swap_count ?? 0),
+    seedScoreTotal: Number(prior.seed_score_total ?? 0),
+    maxSeedScore: Number(prior.max_seed_score ?? 0),
+    seedTokens: Array.isArray(prior.seed_tokens) ? (prior.seed_tokens as string[]) : [],
+  };
 }
 
 async function reevaluateExistingTrials(): Promise<void> {
   const { data, error } = await supabase
     .from("wallets")
-    .select("address, discovery_metrics")
+    .select("address, active, management_status, auto_disable_reason, discovery_metrics")
     .eq("discovery_source", DISCOVERY_SOURCE)
-    .eq("management_status", "trial");
+    .or(
+      "management_status.eq.trial,discovery_metrics->>profile_pending_retry.eq.true,auto_disable_reason.like.retroactive_profile_error:%"
+    );
   if (error) throw new Error(`Failed to load discovery trials: ${error.message}`);
 
   const apiKey = getHeliusApiKey();
   for (const row of data ?? []) {
     const prior = (row.discovery_metrics ?? {}) as Record<string, unknown>;
-    const candidate: SeedCandidate = {
-      address: row.address,
-      tokenCount: Number(prior.seed_token_count ?? 0),
-      transactionCount: Number(prior.observed_swap_count ?? 0),
-      seedScoreTotal: Number(prior.seed_score_total ?? 0),
-      maxSeedScore: Number(prior.max_seed_score ?? 0),
-      seedTokens: Array.isArray(prior.seed_tokens) ? (prior.seed_tokens as string[]) : [],
-    };
+    const profileCurrent =
+      prior.profile_pending_retry !== true &&
+      Number(prior.observation_window_hours ?? 0) >= MIN_OBSERVATION_WINDOW_HOURS &&
+      typeof prior.unprofiled_reason_counts === "object" &&
+      !String(row.auto_disable_reason ?? "").startsWith("retroactive_profile_error:");
+    if (profileCurrent) continue;
 
+    const candidate = candidateFromRow(row);
     try {
       const profile = await buildEntryTimingProfile(row.address, apiKey);
       const metrics = metricsFor(candidate, profile);
       const reasons = [...profile.rejectionReasons];
-      if (
-        profile.medianEntryDelayMin != null &&
-        profile.medianEntryDelayMin < TRIAL_MIN_MEDIAN_ENTRY_DELAY_MIN
-      ) {
-        reasons.push(
-          `trial_median_entry_delay_too_low:${profile.medianEntryDelayMin.toFixed(2)}<${TRIAL_MIN_MEDIAN_ENTRY_DELAY_MIN}`
-        );
+      if (profile.medianEntryDelayMin != null && profile.medianEntryDelayMin < TRIAL_MIN_MEDIAN_ENTRY_DELAY_MIN) {
+        reasons.push(`trial_median_entry_delay_too_low:${profile.medianEntryDelayMin.toFixed(2)}<120`);
       }
 
       if (reasons.length > 0) {
@@ -528,25 +565,22 @@ async function reevaluateExistingTrials(): Promise<void> {
       } else {
         await supabase
           .from("wallets")
-          .update({ discovery_metrics: metrics, management_updated_at: new Date().toISOString() })
+          .update({
+            active: true,
+            management_status: "trial",
+            auto_disabled_at: null,
+            auto_disable_reason: null,
+            management_updated_at: new Date().toISOString(),
+            discovery_metrics: metrics,
+          })
           .eq("address", row.address)
           .eq("discovery_source", DISCOVERY_SOURCE);
       }
     } catch (profileError) {
-      const reasons = [`retroactive_profile_error:${profileError instanceof Error ? profileError.message : String(profileError)}`];
-      await supabase
-        .from("wallets")
-        .update({
-          active: false,
-          management_status: "disabled",
-          auto_disabled_at: new Date().toISOString(),
-          auto_disable_reason: reasons[0],
-          management_updated_at: new Date().toISOString(),
-        })
-        .eq("address", row.address)
-        .eq("discovery_source", DISCOVERY_SOURCE);
-      await logDiscoveryRejection(row.address, "retroactive_trial", reasons, {});
+      // Preserve current status. Never disable because an external API failed.
+      await markProfilePendingRetry(row.address, prior, profileError);
     }
+    await sleep(PROFILE_WALLET_DELAY_MS);
   }
 }
 
@@ -559,18 +593,15 @@ export async function discoverTrialWallets(): Promise<{
   const seedCandidates = await fetchSeedCandidates();
   const candidates = await profileCandidates(seedCandidates);
 
-  const [
-    { data: existingRows, error: existingError },
-    { count: activeTrialCount, error: countError },
-  ] = await Promise.all([
-    supabase.from("wallets").select("address, active, management_status"),
-    supabase
-      .from("wallets")
-      .select("id", { count: "exact", head: true })
-      .eq("active", true)
-      .eq("management_status", "trial"),
-  ]);
-
+  const [{ data: existingRows, error: existingError }, { count: activeTrialCount, error: countError }] =
+    await Promise.all([
+      supabase.from("wallets").select("address"),
+      supabase
+        .from("wallets")
+        .select("id", { count: "exact", head: true })
+        .eq("active", true)
+        .eq("management_status", "trial"),
+    ]);
   if (existingError) throw new Error(`Failed to load existing wallets: ${existingError.message}`);
   if (countError) throw new Error(`Failed to count trial wallets: ${countError.message}`);
 
@@ -590,9 +621,7 @@ export async function discoverTrialWallets(): Promise<{
       await logDiscoveryRejection(
         candidate.address,
         "trial_promotion",
-        [
-          `trial_median_entry_delay_too_low:${candidate.profile.medianEntryDelayMin.toFixed(2)}<${TRIAL_MIN_MEDIAN_ENTRY_DELAY_MIN}`,
-        ],
+        [`trial_median_entry_delay_too_low:${candidate.profile.medianEntryDelayMin.toFixed(2)}<120`],
         metricsFor(candidate, candidate.profile)
       );
     }
@@ -601,12 +630,7 @@ export async function discoverTrialWallets(): Promise<{
   const selected = promotionEligible
     .filter((candidate) => !existing.has(candidate.address))
     .slice(0, Math.min(MAX_NEW_PER_RUN, availableSlots));
-
   if (selected.length === 0) {
-    console.log(
-      `[wallet-discovery] ${candidates.length} passed hard filters, ${promotionEligible.length} promotion-eligible; ` +
-        "no safe new trial slots/candidates available"
-    );
     return { fetched: seedCandidates.length, eligible: promotionEligible.length, added: [] };
   }
 
@@ -620,15 +644,10 @@ export async function discoverTrialWallets(): Promise<{
     discovered_at: discoveredAt,
     discovery_metrics: metricsFor(candidate, candidate.profile),
   }));
-
   const { data, error } = await supabase.from("wallets").insert(rows).select("address");
   if (error) throw new Error(`Failed to insert trial wallets: ${error.message}`);
-
   const added = (data ?? []).map((row) => row.address);
-  console.log(
-    `[wallet-discovery] added ${added.length} timing-qualified Helius trial wallet(s): ` +
-      added.map((address) => `${address.slice(0, 6)}…`).join(", ")
-  );
+  console.log(`[wallet-discovery] added ${added.length} timing-qualified trial wallet(s)`);
   return { fetched: seedCandidates.length, eligible: promotionEligible.length, added };
 }
 
@@ -646,13 +665,10 @@ export function startWalletDiscoveryScheduler(): void {
       running = false;
     }
   };
-
   void run();
   setInterval(() => void run(), DISCOVERY_INTERVAL_HOURS * 3_600_000);
-
   console.log(
-    `[wallet-discovery] Helius discovery enabled every ${DISCOVERY_INTERVAL_HOURS}h; ` +
-      `max ${MAX_NEW_PER_RUN} new wallets/run; trial cap ${MAX_ACTIVE_TRIALS}; ` +
-      `profile cap ${PROFILE_MAX_SWAPS} swaps/${PROFILE_LOOKBACK_DAYS}d`
+    `[wallet-discovery] enabled every ${DISCOVERY_INTERVAL_HOURS}h; profile cap ${PROFILE_MAX_SWAPS}; ` +
+      `wallet delay ${PROFILE_WALLET_DELAY_MS}ms; churn cap ${MAX_SWAP_FREQUENCY_PER_DAY}/day`
   );
 }
