@@ -1,0 +1,87 @@
+name: Apply discovery churn span correction
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: ${{ !contains(github.event.head_commit.message, 'discovery: use actual churn observation span') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Patch wallet discovery profiler
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('worker/walletDiscovery.ts')
+          text = path.read_text()
+
+          text = text.replace(
+              'const MAX_SWAP_FREQUENCY_PER_DAY = 200;\nconst MIN_OBSERVATION_WINDOW_HOURS = 24;\n',
+              'const MAX_SWAP_FREQUENCY_PER_DAY = 200;\nconst CHURN_PROFILE_VERSION = 2;\n'
+          )
+
+          old = '''  const observationWindowHours = Math.max(MIN_OBSERVATION_WINDOW_HOURS, actualSpanHours);
+  const swapFrequencyPerDay = transactions.length / (observationWindowHours / 24);'''
+          new = '''  // Churn must use the real span of the fetched signatures. A 24h floor hides
+  // high-frequency wallets whenever their latest 50 swaps occur inside one day.
+  const observationWindowHours = actualSpanHours;
+  const swapFrequencyPerDay =
+    observationWindowHours > 0
+      ? transactions.length / (observationWindowHours / 24)
+      : transactions.length > 1
+        ? Number.MAX_SAFE_INTEGER
+        : 0;'''
+          if old not in text:
+              raise SystemExit('expected churn calculation block not found')
+          text = text.replace(old, new)
+
+          old = '''    observation_window_hours: Number(profile.observationWindowHours.toFixed(2)),
+    unprofiled_reason_counts: profile.unprofiledReasonCounts,'''
+          new = '''    observation_window_hours: Number(profile.observationWindowHours.toFixed(4)),
+    churn_profile_version: CHURN_PROFILE_VERSION,
+    unprofiled_reason_counts: profile.unprofiledReasonCounts,'''
+          if old not in text:
+              raise SystemExit('expected metrics block not found')
+          text = text.replace(old, new)
+
+          old = '''    .or(
+      "management_status.eq.trial,discovery_metrics->>profile_pending_retry.eq.true,auto_disable_reason.like.retroactive_profile_error:%"
+    );'''
+          new = '''    .or(
+      "active.eq.true,management_status.eq.trial,discovery_metrics->>profile_pending_retry.eq.true,auto_disable_reason.like.retroactive_profile_error:%"
+    );'''
+          if old not in text:
+              raise SystemExit('expected reevaluation query not found')
+          text = text.replace(old, new)
+
+          old = '''    const profileCurrent =
+      prior.profile_pending_retry !== true &&
+      Number(prior.observation_window_hours ?? 0) >= MIN_OBSERVATION_WINDOW_HOURS &&
+      typeof prior.unprofiled_reason_counts === "object" &&
+      !String(row.auto_disable_reason ?? "").startsWith("retroactive_profile_error:");'''
+          new = '''    const profileCurrent =
+      prior.profile_pending_retry !== true &&
+      Number(prior.churn_profile_version ?? 0) >= CHURN_PROFILE_VERSION &&
+      typeof prior.unprofiled_reason_counts === "object" &&
+      !String(row.auto_disable_reason ?? "").startsWith("retroactive_profile_error:");'''
+          if old not in text:
+              raise SystemExit('expected profile-current block not found')
+          text = text.replace(old, new)
+
+          path.write_text(text)
+          PY
+      - name: Commit correction
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add worker/walletDiscovery.ts
+          git commit -m "discovery: use actual churn observation span"
+          git push
