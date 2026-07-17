@@ -42,11 +42,17 @@ if (!envFlag('ENABLE_TELEGRAM_POLLING')) {
 
 const TELEGRAM_BOT_TOKEN = cleanEnv(process.env.TELEGRAM_BOT_TOKEN);
 const TELEGRAM_CHAT_ID = cleanEnv(process.env.TELEGRAM_CHAT_ID);
-const DASHBOARD_URL = cleanEnv(
+const VERIFIED_DASHBOARD_URL = 'https://solana-wallet-tracker-murex.vercel.app';
+const configuredDashboardUrl = cleanEnv(
   process.env.DASHBOARD_URL ??
   process.env.COMMAND_CENTER_URL ??
   process.env.NEXT_PUBLIC_DASHBOARD_URL
 );
+const DASHBOARD_URL =
+  !configuredDashboardUrl ||
+  /^https:\/\/wallet-tracker-murex\.vercel\.app(?:[/?#]|$)/i.test(configuredDashboardUrl)
+    ? VERIFIED_DASHBOARD_URL
+    : configuredDashboardUrl;
 const EXTRA_CHAT_IDS = cleanEnv(process.env.TELEGRAM_ALLOWED_CHAT_IDS)
   .split(/[\s,;]+/)
   .map((value) => value.trim())
@@ -56,7 +62,7 @@ const AUTHORIZED_CHAT_IDS = new Set([TELEGRAM_CHAT_ID, ...EXTRA_CHAT_IDS].filter
 const POLL_TIMEOUT_SECONDS = 30;
 const CONFLICT_BACKOFF_MIN_MS = 65_000;
 const CONFLICT_BACKOFF_JITTER_MS = 30_000;
-const TELEGRAM_WORKER_VERSION = '2026-07-17-help-buttons-v13';
+const TELEGRAM_WORKER_VERSION = '2026-07-17-dashboard-link-v14';
 
 if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
   console.error('[telegram-bot] TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID must be set. Exiting.');
