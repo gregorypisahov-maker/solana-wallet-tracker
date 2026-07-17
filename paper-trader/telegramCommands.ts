@@ -88,7 +88,7 @@ export async function handleScalpStats(): Promise<string> {
     `Win rate: ${trades.length ? ((wins / trades.length) * 100).toFixed(1) : '0.0'}%`,
     `Profit factor: ${grossLoss > 0 ? (grossProfit / grossLoss).toFixed(2) : 'N/A'}`,
     `Open positions: ${positions.length}/1`,
-    `Entries today: ${state?.entries_today ?? 0}/12`,
+    `Entries today: ${state?.entries_today ?? 0}/8`,
     '',
   ];
 
@@ -121,6 +121,7 @@ export async function handleScalpStats(): Promise<string> {
 
   lines.push(
     '',
+    'Rules v2: score 45+, 5m move 2–6% on both feeds, 15m confirmation 5%+.',
     'Data source: GeckoTerminal + DexScreener. Helius credits used: 0.',
     '🧪 Paper only — results do not guarantee real-money profit.'
   );
