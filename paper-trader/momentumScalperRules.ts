@@ -16,8 +16,8 @@ export const SCALP_RULES = {
   minimumSignalScore: 45,
   entryFrictionPct: 0.006,
   exitFrictionPct: 0.006,
-  takeProfitNetPct: 2.5,
-  hardStopNetPct: -3,
+  takeProfitNetPct: 4,
+  hardStopNetPct: -2.5,
   trailingActivationNetPct: 1.8,
   trailingGivebackPct: 1.2,
   maxHoldMinutes: 7,
@@ -47,13 +47,30 @@ export type CandidateEvaluation = {
   accepted: boolean;
   score: number;
   reasons: string[];
+  checks: FilterCheck[];
 };
 
 export type ScalpMarketConfirmation = {
+  mint: string;
+  pairAddress: string;
   priceUsd: number;
   liquidityUsd: number;
   marketCapUsd: number;
   fiveMinuteChangePct: number;
+};
+
+export type FilterCheck = {
+  name: string;
+  passed: boolean;
+  actual: number | string | null;
+  expected: string;
+  reason: string | null;
+};
+
+export type ConfirmationEvaluation = {
+  accepted: boolean;
+  reasons: string[];
+  checks: FilterCheck[];
 };
 
 export type ScalpExitReason =
@@ -72,6 +89,23 @@ export type ExitDecision = {
 const clamp = (value: number, min: number, max: number) =>
   Math.min(max, Math.max(min, value));
 
+const finiteOrZero = (value: unknown): number =>
+  typeof value === "number" && Number.isFinite(value) ? value : 0;
+
+function filterCheck(
+  name: string,
+  passed: boolean,
+  actual: number | string | null,
+  expected: string,
+  reason: string
+): FilterCheck {
+  return { name, passed, actual, expected, reason: passed ? null : reason };
+}
+
+function reasonsFor(checks: FilterCheck[]): string[] {
+  return [...new Set(checks.flatMap((check) => check.reason ? [check.reason] : []))];
+}
+
 export function calculateNetMultiple(
   priceMultiple: number,
   entryFrictionPct = SCALP_RULES.entryFrictionPct,
@@ -87,64 +121,58 @@ export function calculateNetMultiple(
 export function evaluateScalpCandidate(
   candidate: ScalpCandidate
 ): CandidateEvaluation {
-  const reasons: string[] = [];
-  const trades = candidate.fiveMinuteBuys + candidate.fiveMinuteSells;
+  const requiredTextChecks = [
+    ["mint_present", candidate?.mint, "candidate_mint_missing"],
+    ["symbol_present", candidate?.symbol, "candidate_symbol_missing"],
+    ["pair_present", candidate?.pairAddress, "candidate_pair_missing"],
+  ] as const;
+  const requiredNumbers = [
+    ["priceUsd", candidate?.priceUsd, true],
+    ["liquidityUsd", candidate?.liquidityUsd, true],
+    ["marketCapUsd", candidate?.marketCapUsd, true],
+    ["fiveMinuteChangePct", candidate?.fiveMinuteChangePct, false],
+    ["fifteenMinuteChangePct", candidate?.fifteenMinuteChangePct, false],
+    ["fiveMinuteVolumeUsd", candidate?.fiveMinuteVolumeUsd, false],
+    ["fiveMinuteBuys", candidate?.fiveMinuteBuys, false],
+    ["fiveMinuteSells", candidate?.fiveMinuteSells, false],
+    ["fiveMinuteBuyers", candidate?.fiveMinuteBuyers, false],
+    ["poolAgeMinutes", candidate?.poolAgeMinutes, false],
+  ] as const;
+  const fiveMinuteBuys = finiteOrZero(candidate?.fiveMinuteBuys);
+  const fiveMinuteSells = finiteOrZero(candidate?.fiveMinuteSells);
+  const trades = fiveMinuteBuys + fiveMinuteSells;
   const buySellRatio =
-    candidate.fiveMinuteBuys / Math.max(1, candidate.fiveMinuteSells);
-
-  if (candidate.liquidityUsd < SCALP_RULES.minLiquidityUsd) {
-    reasons.push("liquidity_below_35k");
-  }
-  if (candidate.marketCapUsd < SCALP_RULES.minMarketCapUsd) {
-    reasons.push("market_cap_below_100k");
-  }
-  if (candidate.marketCapUsd > SCALP_RULES.maxMarketCapUsd) {
-    reasons.push("market_cap_above_5m");
-  }
-  if (
-    candidate.fiveMinuteChangePct < SCALP_RULES.minFiveMinuteChangePct
-  ) {
-    reasons.push("five_minute_momentum_too_low");
-  }
-  if (
-    candidate.fiveMinuteChangePct > SCALP_RULES.maxFiveMinuteChangePct
-  ) {
-    reasons.push("five_minute_momentum_overheated");
-  }
-  if (
-    candidate.fifteenMinuteChangePct <
-    SCALP_RULES.minFifteenMinuteChangePct
-  ) {
-    reasons.push("fifteen_minute_confirmation_too_low");
-  }
-  if (
-    candidate.fifteenMinuteChangePct >
-    SCALP_RULES.maxFifteenMinuteChangePct
-  ) {
-    reasons.push("fifteen_minute_move_overheated");
-  }
-  if (
-    candidate.fiveMinuteVolumeUsd <
-    SCALP_RULES.minFiveMinuteVolumeUsd
-  ) {
-    reasons.push("five_minute_volume_too_low");
-  }
-  if (trades < SCALP_RULES.minFiveMinuteTrades) {
-    reasons.push("five_minute_trades_too_low");
-  }
-  if (candidate.fiveMinuteBuyers < SCALP_RULES.minFiveMinuteBuyers) {
-    reasons.push("buyer_breadth_too_low");
-  }
-  if (buySellRatio < SCALP_RULES.minBuySellRatio) {
-    reasons.push("buy_flow_too_weak");
-  }
-  if (candidate.poolAgeMinutes < SCALP_RULES.minPoolAgeMinutes) {
-    reasons.push("pool_too_new");
-  }
+    fiveMinuteBuys / Math.max(1, fiveMinuteSells);
+  const checks: FilterCheck[] = [
+    ...requiredTextChecks.map(([name, value, reason]) =>
+      filterCheck(name, typeof value === "string" && value.trim().length > 0, value ?? null, "non-empty string", reason)
+    ),
+    ...requiredNumbers.map(([name, value, positive]) =>
+      filterCheck(
+        `${name}_valid`,
+        typeof value === "number" && Number.isFinite(value) && (!positive || value > 0),
+        typeof value === "number" && Number.isFinite(value) ? value : null,
+        positive ? "finite number > 0" : "finite number",
+        `candidate_field_missing_or_invalid:${name}`
+      )
+    ),
+    filterCheck("minimum_liquidity", candidate?.liquidityUsd >= SCALP_RULES.minLiquidityUsd, finiteOrZero(candidate?.liquidityUsd), `>= ${SCALP_RULES.minLiquidityUsd}`, "liquidity_below_35k"),
+    filterCheck("minimum_market_cap", candidate?.marketCapUsd >= SCALP_RULES.minMarketCapUsd, finiteOrZero(candidate?.marketCapUsd), `>= ${SCALP_RULES.minMarketCapUsd}`, "market_cap_below_100k"),
+    filterCheck("maximum_market_cap", candidate?.marketCapUsd <= SCALP_RULES.maxMarketCapUsd, finiteOrZero(candidate?.marketCapUsd), `<= ${SCALP_RULES.maxMarketCapUsd}`, "market_cap_above_5m"),
+    filterCheck("minimum_5m_momentum", candidate?.fiveMinuteChangePct >= SCALP_RULES.minFiveMinuteChangePct, finiteOrZero(candidate?.fiveMinuteChangePct), `>= ${SCALP_RULES.minFiveMinuteChangePct}%`, "five_minute_momentum_too_low"),
+    filterCheck("maximum_5m_momentum", candidate?.fiveMinuteChangePct <= SCALP_RULES.maxFiveMinuteChangePct, finiteOrZero(candidate?.fiveMinuteChangePct), `<= ${SCALP_RULES.maxFiveMinuteChangePct}%`, "five_minute_momentum_overheated"),
+    filterCheck("minimum_15m_momentum", candidate?.fifteenMinuteChangePct >= SCALP_RULES.minFifteenMinuteChangePct, finiteOrZero(candidate?.fifteenMinuteChangePct), `>= ${SCALP_RULES.minFifteenMinuteChangePct}%`, "fifteen_minute_confirmation_too_low"),
+    filterCheck("maximum_15m_momentum", candidate?.fifteenMinuteChangePct <= SCALP_RULES.maxFifteenMinuteChangePct, finiteOrZero(candidate?.fifteenMinuteChangePct), `<= ${SCALP_RULES.maxFifteenMinuteChangePct}%`, "fifteen_minute_move_overheated"),
+    filterCheck("minimum_5m_volume", candidate?.fiveMinuteVolumeUsd >= SCALP_RULES.minFiveMinuteVolumeUsd, finiteOrZero(candidate?.fiveMinuteVolumeUsd), `>= ${SCALP_RULES.minFiveMinuteVolumeUsd}`, "five_minute_volume_too_low"),
+    filterCheck("minimum_5m_trades", trades >= SCALP_RULES.minFiveMinuteTrades, trades, `>= ${SCALP_RULES.minFiveMinuteTrades}`, "five_minute_trades_too_low"),
+    filterCheck("minimum_5m_buyers", candidate?.fiveMinuteBuyers >= SCALP_RULES.minFiveMinuteBuyers, finiteOrZero(candidate?.fiveMinuteBuyers), `>= ${SCALP_RULES.minFiveMinuteBuyers}`, "buyer_breadth_too_low"),
+    filterCheck("minimum_buy_sell_ratio", buySellRatio >= SCALP_RULES.minBuySellRatio, buySellRatio, `>= ${SCALP_RULES.minBuySellRatio}`, "buy_flow_too_weak"),
+    filterCheck("minimum_pool_age", candidate?.poolAgeMinutes >= SCALP_RULES.minPoolAgeMinutes, finiteOrZero(candidate?.poolAgeMinutes), `>= ${SCALP_RULES.minPoolAgeMinutes} minutes`, "pool_too_new"),
+  ];
 
   const momentumScore =
     clamp(
-      (candidate.fiveMinuteChangePct -
+      (finiteOrZero(candidate?.fiveMinuteChangePct) -
         SCALP_RULES.minFiveMinuteChangePct) /
         (SCALP_RULES.maxFiveMinuteChangePct -
           SCALP_RULES.minFiveMinuteChangePct),
@@ -152,11 +180,11 @@ export function evaluateScalpCandidate(
       1
     ) * 25;
   const confirmationScore =
-    clamp(candidate.fifteenMinuteChangePct / 15, 0, 1) * 20;
+    clamp(finiteOrZero(candidate?.fifteenMinuteChangePct) / 15, 0, 1) * 20;
   const volumeScore =
-    clamp(candidate.fiveMinuteVolumeUsd / 20_000, 0, 1) * 20;
+    clamp(finiteOrZero(candidate?.fiveMinuteVolumeUsd) / 20_000, 0, 1) * 20;
   const breadthScore =
-    clamp(candidate.fiveMinuteBuyers / 50, 0, 1) * 20;
+    clamp(finiteOrZero(candidate?.fiveMinuteBuyers) / 50, 0, 1) * 20;
   const flowScore = clamp(buySellRatio / 2, 0, 1) * 15;
 
   const score = Math.round(
@@ -167,47 +195,44 @@ export function evaluateScalpCandidate(
       flowScore
   );
   if (score < SCALP_RULES.minimumSignalScore) {
-    reasons.push("signal_score_below_45");
+    checks.push(filterCheck("minimum_signal_score", false, score, `>= ${SCALP_RULES.minimumSignalScore}`, "signal_score_below_45"));
+  } else {
+    checks.push(filterCheck("minimum_signal_score", true, score, `>= ${SCALP_RULES.minimumSignalScore}`, "signal_score_below_45"));
   }
 
+  const reasons = reasonsFor(checks);
+
   return {
-    accepted: reasons.length === 0,
+    accepted: checks.every((check) => check.passed),
     score,
     reasons,
+    checks,
   };
 }
 
 export function evaluateScalpConfirmation(
+  candidate: ScalpCandidate,
   confirmation: ScalpMarketConfirmation
-): string[] {
-  const reasons: string[] = [];
+): ConfirmationEvaluation {
+  const checks: FilterCheck[] = [
+    filterCheck("selected_mint_matches_confirmation", Boolean(candidate?.mint) && candidate.mint === confirmation?.mint, confirmation?.mint ?? null, candidate?.mint ?? "selected candidate mint", "dex_mint_mismatch"),
+    filterCheck("dex_pair_present", typeof confirmation?.pairAddress === "string" && confirmation.pairAddress.length > 0, confirmation?.pairAddress ?? null, "non-empty pair address", "dex_pair_missing"),
+    filterCheck("dex_price_valid", Number.isFinite(confirmation?.priceUsd) && confirmation.priceUsd > 0, Number.isFinite(confirmation?.priceUsd) ? confirmation.priceUsd : null, "finite number > 0", "dex_price_invalid"),
+    filterCheck("dex_liquidity_valid", Number.isFinite(confirmation?.liquidityUsd), Number.isFinite(confirmation?.liquidityUsd) ? confirmation.liquidityUsd : null, "finite number", "dex_liquidity_missing_or_invalid"),
+    filterCheck("dex_market_cap_valid", Number.isFinite(confirmation?.marketCapUsd), Number.isFinite(confirmation?.marketCapUsd) ? confirmation.marketCapUsd : null, "finite number", "dex_market_cap_missing_or_invalid"),
+    filterCheck("dex_5m_change_valid", Number.isFinite(confirmation?.fiveMinuteChangePct), Number.isFinite(confirmation?.fiveMinuteChangePct) ? confirmation.fiveMinuteChangePct : null, "finite number", "dex_five_minute_change_missing_or_invalid"),
+    filterCheck("dex_minimum_liquidity", confirmation?.liquidityUsd >= SCALP_RULES.minLiquidityUsd, finiteOrZero(confirmation?.liquidityUsd), `>= ${SCALP_RULES.minLiquidityUsd}`, "dex_liquidity_below_35k"),
+    filterCheck("dex_minimum_market_cap", confirmation?.marketCapUsd >= SCALP_RULES.minMarketCapUsd, finiteOrZero(confirmation?.marketCapUsd), `>= ${SCALP_RULES.minMarketCapUsd}`, "dex_market_cap_below_100k"),
+    filterCheck("dex_maximum_market_cap", confirmation?.marketCapUsd <= SCALP_RULES.maxMarketCapUsd, finiteOrZero(confirmation?.marketCapUsd), `<= ${SCALP_RULES.maxMarketCapUsd}`, "dex_market_cap_above_5m"),
+    filterCheck("dex_minimum_5m_momentum", confirmation?.fiveMinuteChangePct >= SCALP_RULES.minFiveMinuteChangePct, finiteOrZero(confirmation?.fiveMinuteChangePct), `>= ${SCALP_RULES.minFiveMinuteChangePct}%`, "dex_five_minute_momentum_too_low"),
+    filterCheck("dex_maximum_5m_momentum", confirmation?.fiveMinuteChangePct <= SCALP_RULES.maxFiveMinuteChangePct, finiteOrZero(confirmation?.fiveMinuteChangePct), `<= ${SCALP_RULES.maxFiveMinuteChangePct}%`, "dex_five_minute_momentum_overheated"),
+  ];
+  const reasons = reasonsFor(checks);
+  return { accepted: checks.every((check) => check.passed), reasons, checks };
+}
 
-  if (!Number.isFinite(confirmation.priceUsd) || confirmation.priceUsd <= 0) {
-    reasons.push("dex_price_invalid");
-  }
-  if (confirmation.liquidityUsd < SCALP_RULES.minLiquidityUsd) {
-    reasons.push("dex_liquidity_below_35k");
-  }
-  if (confirmation.marketCapUsd < SCALP_RULES.minMarketCapUsd) {
-    reasons.push("dex_market_cap_below_100k");
-  }
-  if (confirmation.marketCapUsd > SCALP_RULES.maxMarketCapUsd) {
-    reasons.push("dex_market_cap_above_5m");
-  }
-  if (
-    confirmation.fiveMinuteChangePct <
-    SCALP_RULES.minFiveMinuteChangePct
-  ) {
-    reasons.push("dex_five_minute_momentum_too_low");
-  }
-  if (
-    confirmation.fiveMinuteChangePct >
-    SCALP_RULES.maxFiveMinuteChangePct
-  ) {
-    reasons.push("dex_five_minute_momentum_overheated");
-  }
-
-  return reasons;
+export function configuredNetRewardRiskRatio(): number {
+  return SCALP_RULES.takeProfitNetPct / Math.abs(SCALP_RULES.hardStopNetPct);
 }
 
 export function decideScalpExit(input: {

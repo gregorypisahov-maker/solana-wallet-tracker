@@ -183,7 +183,7 @@ function ScalperPanel({ scalper }: { scalper: DashboardData["scalper"] }) {
         {latestTrades.length ? <div className="miniTrades">{latestTrades.map((trade) => <div key={trade.id}><span><strong>{trade.token_symbol}</strong><small>{String(trade.exit_reason).replaceAll("_", " ")}</small></span><b className={Number(trade.pnl_sol) >= 0 ? "green" : "red"}>{sol(Number(trade.pnl_sol))}</b><time>{time(trade.closed_at)}</time></div>)}</div> : <Empty text="No completed scalps yet." />}
       </div>
     </div>
-    <div className="scalpRules">Rules v2 • score 45+ • 5m 2–6% on both feeds • 15m 5%+ • 0.05 SOL • +2.5% net target • −3.0% net stop • 8 entries/day</div>
+    <div className="scalpRules">Rules v3 • score 45+ • 5m 2–6% on both feeds • 15m 5%+ • 1m pullback + hold required • 0.05 SOL • +4.0% net target • −2.5% net stop • 8 entries/day</div>
   </Panel>;
 }
 
