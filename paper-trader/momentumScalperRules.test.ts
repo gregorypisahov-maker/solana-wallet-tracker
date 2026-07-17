@@ -4,6 +4,8 @@ import {
   calculateNetMultiple,
   decideScalpExit,
   evaluateScalpCandidate,
+  evaluateScalpConfirmation,
+  SCALP_RULES,
   ScalpCandidate,
 } from "./momentumScalperRules";
 
@@ -39,6 +41,82 @@ test("rejects an overheated move and weak liquidity", () => {
   assert.equal(result.accepted, false);
   assert.ok(result.reasons.includes("liquidity_below_35k"));
   assert.ok(result.reasons.includes("five_minute_momentum_overheated"));
+});
+
+test("rejects the observed overheated OH loss on both feeds", () => {
+  const discovery = evaluateScalpCandidate({
+    ...candidate,
+    liquidityUsd: 35_690.7991,
+    marketCapUsd: 198_389.2301,
+    fiveMinuteChangePct: 7.684,
+    fifteenMinuteChangePct: 9.924,
+    fiveMinuteVolumeUsd: 3_936.9,
+    fiveMinuteBuys: 39,
+    fiveMinuteSells: 48,
+    fiveMinuteBuyers: 35,
+  });
+  const confirmation = evaluateScalpConfirmation({
+    priceUsd: 0.0001994,
+    liquidityUsd: 35_964.36,
+    marketCapUsd: 199_400,
+    fiveMinuteChangePct: 6.89,
+  });
+
+  assert.equal(discovery.accepted, false);
+  assert.ok(discovery.reasons.includes("five_minute_momentum_overheated"));
+  assert.ok(confirmation.includes("dex_five_minute_momentum_overheated"));
+});
+
+test("rejects the observed low-quality SOLdiers loss", () => {
+  const discovery = evaluateScalpCandidate({
+    ...candidate,
+    liquidityUsd: 114_762.463,
+    marketCapUsd: 979_508.238,
+    fiveMinuteChangePct: 4.869,
+    fifteenMinuteChangePct: 2.979,
+    fiveMinuteVolumeUsd: 5_363.29,
+    fiveMinuteBuys: 22,
+    fiveMinuteSells: 25,
+    fiveMinuteBuyers: 17,
+  });
+  const confirmation = evaluateScalpConfirmation({
+    priceUsd: 0.0009917,
+    liquidityUsd: 115_530.04,
+    marketCapUsd: 991_690,
+    fiveMinuteChangePct: 6.04,
+  });
+
+  assert.equal(discovery.accepted, false);
+  assert.ok(discovery.reasons.includes("fifteen_minute_confirmation_too_low"));
+  assert.ok(discovery.reasons.includes("signal_score_below_45"));
+  assert.ok(confirmation.includes("dex_five_minute_momentum_overheated"));
+});
+
+test("keeps the observed HOMIE winner eligible", () => {
+  const discovery = evaluateScalpCandidate({
+    ...candidate,
+    liquidityUsd: 41_966.0335,
+    marketCapUsd: 218_292.743,
+    fiveMinuteChangePct: 4.938,
+    fifteenMinuteChangePct: 10.187,
+    fiveMinuteVolumeUsd: 4_126.55,
+    fiveMinuteBuys: 42,
+    fiveMinuteSells: 65,
+    fiveMinuteBuyers: 42,
+  });
+  const confirmation = evaluateScalpConfirmation({
+    priceUsd: 0.0002168,
+    liquidityUsd: 42_177.56,
+    marketCapUsd: 216_800,
+    fiveMinuteChangePct: 2.94,
+  });
+
+  assert.equal(discovery.accepted, true);
+  assert.deepEqual(confirmation, []);
+});
+
+test("caps daily churn at eight entries", () => {
+  assert.equal(SCALP_RULES.maxDailyEntries, 8);
 });
 
 test("round-trip friction is charged before paper profit", () => {

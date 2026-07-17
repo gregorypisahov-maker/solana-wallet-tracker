@@ -6,8 +6,10 @@ import {
   calculateNetMultiple,
   decideScalpExit,
   evaluateScalpCandidate,
+  evaluateScalpConfirmation,
   SCALP_RULES,
   ScalpCandidate,
+  ScalpMarketConfirmation,
 } from "./momentumScalperRules";
 
 const supabase = getSupabaseAdmin();
@@ -15,6 +17,7 @@ const GECKO_TRENDING_URL =
   "https://api.geckoterminal.com/api/v2/networks/solana/trending_pools?page=1";
 const DEX_TOKEN_URL = "https://api.dexscreener.com/tokens/v1/solana";
 const REQUEST_TIMEOUT_MS = 12_000;
+const STRATEGY_VERSION = "momentum_quality_v2_2026_07_17";
 const WRAPPED_SOL_MINT = "So11111111111111111111111111111111111111112";
 const STABLE_MINTS = new Set([
   WRAPPED_SOL_MINT,
@@ -48,12 +51,8 @@ type ScalpPositionRow = {
   entry_snapshot: Record<string, unknown>;
 };
 
-type DexSnapshot = {
+type DexSnapshot = ScalpMarketConfirmation & {
   pairAddress: string;
-  priceUsd: number;
-  liquidityUsd: number;
-  marketCapUsd: number;
-  fiveMinuteChangePct: number;
 };
 
 type EvaluatedCandidate = {
@@ -84,7 +83,7 @@ const SCAN_INTERVAL_MS = boundedInterval(
 );
 const POSITION_CHECK_INTERVAL_MS = boundedInterval(
   process.env.SCALP_POSITION_CHECK_MS,
-  5_000,
+  3_000,
   3_000,
   60_000
 );
@@ -322,7 +321,9 @@ async function recordScan(input: {
     top_score: input.top?.evaluation.score ?? null,
     selected_mint: input.selectedMint ?? null,
     message: input.message ?? null,
-    top_snapshot: input.top ?? null,
+    top_snapshot: input.top
+      ? { ...input.top, strategyVersion: STRATEGY_VERSION }
+      : { strategyVersion: STRATEGY_VERSION },
   });
   if (error) {
     console.error("[momentum-scalper] scan audit insert failed:", error);
@@ -343,16 +344,10 @@ async function recordScan(input: {
 
 async function openScalp(
   state: ScalpStateRow,
-  selected: EvaluatedCandidate
+  selected: EvaluatedCandidate,
+  market: DexSnapshot
 ): Promise<void> {
   const candidate = selected.candidate;
-  const market = await fetchDexSnapshot(candidate.mint);
-  if (
-    market.liquidityUsd < SCALP_RULES.minLiquidityUsd ||
-    market.priceUsd <= 0
-  ) {
-    throw new Error("DexScreener confirmation failed liquidity guard");
-  }
 
   const sizeSol = Math.min(
     SCALP_RULES.fixedSizeSol,
@@ -365,6 +360,7 @@ async function openScalp(
   const openedAt = new Date().toISOString();
   const positionId = `scalp_${randomUUID()}`;
   const entrySnapshot = {
+    strategyVersion: STRATEGY_VERSION,
     source: "geckoterminal_trending",
     candidate,
     score: selected.evaluation.score,
@@ -398,7 +394,8 @@ async function openScalp(
       "",
       `🪙 <b>${escapeHtml(candidate.symbol)}</b>`,
       `Size: <b>${sizeSol.toFixed(3)} SOL</b>`,
-      `5m momentum: <b>${signed(candidate.fiveMinuteChangePct, 1)}%</b>`,
+      `5m discovery: <b>${signed(candidate.fiveMinuteChangePct, 1)}%</b>`,
+      `5m confirmation: <b>${signed(market.fiveMinuteChangePct, 1)}%</b>`,
       `5m volume: <b>$${Math.round(candidate.fiveMinuteVolumeUsd).toLocaleString()}</b>`,
       `Liquidity: <b>$${Math.round(market.liquidityUsd).toLocaleString()}</b>`,
       `Signal score: <b>${selected.evaluation.score}/100</b>`,
@@ -419,6 +416,27 @@ export async function runMomentumScalperScan(): Promise<void> {
   try {
     let state = await loadState();
     state = await resetDailyRiskIfNeeded(state);
+
+    if (
+      state.enabled &&
+      !state.halted &&
+      state.entries_today >= SCALP_RULES.maxDailyEntries
+    ) {
+      const { data, error } = await supabase
+        .from("scalp_state")
+        .update({
+          halted: true,
+          halt_reason: "daily_entry_limit",
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", 1)
+        .select("*")
+        .single();
+      if (error) {
+        throw new Error(`scalp daily-entry halt failed: ${error.message}`);
+      }
+      state = data as ScalpStateRow;
+    }
 
     if (!state.enabled || state.halted) {
       await recordScan({
@@ -443,24 +461,53 @@ export async function runMomentumScalperScan(): Promise<void> {
       .sort((left, right) => right.evaluation.score - left.evaluation.score);
     const qualified = evaluated.filter((item) => item.evaluation.accepted);
     let selected: EvaluatedCandidate | null = null;
+    let selectedMarket: DexSnapshot | null = null;
+    let confirmationRejections = 0;
+    let cooldownRejections = 0;
 
     for (const item of qualified) {
-      if (!(await isCoolingDown(item.candidate.mint))) {
+      if (await isCoolingDown(item.candidate.mint)) {
+        cooldownRejections += 1;
+        continue;
+      }
+
+      try {
+        const market = await fetchDexSnapshot(item.candidate.mint);
+        const confirmationReasons = evaluateScalpConfirmation(market);
+        if (confirmationReasons.length > 0) {
+          confirmationRejections += 1;
+          console.log(
+            `[MOMENTUM SCALP REJECT] ${item.candidate.symbol}: ` +
+              confirmationReasons.join(",")
+          );
+          continue;
+        }
         selected = item;
+        selectedMarket = market;
         break;
+      } catch (error) {
+        confirmationRejections += 1;
+        console.warn(
+          `[momentum-scalper] Dex confirmation failed for ${item.candidate.symbol}:`,
+          error
+        );
       }
     }
 
-    if (selected) await openScalp(state, selected);
+    if (selected && selectedMarket) {
+      await openScalp(state, selected, selectedMarket);
+    }
 
     const top = evaluated[0] ?? null;
     const message = selected
       ? "paper_scalp_opened"
-      : qualified.length > 0
-        ? "qualified_candidates_in_cooldown"
-        : top
-          ? `no_entry: ${top.evaluation.reasons.slice(0, 3).join(",")}`
-          : "no_trending_candidates";
+      : confirmationRejections > 0
+        ? `dex_confirmation_rejected:${confirmationRejections}`
+        : cooldownRejections > 0
+          ? "qualified_candidates_in_cooldown"
+          : top
+            ? `no_entry: ${top.evaluation.reasons.slice(0, 3).join(",")}`
+            : "no_trending_candidates";
 
     await recordScan({
       startedAt,
