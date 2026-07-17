@@ -1,7 +1,6 @@
 import "dotenv/config";
 import { getSupabaseAdmin } from "../lib/supabase";
 import { computeAndStoreWalletPerformance } from "../paper-trader/walletPerformance";
-import { discoverTrialWallets } from "./walletDiscovery";
 
 const supabase = getSupabaseAdmin();
 
@@ -260,18 +259,9 @@ export async function runWalletIntelligence(): Promise<{
     }
   }
 
-  // Do not leave newly freed trial slots empty until the separate discovery timer.
-  // Refill immediately after removals; discovery still applies all candidate-quality
-  // checks, trial caps, duplicate protection, and fail-closed behavior.
-  let replacementsAdded: string[] = [];
-  if (disabled.length > 0) {
-    try {
-      const replacementResult = await discoverTrialWallets();
-      replacementsAdded = replacementResult.added;
-    } catch (error) {
-      console.error("[wallet-intelligence] immediate replacement discovery failed safely:", error);
-    }
-  }
+  // Freed trial slots are refilled only by the daily discovery scheduler.
+  // Keeping this array preserves the command and audit response shape.
+  const replacementsAdded: string[] = [];
 
   const { error: auditError } = await supabase.from("wallet_intelligence_runs").insert({
     wallets_scored: walletsUpdated,
@@ -299,9 +289,10 @@ export async function runWalletIntelligence(): Promise<{
         bottom_performers_first: true,
       },
       immediate_replacement: {
-        attempted: disabled.length > 0,
-        added_count: replacementsAdded.length,
-        added_addresses: replacementsAdded,
+        attempted: false,
+        added_count: 0,
+        added_addresses: [],
+        reason: "deferred_to_24h_discovery_scheduler",
       },
     },
   });
@@ -346,6 +337,6 @@ export function startWalletIntelligenceScheduler(): void {
   console.log(
     `[wallet-intelligence] enabled every ${RUN_INTERVAL_HOURS}h; ` +
       `promote after ${MIN_TRADES_TO_PROMOTE}+ trades at PF ${MIN_PROFIT_FACTOR_TO_PROMOTE}+; ` +
-      `disable up to ${MAX_DISABLE_PER_RUN} weak/inactive trial wallets per run and refill freed slots immediately`
+      `disable up to ${MAX_DISABLE_PER_RUN} weak/inactive trial wallets per run; daily discovery refills freed slots`
   );
 }
