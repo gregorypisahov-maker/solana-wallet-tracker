@@ -18,7 +18,7 @@ const PROFILE_WALLET_DELAY_MS = 2_000;
 const RETRY_DELAYS_MS = [2_000, 8_000, 30_000];
 const MAX_CANDIDATES_TO_PROFILE = 12;
 
-const DISCOVERY_INTERVAL_HOURS = boundedNumber(process.env.WALLET_DISCOVERY_INTERVAL_HOURS, 6, 1, 24);
+const DISCOVERY_INTERVAL_HOURS = boundedNumber(process.env.WALLET_DISCOVERY_INTERVAL_HOURS, 24, 1, 24);
 const MAX_NEW_PER_RUN = Math.floor(boundedNumber(process.env.WALLET_DISCOVERY_MAX_NEW, 3, 1, 5));
 const MAX_ACTIVE_TRIALS = Math.floor(
   boundedNumber(process.env.WALLET_DISCOVERY_MAX_ACTIVE_TRIALS, 20, 5, 40)
