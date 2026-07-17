@@ -40,15 +40,13 @@ export async function handleScalpStats(): Promise<string> {
     supabase.from('scalp_scan_runs').select('*').order('started_at', { ascending: false }).limit(1).maybeSingle(),
   ]);
 
-  const failed = [
-    ['state', stateResult],
-    ['positions', positionsResult],
-    ['trades', tradesResult],
-    ['scan', scanResult],
-  ].find(([, result]) => result.error);
-  if (failed) {
-    const result = failed[1] as { error: { message: string } };
-    throw new Error(`Scalper ${failed[0]} lookup failed: ${result.error.message}`);
+  const lookupError =
+    stateResult.error ??
+    positionsResult.error ??
+    tradesResult.error ??
+    scanResult.error;
+  if (lookupError) {
+    throw new Error(`Scalper stats lookup failed: ${lookupError.message}`);
   }
 
   const state = stateResult.data;
