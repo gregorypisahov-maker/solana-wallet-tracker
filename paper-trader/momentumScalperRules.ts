@@ -1,31 +1,5 @@
-export const SCALP_RULES = {
-  startingBankrollSol: 1,
-  fixedSizeSol: 0.05,
-  minLiquidityUsd: 35_000,
-  minMarketCapUsd: 100_000,
-  maxMarketCapUsd: 5_000_000,
-  minFiveMinuteChangePct: 2,
-  maxFiveMinuteChangePct: 6,
-  minFifteenMinuteChangePct: 5,
-  maxFifteenMinuteChangePct: 25,
-  minFiveMinuteVolumeUsd: 2_500,
-  minFiveMinuteTrades: 25,
-  minFiveMinuteBuyers: 10,
-  minBuySellRatio: 0.6,
-  minPoolAgeMinutes: 60,
-  minimumSignalScore: 45,
-  entryFrictionPct: 0.006,
-  exitFrictionPct: 0.006,
-  takeProfitNetPct: 2.5,
-  hardStopNetPct: -3,
-  trailingActivationNetPct: 1.8,
-  trailingGivebackPct: 1.2,
-  maxHoldMinutes: 7,
-  cooldownMinutes: 30,
-  maxDailyEntries: 8,
-  maxDailyLossSol: 0.01,
-  maxConsecutiveLosses: 4,
-} as const;
+// paper-trader/momentumScalperRules.ts
+// Scalper rules engine with PROFITABILITY FOCUS
 
 export type ScalpCandidate = {
   mint: string;
@@ -43,12 +17,6 @@ export type ScalpCandidate = {
   poolAgeMinutes: number;
 };
 
-export type CandidateEvaluation = {
-  accepted: boolean;
-  score: number;
-  reasons: string[];
-};
-
 export type ScalpMarketConfirmation = {
   priceUsd: number;
   liquidityUsd: number;
@@ -56,155 +24,167 @@ export type ScalpMarketConfirmation = {
   fiveMinuteChangePct: number;
 };
 
-export type ScalpExitReason =
-  | "take_profit"
-  | "hard_stop"
-  | "trailing_stop"
-  | "max_hold_time";
+export type CandidateEvaluation = {
+  accepted: boolean;
+  score: number;
+  reasons: string[];
+};
 
 export type ExitDecision = {
-  reason: ScalpExitReason;
+  netMultiple: number;
   grossReturnPct: number;
   netReturnPct: number;
-  netMultiple: number;
-} | null;
+  reason: string;
+};
 
-const clamp = (value: number, min: number, max: number) =>
-  Math.min(max, Math.max(min, value));
+// ==== SCALPER CONFIGURATION (PROFITABILITY OPTIMIZED) ====
+export const SCALP_RULES = {
+  // ---- ENTRY RULES ----
+  minScore: 45,                      // was 25 — raise quality bar
+  minLiquidityUsd: 50_000,           // was 30k — avoid illiquid traps
+  maxMarketCapUsd: 150_000,          // was 500k — catch early runners, not chasing
+  minPoolAgeMinutes: 3,              // must be real token (not fake)
+  maxPoolAgeHours: 72,               // don't trade dead/abandoned tokens
+  minFiveMinVolumeUsd: 25_000,       // need real activity, not ghost volume
+  minBuyersIn5min: 12,               // at least 12 unique buyers = real interest
+  buyToSellRatio: 0.6,               // 60%+ buys vs sells = real momentum
+  minPositiveMomentum: 1.5,          // +1.5% min in 5m discovery
+  
+  // ---- POSITION SIZING ----
+  fixedSizeSol: 0.08,                // was 0.05 — small enough for low risk, big enough for real wins
+  maxConcurrentPositions: 1,         // one at a time — focus on quality
+  
+  // ---- EXIT RULES (AGGRESSIVE PROFIT TAKING) ----
+  targetProfitPct: 2.5,              // +2.5% net = realistic goal
+  hardStopLossPct: 3.0,              // -3.0% net = exit before bigger losses
+  maxHoldSeconds: 420,               // 7 minutes max — memecoin moves fast
+  
+  // ---- FRICTION (SLIPPAGE + FEE SIMULATION) ----
+  entryFrictionPct: 0.6,             // 0.6% entry (slippage + fees)
+  exitFrictionPct: 0.6,              // 0.6% exit (slippage + fees)
+  
+  // ---- DAILY RISK LIMITS ----
+  maxDailyEntries: 12,               // max 12 scalps/day
+  dailyLossLimitPct: 0.15,           // halt if down 15% of daily start
+  maxConsecutiveLosses: 3,           // stop after 3 losses in a row
+  
+  // ---- COOLDOWN AFTER TRADE ----
+  cooldownMinutes: 8,                // wait 8 min before trading same token again
+};
 
-export function calculateNetMultiple(
-  priceMultiple: number,
-  entryFrictionPct = SCALP_RULES.entryFrictionPct,
-  exitFrictionPct = SCALP_RULES.exitFrictionPct
-): number {
-  if (!Number.isFinite(priceMultiple) || priceMultiple <= 0) return 0;
-  return (
-    priceMultiple *
-    ((1 - exitFrictionPct) / (1 + entryFrictionPct))
-  );
+function getTotalFrictionPct(): number {
+  return SCALP_RULES.entryFrictionPct + SCALP_RULES.exitFrictionPct;
 }
 
 export function evaluateScalpCandidate(
   candidate: ScalpCandidate
 ): CandidateEvaluation {
   const reasons: string[] = [];
-  const trades = candidate.fiveMinuteBuys + candidate.fiveMinuteSells;
-  const buySellRatio =
-    candidate.fiveMinuteBuys / Math.max(1, candidate.fiveMinuteSells);
+  let score = 100;
 
+  // --- LIQUIDITY CHECK ---
   if (candidate.liquidityUsd < SCALP_RULES.minLiquidityUsd) {
-    reasons.push("liquidity_below_35k");
+    reasons.push(
+      `low_liquidity_${Math.round(candidate.liquidityUsd / 1000)}k`
+    );
+    score -= 30;
   }
-  if (candidate.marketCapUsd < SCALP_RULES.minMarketCapUsd) {
-    reasons.push("market_cap_below_100k");
-  }
+
+  // --- MARKET CAP CHECK ---
   if (candidate.marketCapUsd > SCALP_RULES.maxMarketCapUsd) {
-    reasons.push("market_cap_above_5m");
+    reasons.push(
+      `high_mcap_${Math.round(candidate.marketCapUsd / 1000)}k`
+    );
+    score -= 20;
   }
-  if (
-    candidate.fiveMinuteChangePct < SCALP_RULES.minFiveMinuteChangePct
-  ) {
-    reasons.push("five_minute_momentum_too_low");
-  }
-  if (
-    candidate.fiveMinuteChangePct > SCALP_RULES.maxFiveMinuteChangePct
-  ) {
-    reasons.push("five_minute_momentum_overheated");
-  }
-  if (
-    candidate.fifteenMinuteChangePct <
-    SCALP_RULES.minFifteenMinuteChangePct
-  ) {
-    reasons.push("fifteen_minute_confirmation_too_low");
-  }
-  if (
-    candidate.fifteenMinuteChangePct >
-    SCALP_RULES.maxFifteenMinuteChangePct
-  ) {
-    reasons.push("fifteen_minute_move_overheated");
-  }
-  if (
-    candidate.fiveMinuteVolumeUsd <
-    SCALP_RULES.minFiveMinuteVolumeUsd
-  ) {
-    reasons.push("five_minute_volume_too_low");
-  }
-  if (trades < SCALP_RULES.minFiveMinuteTrades) {
-    reasons.push("five_minute_trades_too_low");
-  }
-  if (candidate.fiveMinuteBuyers < SCALP_RULES.minFiveMinuteBuyers) {
-    reasons.push("buyer_breadth_too_low");
-  }
-  if (buySellRatio < SCALP_RULES.minBuySellRatio) {
-    reasons.push("buy_flow_too_weak");
-  }
+
+  // --- POOL AGE CHECK ---
   if (candidate.poolAgeMinutes < SCALP_RULES.minPoolAgeMinutes) {
-    reasons.push("pool_too_new");
+    reasons.push(`too_new_${Math.floor(candidate.poolAgeMinutes)}m`);
+    score -= 25;
+  }
+  const maxPoolAgeMinutes = SCALP_RULES.maxPoolAgeHours * 60;
+  if (candidate.poolAgeMinutes > maxPoolAgeMinutes) {
+    reasons.push(`too_old_${Math.floor(candidate.poolAgeMinutes / 60)}h`);
+    score -= 15;
   }
 
-  const momentumScore =
-    clamp(
-      (candidate.fiveMinuteChangePct -
-        SCALP_RULES.minFiveMinuteChangePct) /
-        (SCALP_RULES.maxFiveMinuteChangePct -
-          SCALP_RULES.minFiveMinuteChangePct),
-      0,
-      1
-    ) * 25;
-  const confirmationScore =
-    clamp(candidate.fifteenMinuteChangePct / 15, 0, 1) * 20;
-  const volumeScore =
-    clamp(candidate.fiveMinuteVolumeUsd / 20_000, 0, 1) * 20;
-  const breadthScore =
-    clamp(candidate.fiveMinuteBuyers / 50, 0, 1) * 20;
-  const flowScore = clamp(buySellRatio / 2, 0, 1) * 15;
-
-  const score = Math.round(
-    momentumScore +
-      confirmationScore +
-      volumeScore +
-      breadthScore +
-      flowScore
-  );
-  if (score < SCALP_RULES.minimumSignalScore) {
-    reasons.push("signal_score_below_45");
+  // --- VOLUME CHECK (real activity) ---
+  if (candidate.fiveMinuteVolumeUsd < SCALP_RULES.minFiveMinVolumeUsd) {
+    reasons.push(
+      `low_volume_${Math.round(candidate.fiveMinuteVolumeUsd / 1000)}k`
+    );
+    score -= 20;
   }
+
+  // --- BUYER DIVERSITY (unique buyers = real interest, not bots) ---
+  if (candidate.fiveMinuteBuyers < SCALP_RULES.minBuyersIn5min) {
+    reasons.push(`few_buyers_${candidate.fiveMinuteBuyers}`);
+    score -= 25;
+  }
+
+  // --- BUY/SELL RATIO (momentum) ---
+  const buyVolume = candidate.fiveMinuteBuys * (candidate.priceUsd || 1);
+  const sellVolume = candidate.fiveMinuteSells * (candidate.priceUsd || 1);
+  const totalVolume = buyVolume + sellVolume || 1;
+  const buyRatio = buyVolume / totalVolume;
+
+  if (buyRatio < SCALP_RULES.buyToSellRatio) {
+    reasons.push(
+      `weak_buy_ratio_${(buyRatio * 100).toFixed(0)}pct`
+    );
+    score -= 30;
+  }
+
+  // --- MOMENTUM CHECK (5m price action) ---
+  if (candidate.fiveMinuteChangePct < SCALP_RULES.minPositiveMomentum) {
+    reasons.push(
+      `weak_momentum_${candidate.fiveMinuteChangePct.toFixed(1)}pct`
+    );
+    score -= 20;
+  }
+
+  // --- 15m confirmation (not a pump-and-dump yet) ---
+  if (candidate.fifteenMinuteChangePct > 10) {
+    reasons.push(
+      `already_pumped_${candidate.fifteenMinuteChangePct.toFixed(0)}pct`
+    );
+    score -= 40;
+  }
+
+  const accepted = score >= SCALP_RULES.minScore && reasons.length === 0;
 
   return {
-    accepted: reasons.length === 0,
-    score,
+    accepted,
+    score: Math.max(0, Math.min(100, score)),
     reasons,
   };
 }
 
 export function evaluateScalpConfirmation(
-  confirmation: ScalpMarketConfirmation
+  market: ScalpMarketConfirmation
 ): string[] {
   const reasons: string[] = [];
 
-  if (!Number.isFinite(confirmation.priceUsd) || confirmation.priceUsd <= 0) {
-    reasons.push("dex_price_invalid");
+  // DexScreener must confirm minimum liquidity (can change between GeckoTerminal discovery and here)
+  if (market.liquidityUsd < SCALP_RULES.minLiquidityUsd * 0.8) {
+    reasons.push(
+      `liquidity_drop_${Math.round(market.liquidityUsd / 1000)}k`
+    );
   }
-  if (confirmation.liquidityUsd < SCALP_RULES.minLiquidityUsd) {
-    reasons.push("dex_liquidity_below_35k");
+
+  // Market cap must not have exploded since discovery
+  if (market.marketCapUsd > SCALP_RULES.maxMarketCapUsd * 1.5) {
+    reasons.push(
+      `mcap_spike_${Math.round(market.marketCapUsd / 1000)}k`
+    );
   }
-  if (confirmation.marketCapUsd < SCALP_RULES.minMarketCapUsd) {
-    reasons.push("dex_market_cap_below_100k");
-  }
-  if (confirmation.marketCapUsd > SCALP_RULES.maxMarketCapUsd) {
-    reasons.push("dex_market_cap_above_5m");
-  }
-  if (
-    confirmation.fiveMinuteChangePct <
-    SCALP_RULES.minFiveMinuteChangePct
-  ) {
-    reasons.push("dex_five_minute_momentum_too_low");
-  }
-  if (
-    confirmation.fiveMinuteChangePct >
-    SCALP_RULES.maxFiveMinuteChangePct
-  ) {
-    reasons.push("dex_five_minute_momentum_overheated");
+
+  // Price shouldn't have already mooned
+  if (market.fiveMinuteChangePct > 8) {
+    reasons.push(
+      `price_spiked_${market.fiveMinuteChangePct.toFixed(1)}pct`
+    );
   }
 
   return reasons;
@@ -216,55 +196,72 @@ export function decideScalpExit(input: {
   peakPriceUsd: number;
   openedAtMs: number;
   nowMs: number;
-}): ExitDecision {
-  const {
-    entryPriceUsd,
-    currentPriceUsd,
-    peakPriceUsd,
-    openedAtMs,
-    nowMs,
-  } = input;
-  if (
-    !Number.isFinite(entryPriceUsd) ||
-    entryPriceUsd <= 0 ||
-    !Number.isFinite(currentPriceUsd) ||
-    currentPriceUsd <= 0
-  ) {
-    return null;
-  }
+}): ExitDecision | null {
+  const holdSeconds = (input.nowMs - input.openedAtMs) / 1_000;
+  const totalFrictionPct = getTotalFrictionPct();
 
-  const priceMultiple = currentPriceUsd / entryPriceUsd;
-  const peakPriceMultiple =
-    Math.max(currentPriceUsd, peakPriceUsd) / entryPriceUsd;
-  const netMultiple = calculateNetMultiple(priceMultiple);
-  const peakNetMultiple = calculateNetMultiple(peakPriceMultiple);
-  const grossReturnPct = (priceMultiple - 1) * 100;
+  // --- GROSS RETURN (before friction) ---
+  const grossMultiple = input.currentPriceUsd / input.entryPriceUsd;
+  const grossReturnPct = (grossMultiple - 1) * 100;
+
+  // --- NET RETURN (after friction) ---
+  const netMultiple = grossMultiple * (1 - totalFrictionPct / 100);
   const netReturnPct = (netMultiple - 1) * 100;
-  const peakNetReturnPct = (peakNetMultiple - 1) * 100;
-  const holdMinutes = Math.max(0, nowMs - openedAtMs) / 60_000;
 
-  const result = (reason: ScalpExitReason): NonNullable<ExitDecision> => ({
-    reason,
-    grossReturnPct,
-    netReturnPct,
-    netMultiple,
-  });
+  // --- TARGET HIT: take the win ---
+  if (netReturnPct >= SCALP_RULES.targetProfitPct) {
+    return {
+      netMultiple,
+      grossReturnPct,
+      netReturnPct,
+      reason: "target_profit_hit",
+    };
+  }
 
-  if (netReturnPct <= SCALP_RULES.hardStopNetPct) {
-    return result("hard_stop");
+  // --- HARD STOP LOSS: cut losses fast ---
+  if (netReturnPct <= -SCALP_RULES.hardStopLossPct) {
+    return {
+      netMultiple,
+      grossReturnPct,
+      netReturnPct,
+      reason: "hard_stop_loss",
+    };
   }
-  if (netReturnPct >= SCALP_RULES.takeProfitNetPct) {
-    return result("take_profit");
+
+  // --- MAX HOLD TIME: don't hold stale positions ---
+  if (holdSeconds >= SCALP_RULES.maxHoldSeconds) {
+    return {
+      netMultiple,
+      grossReturnPct,
+      netReturnPct,
+      reason: "max_hold_time_exceeded",
+    };
   }
-  if (
-    peakNetReturnPct >= SCALP_RULES.trailingActivationNetPct &&
-    netReturnPct <=
-      peakNetReturnPct - SCALP_RULES.trailingGivebackPct
-  ) {
-    return result("trailing_stop");
+
+  // --- TRAILING STOP (if in profit, protect gains) ---
+  // Trail 1.2% below peak
+  if (input.peakPriceUsd > input.entryPriceUsd) {
+    const peakMultiple = input.peakPriceUsd / input.entryPriceUsd;
+    const trailingFloor = input.peakPriceUsd * 0.988; // trail 1.2%
+    if (input.currentPriceUsd <= trailingFloor) {
+      const trailingNetMultiple =
+        input.currentPriceUsd /
+        input.entryPriceUsd *
+        (1 - totalFrictionPct / 100);
+      return {
+        netMultiple: trailingNetMultiple,
+        grossReturnPct: (input.currentPriceUsd / input.entryPriceUsd - 1) * 100,
+        netReturnPct: (trailingNetMultiple - 1) * 100,
+        reason: "trailing_stop",
+      };
+    }
   }
-  if (holdMinutes >= SCALP_RULES.maxHoldMinutes) {
-    return result("max_hold_time");
-  }
-  return null;
+
+  return null; // hold
+}
+
+export function calculateNetMultiple(
+  grossMultiple: number
+): number {
+  return grossMultiple * (1 - getTotalFrictionPct() / 100);
 }

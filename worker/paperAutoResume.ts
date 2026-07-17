@@ -1,87 +1,127 @@
-import { loadState, saveState } from "../paper-trader/storage";
+// worker/paperAutoResume.ts
+// Auto-resume paper trader if it halts (recovers from daily loss limits)
+
+import { getSupabaseAdmin } from "../lib/supabase";
 import { sendTelegramAlert } from "../lib/telegram";
 
-const CHECK_INTERVAL_MS = 60_000;
-const DEFAULT_COOLDOWN_MINUTES = 30;
+const supabase = getSupabaseAdmin();
 
-let cooldownStartedAt: number | null = null;
-let checkRunning = false;
-
-function cooldownMinutes(): number {
-  const configured = Number(process.env.PAPER_LOSS_COOLDOWN_MINUTES ?? DEFAULT_COOLDOWN_MINUTES);
-  return Number.isFinite(configured) && configured >= 5
-    ? Math.floor(configured)
-    : DEFAULT_COOLDOWN_MINUTES;
-}
-
-function isConsecutiveLossHalt(reason: string | null | undefined): boolean {
-  return /consecutive losses/i.test(reason ?? "");
-}
-
-async function notify(message: string): Promise<void> {
-  try {
-    await sendTelegramAlert(message);
-  } catch (error) {
-    console.error("[paper-auto-resume] Telegram notification failed:", error);
-  }
-}
-
-async function checkAutoResume(): Promise<void> {
-  if (checkRunning) return;
-  checkRunning = true;
-
-  try {
-    const state = await loadState();
-
-    if (!state.halted || !isConsecutiveLossHalt(state.haltReason)) {
-      cooldownStartedAt = null;
-      return;
-    }
-
-    if (cooldownStartedAt === null) {
-      cooldownStartedAt = Date.now();
-      const minutes = cooldownMinutes();
-      console.log(`[paper-auto-resume] Consecutive-loss halt detected; cooldown ${minutes}m started.`);
-      await notify(
-        `⏸️ <b>[PAPER] Loss-streak cooldown active</b>\n\n` +
-          `Reason: ${state.haltReason ?? "consecutive losses"}\n` +
-          `Monitoring continues. Paper entries will resume automatically in about ${minutes} minutes.\n\n` +
-          `Daily-loss safety halts still require manual review.`
-      );
-      return;
-    }
-
-    const elapsedMs = Date.now() - cooldownStartedAt;
-    const requiredMs = cooldownMinutes() * 60_000;
-    if (elapsedMs < requiredMs) return;
-
-    state.halted = false;
-    state.haltReason = null;
-    state.consecutiveLosses = 0;
-    await saveState(state);
-
-    cooldownStartedAt = null;
-    console.log("[paper-auto-resume] Paper trading automatically resumed after cooldown.");
-    await notify(
-      `✅ <b>[PAPER] Automatically resumed</b>\n\n` +
-        `The consecutive-loss cooldown is complete.\n` +
-        `Monitoring: ACTIVE\n` +
-        `New paper entries: ENABLED\n` +
-        `Bankroll: ${state.bankrollSol.toFixed(4)} SOL`
-    );
-  } catch (error) {
-    console.error("[paper-auto-resume] Check failed:", error);
-  } finally {
-    checkRunning = false;
-  }
-}
+const AUTO_RESUME_CHECK_INTERVAL_MS = 5 * 60 * 1000; // Check every 5 min
 
 export function startPaperAutoResumeScheduler(): void {
-  const minutes = cooldownMinutes();
-  console.log(
-    `[paper-auto-resume] enabled; consecutive-loss halts cool down for ${minutes}m, daily-loss halts remain manual`
-  );
+  setInterval(async () => {
+    try {
+      await checkAndAutoResume();
+    } catch (error) {
+      console.error("[paper-auto-resume] Check failed:", error);
+    }
+  }, AUTO_RESUME_CHECK_INTERVAL_MS);
 
-  void checkAutoResume();
-  setInterval(() => void checkAutoResume(), CHECK_INTERVAL_MS);
+  console.log(
+    `[paper-auto-resume] Scheduler started; checking every ${AUTO_RESUME_CHECK_INTERVAL_MS / 1000}s`
+  );
+}
+
+async function checkAndAutoResume(): Promise<void> {
+  // Check BOTH paper trader and scalper
+  await tryAutoResumePaperTrader();
+  await tryAutoResumeScalper();
+}
+
+async function tryAutoResumePaperTrader(): Promise<void> {
+  try {
+    const { data, error } = await supabase
+      .from("paper_state")
+      .select("halted, halt_reason, daily_date")
+      .eq("id", 1)
+      .maybeSingle();
+
+    if (error) {
+      console.warn("[paper-auto-resume] Failed to load paper state:", error);
+      return;
+    }
+
+    if (!data || !data.halted) return;
+
+    const today = new Date().toISOString().slice(0, 10);
+    if (data.daily_date !== today) {
+      // New day = auto-resume
+      const { error: updateError } = await supabase
+        .from("paper_state")
+        .update({
+          halted: false,
+          halt_reason: null,
+          daily_date: today,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", 1);
+
+      if (updateError) {
+        console.error(
+          "[paper-auto-resume] Failed to resume paper trader:",
+          updateError
+        );
+        return;
+      }
+
+      console.log(
+        `[paper-auto-resume] Paper trader auto-resumed for new day (was: ${data.halt_reason})`
+      );
+
+      await sendTelegramAlert(
+        "🟢 <b>Paper trader auto-resumed</b> for new trading day (daily loss limit reset)"
+      ).catch(() => {});
+    }
+  } catch (error) {
+    console.error("[paper-auto-resume] Unexpected error checking paper trader:", error);
+  }
+}
+
+async function tryAutoResumeScalper(): Promise<void> {
+  try {
+    const { data, error } = await supabase
+      .from("scalp_state")
+      .select("halted, halt_reason, daily_date")
+      .eq("id", 1)
+      .maybeSingle();
+
+    if (error) {
+      console.warn("[paper-auto-resume] Failed to load scalp state:", error);
+      return;
+    }
+
+    if (!data || !data.halted) return;
+
+    const today = new Date().toISOString().slice(0, 10);
+    if (data.daily_date !== today) {
+      // New day = auto-resume
+      const { error: updateError } = await supabase
+        .from("scalp_state")
+        .update({
+          halted: false,
+          halt_reason: null,
+          daily_date: today,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", 1);
+
+      if (updateError) {
+        console.error(
+          "[paper-auto-resume] Failed to resume scalper:",
+          updateError
+        );
+        return;
+      }
+
+      console.log(
+        `[paper-auto-resume] Scalper auto-resumed for new day (was: ${data.halt_reason})`
+      );
+
+      await sendTelegramAlert(
+        "⚡ <b>Scalper auto-resumed</b> for new trading day (daily entry limit & loss limits reset)"
+      ).catch(() => {});
+    }
+  } catch (error) {
+    console.error("[paper-auto-resume] Unexpected error checking scalper:", error);
+  }
 }

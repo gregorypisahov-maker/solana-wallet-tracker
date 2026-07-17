@@ -17,7 +17,7 @@ const GECKO_TRENDING_URL =
   "https://api.geckoterminal.com/api/v2/networks/solana/trending_pools?page=1";
 const DEX_TOKEN_URL = "https://api.dexscreener.com/tokens/v1/solana";
 const REQUEST_TIMEOUT_MS = 12_000;
-const STRATEGY_VERSION = "momentum_quality_v2_2026_07_17";
+const STRATEGY_VERSION = "momentum_quality_v3_2026_07_17_profitability";
 const WRAPPED_SOL_MINT = "So11111111111111111111111111111111111111112";
 const STABLE_MINTS = new Set([
   WRAPPED_SOL_MINT,
@@ -353,8 +353,8 @@ async function openScalp(
     SCALP_RULES.fixedSizeSol,
     numberValue(state.bankroll_sol)
   );
-  if (sizeSol < SCALP_RULES.fixedSizeSol) {
-    throw new Error("paper bankroll below the fixed 0.05 SOL scalp size");
+  if (sizeSol < SCALP_RULES.fixedSizeSol * 0.9) {
+    throw new Error("paper bankroll too low for scalp size");
   }
 
   const openedAt = new Date().toISOString();
@@ -400,8 +400,8 @@ async function openScalp(
       `Liquidity: <b>$${Math.round(market.liquidityUsd).toLocaleString()}</b>`,
       `Signal score: <b>${selected.evaluation.score}/100</b>`,
       "",
-      "Target: +2.5% net • Stop: -3.0% net • Max hold: 7 min",
-      "Includes 1.2% simulated round-trip friction.",
+      `Target: ${signed(SCALP_RULES.targetProfitPct, 1)}% net • Stop: -${SCALP_RULES.hardStopLossPct}% net • Max hold: ${Math.floor(SCALP_RULES.maxHoldSeconds / 60)} min`,
+      `Includes ${(SCALP_RULES.entryFrictionPct + SCALP_RULES.exitFrictionPct).toFixed(1)}% simulated round-trip friction.`,
       "",
       `<a href="https://dexscreener.com/solana/${candidate.mint}">Open DexScreener</a>`,
       "",
@@ -660,9 +660,9 @@ export function startMomentumScalperScheduler(): void {
   }
 
   console.log(
-    `[momentum-scalper] paper-only wallet-free strategy enabled; ` +
+    `[momentum-scalper] PROFITABILITY FOCUS v3: improved entry rules, faster exits, real friction modeling; ` +
       `scan ${SCAN_INTERVAL_MS / 1000}s; position check ${POSITION_CHECK_INTERVAL_MS / 1000}s; ` +
-      `size ${SCALP_RULES.fixedSizeSol.toFixed(2)} SOL`
+      `size ${SCALP_RULES.fixedSizeSol.toFixed(2)} SOL • target ${SCALP_RULES.targetProfitPct.toFixed(1)}% • stop ${SCALP_RULES.hardStopLossPct.toFixed(1)}%`
   );
 
   void scanSafely().catch((error) =>
