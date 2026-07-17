@@ -12,7 +12,7 @@ const MIN_MEDIAN_ENTRY_DELAY_MIN = 60;
 const TRIAL_MIN_MEDIAN_ENTRY_DELAY_MIN = 120;
 const MAX_PCT_BUYS_UNDER_30_MIN = 0.5;
 const MAX_SWAP_FREQUENCY_PER_DAY = 200;
-const MIN_OBSERVATION_WINDOW_HOURS = 24;
+const CHURN_PROFILE_VERSION = 2;
 const MAX_DISTINCT_TOKEN_CREATION_LOOKUPS = 24;
 const PROFILE_WALLET_DELAY_MS = 2_000;
 const RETRY_DELAYS_MS = [2_000, 8_000, 30_000];
@@ -125,8 +125,7 @@ function getHeliusApiKey(): string {
   const rpcUrl = process.env.HELIUS_RPC_URL?.trim();
   if (!rpcUrl) throw new Error("HELIUS_RPC_URL is required for wallet discovery");
   try {
-    const parsed = new URL(rpcUrl);
-    const key = parsed.searchParams.get("api-key");
+    const key = new URL(rpcUrl).searchParams.get("api-key");
     if (key) return key;
   } catch {
     // Safe configuration error below.
@@ -151,7 +150,10 @@ async function fetchJsonOnce(url: string): Promise<unknown> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   try {
-    const response = await fetch(url, { signal: controller.signal, headers: { accept: "application/json" } });
+    const response = await fetch(url, {
+      signal: controller.signal,
+      headers: { accept: "application/json" },
+    });
     if (!response.ok) {
       const body = (await response.text()).slice(0, 160).replace(/\s+/g, " ");
       throw new HttpStatusError(response.status, `HTTP ${response.status}${body ? `: ${body}` : ""}`);
@@ -211,7 +213,6 @@ async function fetchCreationTimestamps(mints: string[]): Promise<Map<string, num
   for (const mint of mints) result.set(mint, null);
   if (mints.length === 0) return result;
 
-  // Dexscreener's token endpoint accepts comma-separated addresses and covers all listed pool types.
   for (let offset = 0; offset < mints.length; offset += 30) {
     const batch = mints.slice(offset, offset + 30);
     try {
@@ -325,7 +326,6 @@ async function buildEntryTimingProfile(address: string, apiKey: string): Promise
     .map(([mint]) => mint);
   const creationByMint = await fetchCreationTimestamps(prioritizedMints);
 
-  // Fallback proxy: earliest observed swap for the mint in this capped history.
   for (const mint of prioritizedMints) {
     if (creationByMint.get(mint) == null) {
       const earliestObserved = Math.min(...(buysByMint.get(mint) ?? []));
@@ -348,12 +348,16 @@ async function buildEntryTimingProfile(address: string, apiKey: string): Promise
   const validTimestamps = transactions
     .map((tx) => Number(tx.timestamp ?? 0))
     .filter((value) => Number.isFinite(value) && value > 0);
-  const actualSpanHours =
+  const observationWindowHours =
     validTimestamps.length > 1
       ? (Math.max(...validTimestamps) - Math.min(...validTimestamps)) / 3_600
       : 0;
-  const observationWindowHours = Math.max(MIN_OBSERVATION_WINDOW_HOURS, actualSpanHours);
-  const swapFrequencyPerDay = transactions.length / (observationWindowHours / 24);
+  const swapFrequencyPerDay =
+    observationWindowHours > 0
+      ? transactions.length / (observationWindowHours / 24)
+      : transactions.length > 1
+        ? Number.MAX_SAFE_INTEGER
+        : 0;
   const medianEntryDelayMin = median(delays);
   const pctBuysUnder30Min =
     delays.length > 0 ? delays.filter((delay) => delay < 30).length / delays.length : null;
@@ -387,7 +391,8 @@ function metricsFor(candidate: SeedCandidate, profile: EntryTimingProfile): Reco
     distinct_token_count: profile.distinctTokenCount,
     profiled_buy_count: profile.profiledBuyCount,
     swap_frequency_per_day: Number(profile.swapFrequencyPerDay.toFixed(2)),
-    observation_window_hours: Number(profile.observationWindowHours.toFixed(2)),
+    observation_window_hours: Number(profile.observationWindowHours.toFixed(4)),
+    churn_profile_version: CHURN_PROFILE_VERSION,
     unprofiled_reason_counts: profile.unprofiledReasonCounts,
     seed_token_count: candidate.tokenCount,
     seed_score_total: candidate.seedScoreTotal,
@@ -499,7 +504,6 @@ async function profileCandidates(candidates: SeedCandidate[]): Promise<ProfiledC
         profiled.push({ ...candidate, profile });
       }
     } catch (error) {
-      // New candidates are not inserted and API errors are not treated as wallet verdicts.
       console.warn(`[wallet-discovery] candidate profile pending retry ${candidate.address}:`, error);
     }
     await sleep(PROFILE_WALLET_DELAY_MS);
@@ -525,7 +529,7 @@ async function reevaluateExistingTrials(): Promise<void> {
     .select("address, active, management_status, auto_disable_reason, discovery_metrics")
     .eq("discovery_source", DISCOVERY_SOURCE)
     .or(
-      "management_status.eq.trial,discovery_metrics->>profile_pending_retry.eq.true,auto_disable_reason.like.retroactive_profile_error:%"
+      "active.eq.true,management_status.eq.trial,discovery_metrics->>profile_pending_retry.eq.true,auto_disable_reason.like.retroactive_profile_error:%"
     );
   if (error) throw new Error(`Failed to load discovery trials: ${error.message}`);
 
@@ -534,7 +538,7 @@ async function reevaluateExistingTrials(): Promise<void> {
     const prior = (row.discovery_metrics ?? {}) as Record<string, unknown>;
     const profileCurrent =
       prior.profile_pending_retry !== true &&
-      Number(prior.observation_window_hours ?? 0) >= MIN_OBSERVATION_WINDOW_HOURS &&
+      Number(prior.churn_profile_version ?? 0) >= CHURN_PROFILE_VERSION &&
       typeof prior.unprofiled_reason_counts === "object" &&
       !String(row.auto_disable_reason ?? "").startsWith("retroactive_profile_error:");
     if (profileCurrent) continue;
@@ -577,7 +581,6 @@ async function reevaluateExistingTrials(): Promise<void> {
           .eq("discovery_source", DISCOVERY_SOURCE);
       }
     } catch (profileError) {
-      // Preserve current status. Never disable because an external API failed.
       await markProfilePendingRetry(row.address, prior, profileError);
     }
     await sleep(PROFILE_WALLET_DELAY_MS);
