@@ -17,6 +17,7 @@ import {
   handleHeliusStats,
   handleReadiness,
   handleResume,
+  handleScalpStats,
 } from '../paper-trader/telegramCommands';
 import { handleWalletScan } from './walletScanCommand';
 import {
@@ -173,7 +174,8 @@ async function handleHelp(): Promise<string> {
   return [
     '🤖 <b>SOLANA WALLET TRACKER</b>', '', status, '',
     '<b>📊 Status</b>',
-    '/paperstats — Paper trading performance',
+    '/paperstats — Wallet-based paper trading performance',
+    '/scalpstats — Parallel momentum scalper performance',
     '/readiness — Bot readiness check',
     '/heliusstats — Helius credit usage', '',
     '<b>📈 Analytics</b>',
@@ -206,7 +208,7 @@ function helpKeyboard(): InlineKeyboard {
   rows.push(
     [
       { text: '📊 Paper Stats', callback_data: '/paperstats' },
-      { text: '🏆 Elite Wallets', callback_data: '/elite_wallets' },
+      { text: '⚡ Scalp Stats', callback_data: '/scalpstats' },
     ],
     [
       { text: '🧠 Auto Wallets', callback_data: '/auto_wallets' },
@@ -225,6 +227,9 @@ const COMMAND_HANDLERS: Record<string, () => Promise<string>> = {
   '/commands': handleHelp,
   '/start': handleHelp,
   '/paperstats': handlePaperStats,
+  '/scalpstats': handleScalpStats,
+  '/scalp_stats': handleScalpStats,
+  '/scalper': handleScalpStats,
   '/walletstats': handleWalletStats,
   '/exitstats': handleExitStats,
   '/scorestats': handleScoreStats,
@@ -326,7 +331,7 @@ async function pollLoop(): Promise<void> {
   console.log(`[telegram-bot] Starting inbound command listener (${TELEGRAM_WORKER_VERSION})...`);
   console.log(`[telegram-bot] Bot-token fingerprint: ${tokenFingerprint}; authorized chats: ${AUTHORIZED_CHAT_IDS.size}`);
   console.log(`[telegram-bot] Dashboard button: ${DASHBOARD_URL ? 'configured' : 'not configured'}`);
-  console.log('[telegram-bot] Commands ready: /help /commands /chatid /paperstats /walletstats /exitstats /scorestats /heliusstats /readiness /resume /walletscan /auto_wallets /elite_wallets /discover_now /intelligence_now');
+  console.log('[telegram-bot] Commands ready: /help /commands /chatid /paperstats /scalpstats /walletstats /exitstats /scorestats /heliusstats /readiness /resume /walletscan /auto_wallets /elite_wallets /discover_now /intelligence_now');
 
   await validateToken();
 
