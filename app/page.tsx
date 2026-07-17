@@ -164,7 +164,7 @@ function ScalperPanel({ scalper }: { scalper: DashboardData["scalper"] }) {
       <div><span>Equity</span><b>{summary.equitySol.toFixed(4)} SOL</b><small>Started with 1.0000</small></div>
       <div><span>Net PnL</span><b className={summary.totalPnlSol >= 0 ? "green" : "red"}>{sol(summary.totalPnlSol)}</b><small>After simulated costs</small></div>
       <div><span>Win rate</span><b>{(summary.winRate * 100).toFixed(1)}%</b><small>{summary.wins}W / {summary.losses}L</small></div>
-      <div><span>Scalps</span><b>{summary.completedTrades}</b><small>{state?.entries_today ?? 0}/12 today</small></div>
+      <div><span>Scalps</span><b>{summary.completedTrades}</b><small>{state?.entries_today ?? 0}/8 today</small></div>
       <div><span>Profit factor</span><b>{summary.profitFactor == null ? "—" : summary.profitFactor.toFixed(2)}</b><small>Closed paper trades</small></div>
     </div>
     <div className="scalpBody">
@@ -183,7 +183,7 @@ function ScalperPanel({ scalper }: { scalper: DashboardData["scalper"] }) {
         {latestTrades.length ? <div className="miniTrades">{latestTrades.map((trade) => <div key={trade.id}><span><strong>{trade.token_symbol}</strong><small>{String(trade.exit_reason).replaceAll("_", " ")}</small></span><b className={Number(trade.pnl_sol) >= 0 ? "green" : "red"}>{sol(Number(trade.pnl_sol))}</b><time>{time(trade.closed_at)}</time></div>)}</div> : <Empty text="No completed scalps yet." />}
       </div>
     </div>
-    <div className="scalpRules">0.05 SOL size • one open position • +2.5% net target • −3.0% net stop • 7-minute maximum • 1.2% simulated round-trip friction</div>
+    <div className="scalpRules">Rules v2 • score 45+ • 5m 2–6% on both feeds • 15m 5%+ • 0.05 SOL • +2.5% net target • −3.0% net stop • 8 entries/day</div>
   </Panel>;
 }
 
