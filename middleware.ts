@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 
+// Keep dashboard access checks at the edge for every page and API request.
 const VIEWER_COOKIE = "swt_viewer";
 
 function getViewerSecret(): string | undefined {
