@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { hasViewerAccess, unauthorized } from "@/lib/dashboardAuth";
 import { getPriceUsd } from "@/paper-trader/priceFeed";
+import { calculateNetMultiple } from "@/paper-trader/momentumScalperRules";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -13,8 +14,19 @@ export async function GET(request: NextRequest) {
   if (!hasViewerAccess(request)) return unauthorized();
 
   const supabase = getSupabaseAdmin({ noStore: true });
-  const [state, positions, trades, tokens, wallets, performance, transactions] =
-    await Promise.all([
+  const [
+    state,
+    positions,
+    trades,
+    tokens,
+    wallets,
+    performance,
+    transactions,
+    scalpState,
+    scalpPositions,
+    scalpTrades,
+    scalpScan,
+  ] = await Promise.all([
       supabase.from("paper_state").select("*").eq("id", 1).maybeSingle(),
       supabase.from("paper_positions").select("*").order("entry_time", { ascending: false }),
       supabase.from("paper_trades").select("*").order("happened_at", { ascending: false }).limit(1000),
@@ -22,9 +34,25 @@ export async function GET(request: NextRequest) {
       supabase.from("wallets").select("address,label,active,created_at").order("created_at"),
       supabase.from("wallet_performance").select("*").order("trust_score", { ascending: false }).limit(20),
       supabase.from("wallet_transactions").select("wallet_address,token_mint,side,sol_amount,tx_time,is_scalp").order("tx_time", { ascending: false }).limit(50),
+      supabase.from("scalp_state").select("*").eq("id", 1).maybeSingle(),
+      supabase.from("scalp_positions").select("*").order("entry_time", { ascending: false }),
+      supabase.from("scalp_trades").select("*").order("closed_at", { ascending: false }).limit(100),
+      supabase.from("scalp_scan_runs").select("*").order("started_at", { ascending: false }).limit(1).maybeSingle(),
     ]);
 
-  const queries = { state, positions, trades, tokens, wallets, performance, transactions };
+  const queries = {
+    state,
+    positions,
+    trades,
+    tokens,
+    wallets,
+    performance,
+    transactions,
+    scalpState,
+    scalpPositions,
+    scalpTrades,
+    scalpScan,
+  };
   const failed = Object.entries(queries).find(([, result]) => result.error);
   if (failed) {
     console.error(`[dashboard] ${failed[0]} query failed`, failed[1].error);
@@ -117,12 +145,76 @@ export async function GET(request: NextRequest) {
   const liveEquitySol =
     (Number.isFinite(cashSol) ? cashSol : 0) + openPositionValueSol;
 
+  const scalpTradeRows = scalpTrades.data ?? [];
+  const scalpPositionRows = (scalpPositions.data ?? []).map((position) => {
+    const entryPriceUsd = Number(position.entry_price_usd);
+    const currentPriceUsd = Number(position.last_price_usd);
+    const sizeSol = Number(position.size_sol);
+    const netMultiple =
+      Number.isFinite(entryPriceUsd) &&
+      entryPriceUsd > 0 &&
+      Number.isFinite(currentPriceUsd) &&
+      currentPriceUsd > 0
+        ? calculateNetMultiple(currentPriceUsd / entryPriceUsd)
+        : 1;
+    const currentValueSol = sizeSol * netMultiple;
+    return {
+      ...position,
+      current_net_multiple: netMultiple,
+      current_net_return_pct: (netMultiple - 1) * 100,
+      current_value_sol: currentValueSol,
+      unrealized_pnl_sol: currentValueSol - sizeSol,
+    };
+  });
+  const scalpCashSol = Number(scalpState.data?.bankroll_sol ?? 0);
+  const scalpOpenValueSol = scalpPositionRows.reduce(
+    (sum, position) => sum + Number(position.current_value_sol),
+    0
+  );
+  const scalpWins = scalpTradeRows.filter(
+    (trade) => Number(trade.pnl_sol) > 0
+  ).length;
+  const scalpGrossProfit = scalpTradeRows
+    .filter((trade) => Number(trade.pnl_sol) > 0)
+    .reduce((sum, trade) => sum + Number(trade.pnl_sol), 0);
+  const scalpGrossLoss = Math.abs(
+    scalpTradeRows
+      .filter((trade) => Number(trade.pnl_sol) < 0)
+      .reduce((sum, trade) => sum + Number(trade.pnl_sol), 0)
+  );
+  const scalpTotalPnlSol = scalpTradeRows.reduce(
+    (sum, trade) => sum + Number(trade.pnl_sol),
+    0
+  );
+
   return NextResponse.json({
     generatedAt: new Date().toISOString(),
     state: state.data,
     positions: pricedPositions,
     trades: tradeRows.slice(0, 100),
     tokens: tokens.data ?? [],
+    scalper: {
+      state: scalpState.data,
+      positions: scalpPositionRows,
+      trades: scalpTradeRows,
+      lastScan: scalpScan.data,
+      summary: {
+        cashSol: Number.isFinite(scalpCashSol) ? scalpCashSol : 0,
+        openPositionValueSol: scalpOpenValueSol,
+        equitySol:
+          (Number.isFinite(scalpCashSol) ? scalpCashSol : 0) +
+          scalpOpenValueSol,
+        totalPnlSol: scalpTotalPnlSol,
+        completedTrades: scalpTradeRows.length,
+        wins: scalpWins,
+        losses: scalpTradeRows.length - scalpWins,
+        winRate: scalpTradeRows.length
+          ? scalpWins / scalpTradeRows.length
+          : 0,
+        profitFactor:
+          scalpGrossLoss > 0 ? scalpGrossProfit / scalpGrossLoss : null,
+      },
+    },
     summary: {
       completedPositions: closed.length,
       wins,

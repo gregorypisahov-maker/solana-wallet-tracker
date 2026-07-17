@@ -13,6 +13,7 @@ import { getTopWallets, getBottomWallets, WalletPerformanceRow } from './walletP
 import { getSupabaseAdmin } from '../lib/supabase';
 import { estimateHeliusCredits } from '../worker/heliusUsage';
 import { evaluatePaperReadiness } from './readiness';
+import { calculateNetMultiple } from './momentumScalperRules';
 
 function signedSol(value: number): string {
   return `${value >= 0 ? '+' : ''}${value.toFixed(3)} SOL`;
@@ -20,6 +21,111 @@ function signedSol(value: number): string {
 
 function signedPct(value: number): string {
   return `${value >= 0 ? '+' : ''}${value.toFixed(1)}%`;
+}
+
+function escapeHtml(value: unknown): string {
+  return String(value ?? '')
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;');
+}
+
+
+export async function handleScalpStats(): Promise<string> {
+  const supabase = getSupabaseAdmin();
+  const [stateResult, positionsResult, tradesResult, scanResult] = await Promise.all([
+    supabase.from('scalp_state').select('*').eq('id', 1).maybeSingle(),
+    supabase.from('scalp_positions').select('*').order('entry_time', { ascending: false }),
+    supabase.from('scalp_trades').select('*').order('closed_at', { ascending: false }).limit(100),
+    supabase.from('scalp_scan_runs').select('*').order('started_at', { ascending: false }).limit(1).maybeSingle(),
+  ]);
+
+  const lookupError =
+    stateResult.error ??
+    positionsResult.error ??
+    tradesResult.error ??
+    scanResult.error;
+  if (lookupError) {
+    throw new Error(`Scalper stats lookup failed: ${lookupError.message}`);
+  }
+
+  const state = stateResult.data;
+  const positions = positionsResult.data ?? [];
+  const trades = tradesResult.data ?? [];
+  const pnl = trades.reduce((sum, trade) => sum + Number(trade.pnl_sol), 0);
+  const wins = trades.filter((trade) => Number(trade.pnl_sol) > 0).length;
+  const grossProfit = trades
+    .filter((trade) => Number(trade.pnl_sol) > 0)
+    .reduce((sum, trade) => sum + Number(trade.pnl_sol), 0);
+  const grossLoss = Math.abs(
+    trades
+      .filter((trade) => Number(trade.pnl_sol) < 0)
+      .reduce((sum, trade) => sum + Number(trade.pnl_sol), 0)
+  );
+  const openValue = positions.reduce((sum, position) => {
+    const entry = Number(position.entry_price_usd);
+    const current = Number(position.last_price_usd);
+    const size = Number(position.size_sol);
+    if (!Number.isFinite(entry) || entry <= 0 || !Number.isFinite(current)) {
+      return sum + size;
+    }
+    return sum + size * calculateNetMultiple(current / entry);
+  }, 0);
+  const cash = Number(state?.bankroll_sol ?? 0);
+  const scan = scanResult.data;
+  const latestTrade = trades[0];
+
+  const lines = [
+    '⚡ <b>PARALLEL MOMENTUM SCALPER</b>',
+    '',
+    state?.enabled && !state?.halted
+      ? '🟢 Wallet-free paper scalper: ACTIVE'
+      : `🔴 Scalper: ${state?.halt_reason ?? 'disabled'}`,
+    `Equity: <b>${(cash + openValue).toFixed(4)} SOL</b>`,
+    `Cash: ${cash.toFixed(4)} SOL`,
+    `Total PnL: <b>${signedSol(pnl)}</b>`,
+    `Completed scalps: ${trades.length}`,
+    `Win rate: ${trades.length ? ((wins / trades.length) * 100).toFixed(1) : '0.0'}%`,
+    `Profit factor: ${grossLoss > 0 ? (grossProfit / grossLoss).toFixed(2) : 'N/A'}`,
+    `Open positions: ${positions.length}/1`,
+    `Entries today: ${state?.entries_today ?? 0}/12`,
+    '',
+  ];
+
+  if (positions[0]) {
+    const position = positions[0];
+    const entry = Number(position.entry_price_usd);
+    const current = Number(position.last_price_usd);
+    const netPct =
+      Number.isFinite(entry) && entry > 0
+        ? (calculateNetMultiple(current / entry) - 1) * 100
+        : 0;
+    lines.push(
+      `<b>OPEN:</b> ${escapeHtml(position.token_symbol)} — ${Number(position.size_sol).toFixed(3)} SOL`,
+      `Current net: ${signedPct(netPct)}`,
+      ''
+    );
+  }
+
+  lines.push(
+    `Last scan: ${scan ? new Date(scan.finished_at).toLocaleString() : 'not run yet'}`,
+    `Scan result: ${escapeHtml(scan?.message ?? 'waiting')}`
+  );
+
+  if (latestTrade) {
+    lines.push(
+      '',
+      `Last close: ${escapeHtml(latestTrade.token_symbol)} • ${String(latestTrade.exit_reason).replaceAll('_', ' ')} • ${signedSol(Number(latestTrade.pnl_sol))}`
+    );
+  }
+
+  lines.push(
+    '',
+    'Data source: GeckoTerminal + DexScreener. Helius credits used: 0.',
+    '🧪 Paper only — results do not guarantee real-money profit.'
+  );
+
+  return lines.join('\n');
 }
 
 export async function handlePaperStats(): Promise<string> {

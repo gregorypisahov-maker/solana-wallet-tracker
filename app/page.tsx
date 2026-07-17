@@ -27,6 +27,23 @@ type DashboardData = {
   tokens: any[];
   performance: any[];
   transactions: any[];
+  scalper: {
+    state: any;
+    positions: any[];
+    trades: any[];
+    lastScan: any;
+    summary: {
+      cashSol: number;
+      openPositionValueSol: number;
+      equitySol: number;
+      totalPnlSol: number;
+      completedTrades: number;
+      wins: number;
+      losses: number;
+      winRate: number;
+      profitFactor: number | null;
+    };
+  };
 };
 
 const short = (value: string) => `${value.slice(0, 4)}…${value.slice(-4)}`;
@@ -119,6 +136,7 @@ export default function Dashboard() {
       {error && <div className="errorBanner">{error}. Showing the last successful snapshot.</div>}
       {halted && <div className="haltBanner">Paper entries are paused: {state?.halt_reason ?? "risk limit reached"}. Use <code>/resume</code> in the authorized Telegram chat.</div>}
       <section className="metrics"><Metric label="Cash balance" value={`${data.summary.cashSol.toFixed(3)} SOL`} sub="Available simulated cash" /><Metric label="Open position value" value={`${data.summary.openPositionValueSol.toFixed(3)} SOL`} sub={data.summary.livePricesUnavailable > 0 ? `${data.summary.livePricesUnavailable} live price${data.summary.livePricesUnavailable === 1 ? "" : "s"} unavailable • estimated` : `Unrealized ${sol(data.summary.unrealizedPnlSol)}`} /><Metric label="Live equity" value={`${data.summary.liveEquitySol.toFixed(3)} SOL`} sub="Cash + open position value" tone="cyan" /><Metric label="Realized PnL" value={sol(data.summary.totalPnlSol)} tone={data.summary.totalPnlSol >= 0 ? "green" : "red"} /><Metric label="Win rate" value={`${(data.summary.winRate * 100).toFixed(1)}%`} sub={`${data.summary.wins}W / ${data.summary.losses}L`} /><Metric label="Profit factor" value={data.summary.profitFactor == null ? "—" : data.summary.profitFactor.toFixed(2)} /><Metric label="Positions" value={`${data.summary.openPositions} open`} sub={`${data.summary.completedPositions} completed`} /><Metric label="Wallets online" value={`${data.summary.activeWallets}`} sub={`${data.summary.configuredWallets} configured`} /></section>
+      <ScalperPanel scalper={data.scalper} />
       <WalletManager onChanged={refresh} />
       <section className="grid two"><Panel title="Open paper positions" badge={`${data.positions.length} LIVE`}>{data.positions.length === 0 ? <Empty text="Waiting for the next qualified consensus alert." /> : <div className="stack">{data.positions.map((position) => <button type="button" className="position" key={position.mint} onClick={() => setSelectedMint(position.mint)} style={{ width: "100%", color: "inherit", textAlign: "left", cursor: "pointer", font: "inherit" }}><div><strong>{position.token_symbol}</strong><span>{short(position.mint)}</span></div><div><span>Size</span><b>{Number(position.size_sol).toFixed(3)} SOL</b></div><div><span>Current</span><b>{position.current_multiple == null ? "—" : `${Number(position.current_multiple).toFixed(2)}x`}</b></div><div><span>PnL</span><b className={Number(position.unrealized_pnl_sol ?? 0) >= 0 ? "green" : "red"}>{position.unrealized_pnl_sol == null ? "—" : sol(Number(position.unrealized_pnl_sol))}</b></div><div><span>Open details</span><b>View →</b></div></button>)}</div>}</Panel><Panel title="Wallet leaderboard" badge="TRUST SCORE">{data.performance.length === 0 ? <Empty text="Wallet scores appear after matched paper positions close." /> : <div className="leaderboard">{data.performance.slice(0, 8).map((wallet, index) => <div className="leader" key={wallet.wallet_address}><span className="rank">{index + 1}</span><code>{wallet.wallet_address}</code><div className="bar"><i style={{ width: `${Math.max(2, Number(wallet.trust_score))}%` }} /></div><strong>{Number(wallet.trust_score).toFixed(0)}</strong><small>{(Number(wallet.win_rate) * 100).toFixed(0)}% win</small></div>)}</div>}</Panel></section>
       <Panel title="Consensus radar" badge="LATEST TOKENS"><div className="tableWrap"><table><thead><tr><th>Token</th><th>Wallets</th><th>Total buy</th><th>Score</th><th>Market cap</th><th>Liquidity</th><th>Last signal</th><th>Flags</th></tr></thead><tbody>{data.tokens.slice(0, 15).map((token) => <tr key={token.token_mint}><td><a href={`https://dexscreener.com/solana/${token.token_mint}`} target="_blank" rel="noreferrer"><strong>{token.token_symbol ?? "UNKNOWN"}</strong><small>{short(token.token_mint)}</small></a></td><td>{token.wallets_count}</td><td>{Number(token.total_sol_bought).toFixed(2)} SOL</td><td><span className={`score score${Math.floor(Number(token.score) / 20)}`}>{token.score}</span></td><td>{usd(token.market_cap == null ? null : Number(token.market_cap))}</td><td>{usd(token.liquidity_usd == null ? null : Number(token.liquidity_usd))}</td><td>{time(token.last_buy_time)}</td><td>{token.dump_flag ? <em className="flag red">DUMP</em> : null}{token.scalp_flag ? <em className="flag amber">SCALP</em> : null}{!token.dump_flag && !token.scalp_flag ? "—" : null}</td></tr>)}</tbody></table>{data.tokens.length === 0 && <Empty text="No token consensus has been recorded yet." />}</div></Panel>
@@ -127,6 +145,49 @@ export default function Dashboard() {
     </main>
   );
 }
+
+
+function ScalperPanel({ scalper }: { scalper: DashboardData["scalper"] }) {
+  const state = scalper.state;
+  const summary = scalper.summary;
+  const position = scalper.positions[0];
+  const scan = scalper.lastScan;
+  const active = Boolean(state?.enabled) && !state?.halted;
+  const latestTrades = scalper.trades.slice(0, 5);
+
+  return <Panel title="Parallel momentum scalper" badge="PAPER • WALLET-FREE">
+    <div className="scalpIntro">
+      <div><span className={`scalpDot ${active ? "active" : "paused"}`} /> <strong>{active ? "Scanning every minute" : `Paused: ${state?.halt_reason ?? "disabled"}`}</strong><small>GeckoTerminal discovery + DexScreener prices • zero Helius credits</small></div>
+      <code>/scalpstats</code>
+    </div>
+    <div className="scalpMetrics">
+      <div><span>Equity</span><b>{summary.equitySol.toFixed(4)} SOL</b><small>Started with 1.0000</small></div>
+      <div><span>Net PnL</span><b className={summary.totalPnlSol >= 0 ? "green" : "red"}>{sol(summary.totalPnlSol)}</b><small>After simulated costs</small></div>
+      <div><span>Win rate</span><b>{(summary.winRate * 100).toFixed(1)}%</b><small>{summary.wins}W / {summary.losses}L</small></div>
+      <div><span>Scalps</span><b>{summary.completedTrades}</b><small>{state?.entries_today ?? 0}/12 today</small></div>
+      <div><span>Profit factor</span><b>{summary.profitFactor == null ? "—" : summary.profitFactor.toFixed(2)}</b><small>Closed paper trades</small></div>
+    </div>
+    <div className="scalpBody">
+      <div>
+        <h3>Open scalp</h3>
+        {position ? <a className="scalpPosition" href={`https://dexscreener.com/solana/${position.mint}`} target="_blank" rel="noreferrer">
+          <div><strong>{position.token_symbol}</strong><small>{short(position.mint)}</small></div>
+          <div><span>Size</span><b>{Number(position.size_sol).toFixed(3)} SOL</b></div>
+          <div><span>Net now</span><b className={Number(position.current_net_return_pct) >= 0 ? "green" : "red"}>{signedPct(Number(position.current_net_return_pct))}</b></div>
+          <div><span>Age</span><b>{Math.max(0, (Date.now() - Date.parse(position.entry_time)) / 60_000).toFixed(1)} min</b></div>
+        </a> : <Empty text="Waiting for liquid, confirmed momentum. No forced trade." />}
+        <div className="scanLine"><span>Last market scan</span><b>{scan ? time(scan.finished_at) : "Starting…"}</b><small>{scan?.message?.replaceAll("_", " ") ?? "waiting for first run"}{scan ? ` • ${scan.scanned_count} checked • ${scan.qualified_count} qualified` : ""}</small></div>
+      </div>
+      <div>
+        <h3>Recent scalp exits</h3>
+        {latestTrades.length ? <div className="miniTrades">{latestTrades.map((trade) => <div key={trade.id}><span><strong>{trade.token_symbol}</strong><small>{String(trade.exit_reason).replaceAll("_", " ")}</small></span><b className={Number(trade.pnl_sol) >= 0 ? "green" : "red"}>{sol(Number(trade.pnl_sol))}</b><time>{time(trade.closed_at)}</time></div>)}</div> : <Empty text="No completed scalps yet." />}
+      </div>
+    </div>
+    <div className="scalpRules">0.05 SOL size • one open position • +2.5% net target • −3.0% net stop • 7-minute maximum • 1.2% simulated round-trip friction</div>
+  </Panel>;
+}
+
+const signedPct = (value: number) => `${value >= 0 ? "+" : ""}${value.toFixed(2)}%`;
 
 function TradeDetail({ position, generatedAt, refreshing, onBack }: { position: any; generatedAt: string; refreshing: boolean; onBack: () => void }) {
   const entryPrice = Number(position.entry_price);
