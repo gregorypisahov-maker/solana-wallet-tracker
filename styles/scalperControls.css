@@ -1,0 +1,118 @@
+/* Scalper Controls Styling */
+.scalperControls {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+  background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+  border-radius: 8px;
+  border: 1px solid #0f3460;
+}
+
+.controlStatus {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.statusDot {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  animation: pulse 2s infinite;
+}
+
+.statusDot.active {
+  background-color: #00d084;
+  box-shadow: 0 0 10px rgba(0, 208, 132, 0.5);
+}
+
+.statusDot.paused {
+  background-color: #ff6b6b;
+  box-shadow: 0 0 10px rgba(255, 107, 107, 0.5);
+}
+
+@keyframes pulse {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
+}
+
+.statusText {
+  color: #fff;
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.controlButtons {
+  display: flex;
+  gap: 8px;
+}
+
+.btn {
+  flex: 1;
+  padding: 10px 16px;
+  border: none;
+  border-radius: 6px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  text-align: center;
+}
+
+.btnResume {
+  background-color: #00d084;
+  color: #1a1a2e;
+}
+
+.btnResume:hover {
+  background-color: #00e899;
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(0, 208, 132, 0.3);
+}
+
+.btnPause {
+  background-color: #ff6b6b;
+  color: #fff;
+}
+
+.btnPause:hover {
+  background-color: #ff8787;
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(255, 107, 107, 0.3);
+}
+
+.controlInfo {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+  font-size: 12px;
+}
+
+.controlInfo > div {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px;
+  background: rgba(15, 52, 96, 0.5);
+  border-radius: 4px;
+}
+
+.controlInfo span {
+  color: #a0aec0;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.controlInfo strong {
+  color: #fff;
+  font-size: 14px;
+  font-weight: 700;
+}
