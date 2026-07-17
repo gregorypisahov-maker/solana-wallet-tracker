@@ -20,8 +20,8 @@ const MAX_CANDIDATES_TO_PROFILE = 12;
 
 const DISCOVERY_INTERVAL_HOURS = boundedNumber(process.env.WALLET_DISCOVERY_INTERVAL_HOURS, 24, 1, 24);
 const MAX_NEW_PER_RUN = Math.floor(boundedNumber(process.env.WALLET_DISCOVERY_MAX_NEW, 3, 1, 5));
-const MAX_ACTIVE_TRIALS = Math.floor(
-  boundedNumber(process.env.WALLET_DISCOVERY_MAX_ACTIVE_TRIALS, 20, 5, 40)
+const MAX_ACTIVE_WALLETS = Math.floor(
+  boundedNumber(process.env.WALLET_DISCOVERY_MAX_ACTIVE_WALLETS, 5, 5, 5)
 );
 const SEED_TOKEN_LIMIT = Math.floor(
   boundedNumber(process.env.WALLET_DISCOVERY_SEED_TOKENS, 6, 2, 10)
@@ -596,20 +596,19 @@ export async function discoverTrialWallets(): Promise<{
   const seedCandidates = await fetchSeedCandidates();
   const candidates = await profileCandidates(seedCandidates);
 
-  const [{ data: existingRows, error: existingError }, { count: activeTrialCount, error: countError }] =
+  const [{ data: existingRows, error: existingError }, { count: activeWalletCount, error: countError }] =
     await Promise.all([
       supabase.from("wallets").select("address"),
       supabase
         .from("wallets")
         .select("id", { count: "exact", head: true })
-        .eq("active", true)
-        .eq("management_status", "trial"),
+        .eq("active", true),
     ]);
   if (existingError) throw new Error(`Failed to load existing wallets: ${existingError.message}`);
-  if (countError) throw new Error(`Failed to count trial wallets: ${countError.message}`);
+  if (countError) throw new Error(`Failed to count active wallets: ${countError.message}`);
 
   const existing = new Set((existingRows ?? []).map((row) => row.address));
-  const availableSlots = Math.max(0, MAX_ACTIVE_TRIALS - (activeTrialCount ?? 0));
+  const availableSlots = Math.max(0, MAX_ACTIVE_WALLETS - (activeWalletCount ?? 0));
   const promotionEligible = candidates.filter(
     (candidate) =>
       candidate.profile.medianEntryDelayMin != null &&
