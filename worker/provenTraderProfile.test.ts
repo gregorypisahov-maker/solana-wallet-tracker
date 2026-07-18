@@ -79,6 +79,47 @@ test("rejects activity without enough closed profitable trades", () => {
   assert.ok(profile.rejectionReasons.includes("leader_realized_pnl_too_low"));
 });
 
+test("accepts a lower win rate only with a deeper high-payoff sample", () => {
+  const nowSec = Math.floor(Date.now() / 1000);
+  const transactions: HeliusProfileTransaction[] = [];
+
+  for (let index = 0; index < 12; index += 1) {
+    const mint = `Asym${index % 4}11111111111111111111111111111111`;
+    const opened = nowSec - (30 - index * 2) * 3_600;
+    transactions.push(swap(opened, mint, 100, -1));
+    transactions.push(
+      swap(opened + 1_800, mint, -100, index < 6 ? 1.6 : 0.8)
+    );
+  }
+
+  const profile = profileProvenTraderTransactions(transactions, wallet);
+  assert.equal(profile.winRate, 0.5);
+  assert.ok((profile.profitFactor ?? 0) >= 2);
+  assert.ok(profile.realizedPnlSol >= 0.25);
+  assert.equal(profile.eligible, true);
+});
+
+test("rejects a low win rate when payoff evidence is not strong enough", () => {
+  const nowSec = Math.floor(Date.now() / 1000);
+  const transactions: HeliusProfileTransaction[] = [];
+
+  for (let index = 0; index < 12; index += 1) {
+    const mint = `Weak${index % 4}11111111111111111111111111111111`;
+    const opened = nowSec - (30 - index * 2) * 3_600;
+    transactions.push(swap(opened, mint, 100, -1));
+    transactions.push(
+      swap(opened + 1_800, mint, -100, index < 6 ? 1.25 : 0.8)
+    );
+  }
+
+  const profile = profileProvenTraderTransactions(transactions, wallet);
+  assert.equal(profile.winRate, 0.5);
+  assert.equal(profile.eligible, false);
+  assert.ok(
+    profile.rejectionReasons.includes("leader_win_rate_or_expectancy_too_low")
+  );
+});
+
 test("ignores sells whose cost basis predates the lookback", () => {
   const nowSec = Math.floor(Date.now() / 1000);
   const profile = profileProvenTraderTransactions(

@@ -5,6 +5,12 @@ export const PROVEN_TRADER_RULES = {
   minProfitFactor: 1.4,
   minRealizedPnlSol: 0.1,
   maxDrawdownToGrossProfit: 0.75,
+  // A lower hit rate can still have strong positive expectancy when winners
+  // are much larger than losses. This exception requires a deeper sample and
+  // substantially stronger profit evidence.
+  asymmetricMinClosedTrades: 12,
+  asymmetricMinProfitFactor: 2,
+  asymmetricMinRealizedPnlSol: 0.25,
 } as const;
 
 export interface ProvenTraderSignalProfile {
@@ -41,8 +47,15 @@ export function provenTraderProfileReasons(
       `leader_distinct_tokens_below_${PROVEN_TRADER_RULES.minDistinctClosedTokens}`
     );
   }
-  if (profile.winRate < PROVEN_TRADER_RULES.minWinRate) {
-    reasons.push("leader_win_rate_too_low");
+  const hasHighWinRate = profile.winRate >= PROVEN_TRADER_RULES.minWinRate;
+  const hasStrongAsymmetricExpectancy =
+    profile.closedTrades >= PROVEN_TRADER_RULES.asymmetricMinClosedTrades &&
+    profile.profitFactor !== null &&
+    profile.profitFactor >= PROVEN_TRADER_RULES.asymmetricMinProfitFactor &&
+    profile.realizedPnlSol >=
+      PROVEN_TRADER_RULES.asymmetricMinRealizedPnlSol;
+  if (!hasHighWinRate && !hasStrongAsymmetricExpectancy) {
+    reasons.push("leader_win_rate_or_expectancy_too_low");
   }
   if (
     profile.profitFactor === null ||
