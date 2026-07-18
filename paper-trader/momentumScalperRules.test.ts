@@ -117,10 +117,10 @@ test("rejects today's low-volume negative-15m bounce", () => {
   assert.ok(result.reasons.includes("five_minute_volume_too_low"));
 });
 
-test("keeps paper churn and repeat-token entries bounded", () => {
-  assert.equal(SCALP_RULES.maxDailyEntries, 8);
+test("uses larger paper positions and a higher daily opportunity cap", () => {
+  assert.equal(SCALP_RULES.maxDailyEntries, 12);
   assert.equal(SCALP_RULES.cooldownMinutes, 30);
-  assert.equal(SCALP_RULES.fixedSizeSol, 0.25);
+  assert.equal(SCALP_RULES.fixedSizeSol, 0.30);
 });
 
 test("round-trip friction is charged before paper profit", () => {
@@ -141,12 +141,36 @@ test("turns a strong winner into a runner instead of taking early profit", () =>
   assert.equal(strongWinner, null);
 });
 
-test("trails a runner after a two-point giveback from peak", () => {
+test("allows a two-point giveback below an eight-percent peak", () => {
   const now = Date.now();
   const result = decideScalpExit({
     entryPriceUsd: 1,
-    currentPriceUsd: 1.07,
-    peakPriceUsd: 1.10,
+    currentPriceUsd: 1.055,
+    peakPriceUsd: 1.08,
+    openedAtMs: now - 12 * 60_000,
+    nowMs: now,
+  });
+  assert.equal(result?.reason, "trailing_stop");
+});
+
+test("tightens to a one-and-a-half-point giveback after an eight-percent peak", () => {
+  const now = Date.now();
+  const result = decideScalpExit({
+    entryPriceUsd: 1,
+    currentPriceUsd: 1.085,
+    peakPriceUsd: 1.105,
+    openedAtMs: now - 12 * 60_000,
+    nowMs: now,
+  });
+  assert.equal(result?.reason, "trailing_stop");
+});
+
+test("tightens to a one-point giveback after a fifteen-percent peak", () => {
+  const now = Date.now();
+  const result = decideScalpExit({
+    entryPriceUsd: 1,
+    currentPriceUsd: 1.16,
+    peakPriceUsd: 1.175,
     openedAtMs: now - 12 * 60_000,
     nowMs: now,
   });
@@ -165,12 +189,12 @@ test("keeps the ten-minute maximum for trades that never become runners", () => 
   assert.equal(result?.reason, "max_hold_time");
 });
 
-test("caps exceptional spikes at fifteen percent net", () => {
+test("caps exceptional spikes at twenty-five percent net", () => {
   const now = Date.now();
   const result = decideScalpExit({
     entryPriceUsd: 1,
-    currentPriceUsd: 1.17,
-    peakPriceUsd: 1.17,
+    currentPriceUsd: 1.27,
+    peakPriceUsd: 1.27,
     openedAtMs: now - 60_000,
     nowMs: now,
   });
