@@ -68,9 +68,10 @@ async function runOnce(): Promise<void> {
 }
 
 export function startAuditedWalletDiscoveryScheduler(): void {
+  void runOnce();
   setInterval(() => void runOnce(), INTERVAL_HOURS * 3_600_000);
   console.log(
     `[wallet-discovery-audit] enabled every ${INTERVAL_HOURS}h with persistent run logging; ` +
-      `first scheduled run in ${INTERVAL_HOURS}h`
+      "initial run started"
   );
 }

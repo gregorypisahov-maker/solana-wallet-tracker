@@ -18,7 +18,9 @@
 
 import { config } from "./config";
 import { evaluateEntry } from "./entryFilter";
+import { applyEntryFriction, applyExitFriction } from "./executionFriction";
 import { getPriceUsd } from "./priceFeed";
+import { REGULAR_STRATEGY_VERSION } from "./strategyVersion";
 import {
   loadState,
   saveState,
@@ -167,15 +169,26 @@ export async function onAlert(
 async function processAlert(
   alert: AlertInput
 ): Promise<void> {
+  alert = {
+    ...alert,
+    signalSource: alert.signalSource ?? "wallet_consensus",
+    strategyVersion: REGULAR_STRATEGY_VERSION,
+  };
+  const sourceLabel =
+    alert.signalSource === "proven_trader_copy"
+      ? "verified profitable trader"
+      : "wallet consensus";
+
   console.log(
     `[PAPER RECEIVED] ${alert.tokenSymbol} | ` +
-      `score ${alert.score} | wallets ${alert.walletCount}`
+      `score ${alert.score} | wallets ${alert.walletCount} | ${sourceLabel}`
   );
 
   // This confirms in Telegram that onAlert() was reached.
   await notify(
     `🔎 <b>[PAPER] Alert received</b>\n\n` +
       `Token: <b>${alert.tokenSymbol}</b>\n` +
+      `Signal: <b>${sourceLabel}</b>\n` +
       `Score: ${alert.score}\n` +
       `Wallets: ${alert.walletCount}\n` +
       `Total bought: ${alert.totalBoughtSol.toFixed(2)} SOL\n` +
@@ -306,7 +319,10 @@ async function processAlert(
 
   try {
     const priceData = await getPriceUsd(alert.mint);
-    entryPrice = priceData.priceUsd;
+    entryPrice = applyEntryFriction(
+      priceData.priceUsd,
+      config.execution.entryFrictionPct
+    );
 
     if (
       !Number.isFinite(entryPrice) ||
@@ -336,7 +352,10 @@ async function processAlert(
 
   const sizeSol =
     state.bankrollSol *
-    config.position.sizePctPerTrade;
+    config.position.sizePctPerTrade *
+    (alert.signalSource === "proven_trader_copy"
+      ? config.position.provenTraderSizeMultiplier
+      : 1);
 
   if (
     !Number.isFinite(sizeSol) ||
@@ -409,6 +428,7 @@ async function processAlert(
     await notify(
       `🟢 <b>[PAPER] Position opened</b>\n\n` +
         `Token: <b>${alert.tokenSymbol}</b>\n` +
+        `Signal: <b>${sourceLabel}</b>\n` +
         `Size: ${sizeSol.toFixed(3)} SOL\n` +
         `Entry price: $${entryPrice}\n` +
         `Score: ${alert.score}\n` +
@@ -417,6 +437,11 @@ async function processAlert(
         `Market cap: $${alert.marketCapUsd.toLocaleString()}\n` +
         `Liquidity: $${alert.liquidityUsd.toLocaleString()}\n` +
         `Liquidity/MCap: ${(evaluation.liqToMcap * 100).toFixed(1)}%\n` +
+        `Paper friction: ${(
+          (config.execution.entryFrictionPct +
+            config.execution.exitFrictionPct) *
+          100
+        ).toFixed(1)}% round trip\n` +
         `Cash remaining: ${state.bankrollSol.toFixed(3)} SOL`
     );
   }
@@ -436,7 +461,10 @@ async function processOpenPositions(): Promise<void> {
 
     try {
       const priceData = await getPriceUsd(mint);
-      currentPrice = priceData.priceUsd;
+      currentPrice = applyExitFriction(
+        priceData.priceUsd,
+        config.execution.exitFrictionPct
+      );
 
       if (
         !Number.isFinite(currentPrice) ||

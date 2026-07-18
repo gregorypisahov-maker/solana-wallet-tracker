@@ -1,6 +1,10 @@
 import "dotenv/config";
 import { PublicKey } from "@solana/web3.js";
 import { getSupabaseAdmin } from "../lib/supabase";
+import {
+  fetchProvenTraderProfile,
+  ProvenTraderProfile,
+} from "./provenTraderProfile";
 
 const supabase = getSupabaseAdmin();
 
@@ -12,7 +16,7 @@ const MIN_MEDIAN_ENTRY_DELAY_MIN = 60;
 const TRIAL_MIN_MEDIAN_ENTRY_DELAY_MIN = 120;
 const MAX_PCT_BUYS_UNDER_30_MIN = 0.5;
 const MAX_SWAP_FREQUENCY_PER_DAY = 200;
-const CHURN_PROFILE_VERSION = 2;
+const CHURN_PROFILE_VERSION = 3;
 const MAX_DISTINCT_TOKEN_CREATION_LOOKUPS = 24;
 const PROFILE_WALLET_DELAY_MS = 2_000;
 const RETRY_DELAYS_MS = [2_000, 8_000, 30_000];
@@ -93,6 +97,7 @@ interface EntryTimingProfile {
 
 interface ProfiledCandidate extends SeedCandidate {
   profile: EntryTimingProfile;
+  provenTrader: ProvenTraderProfile;
 }
 
 class HttpStatusError extends Error {
@@ -381,7 +386,11 @@ async function buildEntryTimingProfile(address: string, apiKey: string): Promise
   return profile;
 }
 
-function metricsFor(candidate: SeedCandidate, profile: EntryTimingProfile): Record<string, unknown> {
+function metricsFor(
+  candidate: SeedCandidate,
+  profile: EntryTimingProfile,
+  provenTrader?: ProvenTraderProfile
+): Record<string, unknown> {
   return {
     median_entry_delay_min:
       profile.medianEntryDelayMin == null ? null : Number(profile.medianEntryDelayMin.toFixed(2)),
@@ -398,6 +407,7 @@ function metricsFor(candidate: SeedCandidate, profile: EntryTimingProfile): Reco
     seed_score_total: candidate.seedScoreTotal,
     max_seed_score: candidate.maxSeedScore,
     discovery_score: profile.discoveryScore,
+    proven_trader_profile: provenTrader ?? null,
     seed_tokens: candidate.seedTokens,
     profile_pending_retry: false,
     profiled_at: new Date().toISOString(),
@@ -497,18 +507,39 @@ async function profileCandidates(candidates: SeedCandidate[]): Promise<ProfiledC
   for (const candidate of candidates.slice(0, MAX_CANDIDATES_TO_PROFILE)) {
     try {
       const profile = await buildEntryTimingProfile(candidate.address, apiKey);
-      const metrics = metricsFor(candidate, profile);
-      if (profile.rejectionReasons.length > 0) {
-        await logDiscoveryRejection(candidate.address, "candidate", profile.rejectionReasons, metrics);
+      const provenTrader = await fetchProvenTraderProfile({
+        wallet: candidate.address,
+        apiKey,
+        limit: PROFILE_MAX_SWAPS,
+        timeoutMs: REQUEST_TIMEOUT_MS,
+      });
+      const rejectionReasons = [
+        ...profile.rejectionReasons,
+        ...provenTrader.rejectionReasons,
+      ];
+      const metrics = metricsFor(candidate, profile, provenTrader);
+      if (rejectionReasons.length > 0) {
+        await logDiscoveryRejection(
+          candidate.address,
+          "candidate",
+          rejectionReasons,
+          metrics
+        );
       } else {
-        profiled.push({ ...candidate, profile });
+        profiled.push({ ...candidate, profile, provenTrader });
       }
     } catch (error) {
       console.warn(`[wallet-discovery] candidate profile pending retry ${candidate.address}:`, error);
     }
     await sleep(PROFILE_WALLET_DELAY_MS);
   }
-  return profiled.sort((a, b) => b.profile.discoveryScore - a.profile.discoveryScore);
+  return profiled.sort(
+    (a, b) =>
+      b.provenTrader.realizedPnlSol - a.provenTrader.realizedPnlSol ||
+      (b.provenTrader.profitFactor ?? 0) -
+        (a.provenTrader.profitFactor ?? 0) ||
+      b.profile.discoveryScore - a.profile.discoveryScore
+  );
 }
 
 function candidateFromRow(row: { address: string; discovery_metrics: unknown }): SeedCandidate {
@@ -540,14 +571,24 @@ async function reevaluateExistingTrials(): Promise<void> {
       prior.profile_pending_retry !== true &&
       Number(prior.churn_profile_version ?? 0) >= CHURN_PROFILE_VERSION &&
       typeof prior.unprofiled_reason_counts === "object" &&
+      typeof prior.proven_trader_profile === "object" &&
       !String(row.auto_disable_reason ?? "").startsWith("retroactive_profile_error:");
     if (profileCurrent) continue;
 
     const candidate = candidateFromRow(row);
     try {
       const profile = await buildEntryTimingProfile(row.address, apiKey);
-      const metrics = metricsFor(candidate, profile);
-      const reasons = [...profile.rejectionReasons];
+      const provenTrader = await fetchProvenTraderProfile({
+        wallet: row.address,
+        apiKey,
+        limit: PROFILE_MAX_SWAPS,
+        timeoutMs: REQUEST_TIMEOUT_MS,
+      });
+      const metrics = metricsFor(candidate, profile, provenTrader);
+      const reasons = [
+        ...profile.rejectionReasons,
+        ...provenTrader.rejectionReasons,
+      ];
       if (profile.medianEntryDelayMin != null && profile.medianEntryDelayMin < TRIAL_MIN_MEDIAN_ENTRY_DELAY_MIN) {
         reasons.push(`trial_median_entry_delay_too_low:${profile.medianEntryDelayMin.toFixed(2)}<120`);
       }
@@ -559,7 +600,7 @@ async function reevaluateExistingTrials(): Promise<void> {
             active: false,
             management_status: "disabled",
             auto_disabled_at: new Date().toISOString(),
-            auto_disable_reason: `discovery_entry_timing_rejected:${reasons.join("|")}`,
+            auto_disable_reason: `discovery_profit_or_timing_rejected:${reasons.join("|")}`,
             management_updated_at: new Date().toISOString(),
             discovery_metrics: metrics,
           })
@@ -624,7 +665,7 @@ export async function discoverTrialWallets(): Promise<{
         candidate.address,
         "trial_promotion",
         [`trial_median_entry_delay_too_low:${candidate.profile.medianEntryDelayMin.toFixed(2)}<120`],
-        metricsFor(candidate, candidate.profile)
+        metricsFor(candidate, candidate.profile, candidate.provenTrader)
       );
     }
   }
@@ -644,12 +685,18 @@ export async function discoverTrialWallets(): Promise<{
     management_status: "trial",
     discovery_source: DISCOVERY_SOURCE,
     discovered_at: discoveredAt,
-    discovery_metrics: metricsFor(candidate, candidate.profile),
+    discovery_metrics: metricsFor(
+      candidate,
+      candidate.profile,
+      candidate.provenTrader
+    ),
   }));
   const { data, error } = await supabase.from("wallets").insert(rows).select("address");
   if (error) throw new Error(`Failed to insert trial wallets: ${error.message}`);
   const added = (data ?? []).map((row) => row.address);
-  console.log(`[wallet-discovery] added ${added.length} timing-qualified trial wallet(s)`);
+  console.log(
+    `[wallet-discovery] added ${added.length} timing-and-profit-qualified trial wallet(s)`
+  );
   return { fetched: seedCandidates.length, eligible: promotionEligible.length, added };
 }
 

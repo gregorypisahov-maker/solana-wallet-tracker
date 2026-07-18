@@ -25,7 +25,16 @@ export const config = {
   position: {
     simulatedBankrollSol: 10,
     sizePctPerTrade: 0.03,
+    // A single independently verified leader is useful, but carries less
+    // confirmation than multi-wallet consensus.
+    provenTraderSizeMultiplier: 0.5,
     maxConcurrentPositions: 3,
+  },
+
+  execution: {
+    // Charge 1.2% round-trip paper friction before reporting performance.
+    entryFrictionPct: 0.006,
+    exitFrictionPct: 0.006,
   },
 
   exit: {

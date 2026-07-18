@@ -47,6 +47,10 @@ import {
 import { ensureHeliusSwapWebhook } from "./heliusWebhookManager";
 import { selectHeliusWallets } from "./heliusWalletSelection";
 import { reduceWalletLimitForMonthlyBudget } from "./heliusBudget";
+import {
+  isProvenTraderSignalProfile,
+  ProvenTraderSignalProfile,
+} from "../paper-trader/provenTraderRules";
 
 const RECONCILE_INTERVAL_SECONDS = readBoundedNumber(
   process.env.RECONCILE_INTERVAL_SECONDS,
@@ -623,11 +627,35 @@ async function recomputeConsensus(): Promise<void> {
     return;
   }
 
+  const buyWalletAddresses = [
+    ...new Set(buys.map((buy) => buy.wallet_address)),
+  ];
+  const { data: walletProfiles, error: walletProfileError } = await supabase
+    .from("wallets")
+    .select("address, active, discovery_metrics")
+    .in("address", buyWalletAddresses)
+    .eq("active", true);
+  if (walletProfileError) {
+    console.error("Failed to load verified trader profiles:", walletProfileError);
+    return;
+  }
+  const verifiedTraderProfiles = new Map<
+    string,
+    ProvenTraderSignalProfile
+  >();
+  for (const wallet of walletProfiles ?? []) {
+    const profile = wallet.discovery_metrics?.proven_trader_profile;
+    if (isProvenTraderSignalProfile(profile)) {
+      verifiedTraderProfiles.set(wallet.address, profile);
+    }
+  }
+
   const byToken = new Map<
     string,
     {
       wallets: Set<string>;
       walletSol: Map<string, number>;
+      walletLast: Map<string, Date>;
       totalSol: number;
       first: Date;
       last: Date;
@@ -643,6 +671,8 @@ async function recomputeConsensus(): Promise<void> {
           new Set<string>(),
         walletSol:
           new Map<string, number>(),
+        walletLast:
+          new Map<string, Date>(),
         totalSol: 0,
         first:
           new Date(buy.tx_time),
@@ -667,6 +697,11 @@ async function recomputeConsensus(): Promise<void> {
     const txTime = new Date(
       buy.tx_time
     );
+
+    const priorWalletLast = current.walletLast.get(buy.wallet_address);
+    if (!priorWalletLast || txTime > priorWalletLast) {
+      current.walletLast.set(buy.wallet_address, txTime);
+    }
 
     if (txTime < current.first) {
       current.first = txTime;
@@ -703,12 +738,45 @@ async function recomputeConsensus(): Promise<void> {
   // Do not spend external API calls rescoring every token bought during the
   // whole 24-hour window. Only new raw consensus candidates need market data.
   // This keeps each monitor cycle short as transaction history grows.
-  const candidates = Array.from(byToken.entries()).filter(
-    ([tokenMint, agg]) =>
-      agg.wallets.size >= MIN_WALLETS_FOR_ALERT &&
-      agg.totalSol >= MIN_TOTAL_SOL &&
-      agg.last >= freshSignalCutoff &&
-      !recentlyAlertedMints.has(tokenMint)
+  const candidates = Array.from(byToken.entries()).flatMap(
+    ([tokenMint, agg]) => {
+      const consensusQualified =
+        agg.wallets.size >= MIN_WALLETS_FOR_ALERT;
+      const freshVerifiedLeader = [...agg.wallets].find((address) => {
+        const lastBuy = agg.walletLast.get(address);
+        return (
+          verifiedTraderProfiles.has(address) &&
+          lastBuy !== undefined &&
+          lastBuy >= freshSignalCutoff
+        );
+      });
+      const signalSource: "wallet_consensus" | "proven_trader_copy" | null = consensusQualified
+        ? "wallet_consensus"
+        : freshVerifiedLeader
+          ? "proven_trader_copy"
+          : null;
+
+      if (
+        !signalSource ||
+        agg.totalSol < MIN_TOTAL_SOL ||
+        agg.last < freshSignalCutoff ||
+        recentlyAlertedMints.has(tokenMint)
+      ) {
+        return [];
+      }
+
+      return [
+        {
+          tokenMint,
+          agg,
+          signalSource,
+          leaderWallet: freshVerifiedLeader,
+          leaderProfile: freshVerifiedLeader
+            ? verifiedTraderProfiles.get(freshVerifiedLeader)
+            : undefined,
+        },
+      ];
+    }
   );
 
   console.log(
@@ -716,10 +784,13 @@ async function recomputeConsensus(): Promise<void> {
       `${candidates.length} new raw candidates`
   );
 
-  for (const [
+  for (const {
     tokenMint,
     agg,
-  ] of candidates) {
+    signalSource,
+    leaderWallet,
+    leaderProfile,
+  } of candidates) {
     await sleep(700);
 
     const walletsCount =
@@ -847,8 +918,9 @@ async function recomputeConsensus(): Promise<void> {
     });
 
     const passesAlertFilter =
-      walletsCount >=
-        MIN_WALLETS_FOR_ALERT &&
+      (signalSource === "proven_trader_copy"
+        ? walletsCount >= 1 && Boolean(leaderProfile)
+        : walletsCount >= MIN_WALLETS_FOR_ALERT) &&
       score >=
         MIN_SCORE_FOR_ALERT &&
       liquidity >=
@@ -883,7 +955,9 @@ async function recomputeConsensus(): Promise<void> {
     }
 
     console.log(
-      "🚨 Wallet consensus alert"
+      signalSource === "proven_trader_copy"
+        ? "🎯 Verified profitable-trader copy alert"
+        : "🚨 Wallet consensus alert"
     );
 
     console.log(
@@ -912,16 +986,14 @@ async function recomputeConsensus(): Promise<void> {
       )}`
     );
 
-    // --- Phase 3: trust-weighted scoring ---
-    // This is purely additive — it never changes passesAlertFilter above,
-    // so the existing minimum-wallet-count / minimum-score gate and
-    // "no single wallet can trigger an alert alone" rule are untouched.
-    // It only refines the confidence context shown alongside an alert
-    // that already passed the real gate on its own.
+    // Consensus signals use paper-derived trust weighting. A single-wallet
+    // copy is allowed only when the separate on-chain realized-profit profile
+    // passed every proven-trader rule above.
     const participantAddresses = Array.from(agg.wallets);
-    const trustScoreMap = await getTrustScoresForWallets(
-      participantAddresses
-    );
+    const trustScoreMap =
+      signalSource === "wallet_consensus"
+        ? await getTrustScoresForWallets(participantAddresses)
+        : new Map<string, number>();
 
     const walletContributions = participantAddresses.map((address) => ({
       address,
@@ -931,22 +1003,34 @@ async function recomputeConsensus(): Promise<void> {
       trustScore: trustScoreMap.get(address) ?? 50,
     }));
 
-    const weighted = computeWeightedWalletScore(walletContributions);
+    const weighted =
+      signalSource === "wallet_consensus"
+        ? computeWeightedWalletScore(walletContributions)
+        : null;
 
-    console.log(
-      `[trust] ${market.symbol} confidence ${weighted.confidenceGrade} | ` +
-        `weighted score ${weighted.weightedWalletScore} (raw ${walletsCount}) | ` +
-        `avg trust ${weighted.averageTrustScore}`
-    );
-    console.log(
-      "[trust] Per-wallet contribution:",
-      weighted.perWalletContribution
-        .map(
-          (c) =>
-            `${c.address.slice(0, 6)}…=trust:${c.trustScore},weight:${c.weight}`
-        )
-        .join(" | ")
-    );
+    if (weighted) {
+      console.log(
+        `[trust] ${market.symbol} confidence ${weighted.confidenceGrade} | ` +
+          `weighted score ${weighted.weightedWalletScore} (raw ${walletsCount}) | ` +
+          `avg trust ${weighted.averageTrustScore}`
+      );
+      console.log(
+        "[trust] Per-wallet contribution:",
+        weighted.perWalletContribution
+          .map(
+            (c) =>
+              `${c.address.slice(0, 6)}…=trust:${c.trustScore},weight:${c.weight}`
+          )
+          .join(" | ")
+      );
+    } else {
+      console.log(
+        `[verified-trader] ${market.symbol} copied from ${leaderWallet?.slice(0, 6)}… | ` +
+          `${leaderProfile?.closedTrades ?? 0} closed swaps | ` +
+          `PF ${leaderProfile?.profitFactor?.toFixed(2) ?? "n/a"} | ` +
+          `PnL ${leaderProfile?.realizedPnlSol.toFixed(2) ?? "n/a"} SOL`
+      );
+    }
 
     await onAlert({
       tokenSymbol:
@@ -962,9 +1046,12 @@ async function recomputeConsensus(): Promise<void> {
         market.marketCap,
       liquidityUsd:
         market.liquidityUsd,
-      weightedWalletScore: weighted.weightedWalletScore,
-      averageTrustScore: weighted.averageTrustScore,
-      confidenceGrade: weighted.confidenceGrade,
+      weightedWalletScore: weighted?.weightedWalletScore,
+      averageTrustScore: weighted?.averageTrustScore,
+      confidenceGrade: weighted?.confidenceGrade,
+      signalSource,
+      leaderWallet,
+      leaderProfile,
     }).catch((err) =>
       console.error(
         "[paper-trader] onAlert failed:",
@@ -985,9 +1072,12 @@ async function recomputeConsensus(): Promise<void> {
         liquidityUsd:
           market.liquidityUsd,
         score,
-        weightedWalletScore: weighted.weightedWalletScore,
-        averageTrustScore: weighted.averageTrustScore,
-        confidenceGrade: weighted.confidenceGrade,
+        weightedWalletScore: weighted?.weightedWalletScore,
+        averageTrustScore: weighted?.averageTrustScore,
+        confidenceGrade: weighted?.confidenceGrade,
+        signalSource,
+        leaderWallet,
+        leaderProfile,
       })
     );
 

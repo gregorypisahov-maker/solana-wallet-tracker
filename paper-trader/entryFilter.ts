@@ -1,5 +1,6 @@
 // paper-trader/entryFilter.ts
 import { config } from "./config";
+import { isProvenTraderSignalProfile } from "./provenTraderRules";
 import { AlertInput } from "./types";
 
 export interface EntryEvaluation {
@@ -28,6 +29,15 @@ export function evaluateEntry(alert: AlertInput): EntryEvaluation {
     avgBuyPerWallet >= config.entry.eliteTwoWalletMinAvgBuySol &&
     averageTrustScore !== undefined &&
     averageTrustScore >= config.entry.eliteTwoWalletMinAvgTrustScore;
+  const requestedProvenTraderCopy =
+    alert.signalSource === "proven_trader_copy" && walletCount === 1;
+  const isVerifiedProvenTraderCopy =
+    requestedProvenTraderCopy &&
+    isProvenTraderSignalProfile(alert.leaderProfile);
+
+  if (requestedProvenTraderCopy && !isVerifiedProvenTraderCopy) {
+    reasons.push("proven-trader profile is missing or below qualification rules");
+  }
 
   if (score < config.entry.minScore) {
     reasons.push(`score ${score} below minimum ${config.entry.minScore}`);
@@ -35,7 +45,11 @@ export function evaluateEntry(alert: AlertInput): EntryEvaluation {
   if (score > config.entry.maxScore) {
     reasons.push(`score ${score} above maximum ${config.entry.maxScore}`);
   }
-  if (walletCount < config.entry.minWalletCount && !isEliteTwoWalletSignal) {
+  if (
+    walletCount < config.entry.minWalletCount &&
+    !isEliteTwoWalletSignal &&
+    !isVerifiedProvenTraderCopy
+  ) {
     reasons.push(
       walletCount === 2
         ? `2-wallet signal needs avg buy >= ${config.entry.eliteTwoWalletMinAvgBuySol} SOL and trust >= ${config.entry.eliteTwoWalletMinAvgTrustScore}`
@@ -48,9 +62,10 @@ export function evaluateEntry(alert: AlertInput): EntryEvaluation {
     );
   }
   if (
-    averageTrustScore === undefined ||
-    !Number.isFinite(averageTrustScore) ||
-    averageTrustScore < config.entry.minAvgTrustScore
+    !isVerifiedProvenTraderCopy &&
+    (averageTrustScore === undefined ||
+      !Number.isFinite(averageTrustScore) ||
+      averageTrustScore < config.entry.minAvgTrustScore)
   ) {
     reasons.push(
       `average trust ${averageTrustScore ?? "missing"} below minimum ${config.entry.minAvgTrustScore}`
@@ -73,6 +88,7 @@ export function evaluateEntry(alert: AlertInput): EntryEvaluation {
     reasons.push(`liquidity $${liquidityUsd} below floor $${config.entry.minLiquidityUsd}`);
   }
   if (
+    !isVerifiedProvenTraderCopy &&
     confidenceGrade &&
     config.entry.blockedConfidenceGrades.has(confidenceGrade)
   ) {

@@ -58,3 +58,50 @@ test("continues to block confidence grade D", () => {
   assert.equal(result.pass, false);
   assert.ok(result.reasons.includes("confidence grade D blocked"));
 });
+
+test("accepts one independently verified profitable leader at the normal market floors", () => {
+  const result = evaluateEntry({
+    ...eligibleTwoWalletAlert,
+    walletCount: 1,
+    totalBoughtSol: 1.6,
+    averageTrustScore: undefined,
+    confidenceGrade: undefined,
+    signalSource: "proven_trader_copy",
+    leaderWallet: "Leader111111111111111111111111111111111",
+    leaderProfile: {
+      profileVersion: 1,
+      closedTrades: 12,
+      distinctClosedTokens: 5,
+      wins: 8,
+      losses: 4,
+      winRate: 8 / 12,
+      realizedPnlSol: 1.2,
+      grossProfitSol: 2.1,
+      grossLossSol: 0.9,
+      profitFactor: 2.333,
+      maxDrawdownSol: 0.4,
+      maxDrawdownToGrossProfit: 0.19,
+      eligible: true,
+    },
+  });
+
+  assert.equal(result.pass, true);
+  assert.deepEqual(result.reasons, []);
+});
+
+test("does not let an unverified single wallet bypass consensus", () => {
+  const result = evaluateEntry({
+    ...eligibleTwoWalletAlert,
+    walletCount: 1,
+    totalBoughtSol: 1.6,
+    averageTrustScore: undefined,
+    confidenceGrade: undefined,
+    signalSource: "proven_trader_copy",
+  });
+
+  assert.equal(result.pass, false);
+  assert.ok(
+    result.reasons.some((reason) => reason.includes("proven-trader profile"))
+  );
+  assert.ok(result.reasons.some((reason) => reason.includes("walletCount 1")));
+});

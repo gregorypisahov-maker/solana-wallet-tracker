@@ -1,4 +1,6 @@
 // paper-trader/types.ts
+import type { ProvenTraderSignalProfile } from "./provenTraderRules";
+
 export interface AlertInput {
   tokenSymbol: string;
   mint: string;
@@ -13,6 +15,10 @@ export interface AlertInput {
   weightedWalletScore?: number;
   averageTrustScore?: number;
   confidenceGrade?: 'A' | 'B' | 'C' | 'D';
+  signalSource?: 'wallet_consensus' | 'proven_trader_copy';
+  leaderWallet?: string;
+  leaderProfile?: ProvenTraderSignalProfile;
+  strategyVersion?: string;
 }
 export interface OpenPosition {
   mint: string;

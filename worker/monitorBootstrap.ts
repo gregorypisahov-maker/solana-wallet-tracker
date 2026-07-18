@@ -5,6 +5,7 @@ import { startShadowStrategyScheduler } from "./shadowStrategyScheduler";
 import { startAdaptiveStrategyScheduler } from "../paper-trader/adaptiveStrategy";
 import { startPaperAutoResumeScheduler } from "./paperAutoResume";
 import { startMomentumScalperScheduler } from "../paper-trader/momentumScalper";
+import { startLiveReadinessScheduler } from "../paper-trader/liveReadiness";
 
 const WALLET_DISCOVERY_SERVICE = "Wallet Discovery & Monitor";
 const TRADING_ENGINE_SERVICE = "Trading Engine";
@@ -34,6 +35,7 @@ async function bootstrap(): Promise<void> {
     startAdaptiveStrategyScheduler();
     startShadowStrategyScheduler();
     startMomentumScalperScheduler();
+    startLiveReadinessScheduler();
   } else {
     console.log(
       `[monitor-bootstrap] trading schedulers disabled in ${process.env.RAILWAY_SERVICE_NAME}; ` +

@@ -65,12 +65,22 @@ export function formatConsensusAlert(data: {
   weightedWalletScore?: number;
   averageTrustScore?: number;
   confidenceGrade?: 'A' | 'B' | 'C' | 'D';
+  signalSource?: 'wallet_consensus' | 'proven_trader_copy';
+  leaderWallet?: string;
+  leaderProfile?: {
+    closedTrades: number;
+    winRate: number;
+    realizedPnlSol: number;
+    profitFactor: number | null;
+  };
 }) {
   const dex = `https://dexscreener.com/solana/${data.tokenMint}`;
   const gmgn = `https://gmgn.ai/sol/token/${data.tokenMint}`;
 
   const lines = [
-    '🚨 <b>Smart Wallet Consensus</b>',
+    data.signalSource === 'proven_trader_copy'
+      ? '🎯 <b>Verified Profitable Trader Copy</b>'
+      : '🚨 <b>Smart Wallet Consensus</b>',
     '',
     `🪙 <b>${data.symbol ?? 'Unknown'}</b>`,
     '',
@@ -80,6 +90,18 @@ export function formatConsensusAlert(data: {
     `💰 Market Cap: <b>$${Math.round(data.marketCap ?? 0).toLocaleString()}</b>`,
     `💧 Liquidity: <b>$${Math.round(data.liquidityUsd ?? 0).toLocaleString()}</b>`,
   ];
+
+  if (data.signalSource === 'proven_trader_copy' && data.leaderProfile) {
+    lines.push(
+      '',
+      `🧠 Leader: <code>${data.leaderWallet ?? 'verified'}</code>`,
+      `Closed swaps: <b>${data.leaderProfile.closedTrades}</b>`,
+      `Win rate: <b>${(data.leaderProfile.winRate * 100).toFixed(1)}%</b>`,
+      `Profit factor: <b>${data.leaderProfile.profitFactor?.toFixed(2) ?? 'n/a'}</b>`,
+      `Realized PnL: <b>${data.leaderProfile.realizedPnlSol.toFixed(2)} SOL</b>`,
+      'Paper size: <b>50% of normal</b>',
+    );
+  }
 
   const hasTrustData =
     data.weightedWalletScore !== undefined ||
