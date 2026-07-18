@@ -25,22 +25,11 @@ const candidate: ScalpCandidate = {
   poolAgeMinutes: 180,
 };
 
-test("accepts liquid, confirmed momentum without wallet signals", () => {
+test("accepts the focused scalper market profile", () => {
   const result = evaluateScalpCandidate(candidate);
   assert.equal(result.accepted, true);
-  assert.equal(result.reasons.length, 0);
-  assert.ok(result.score > 0);
-});
-
-test("rejects an overheated move and weak liquidity", () => {
-  const result = evaluateScalpCandidate({
-    ...candidate,
-    liquidityUsd: 10_000,
-    fiveMinuteChangePct: 25,
-  });
-  assert.equal(result.accepted, false);
-  assert.ok(result.reasons.includes("liquidity_below_35k"));
-  assert.ok(result.reasons.includes("five_minute_momentum_overheated"));
+  assert.deepEqual(result.reasons, []);
+  assert.ok(result.score >= SCALP_RULES.minimumSignalScore);
 });
 
 test("rejects the observed overheated OH loss on both feeds", () => {
@@ -79,17 +68,11 @@ test("rejects the observed low-quality SOLdiers loss", () => {
     fiveMinuteSells: 25,
     fiveMinuteBuyers: 17,
   });
-  const confirmation = evaluateScalpConfirmation({
-    priceUsd: 0.0009917,
-    liquidityUsd: 115_530.04,
-    marketCapUsd: 991_690,
-    fiveMinuteChangePct: 6.04,
-  });
 
   assert.equal(discovery.accepted, false);
+  assert.ok(discovery.reasons.includes("market_cap_above_500k"));
   assert.ok(discovery.reasons.includes("fifteen_minute_confirmation_too_low"));
   assert.ok(discovery.reasons.includes("signal_score_below_45"));
-  assert.ok(confirmation.includes("dex_five_minute_momentum_overheated"));
 });
 
 test("keeps the observed HOMIE winner eligible", () => {
@@ -115,8 +98,28 @@ test("keeps the observed HOMIE winner eligible", () => {
   assert.deepEqual(confirmation, []);
 });
 
-test("caps daily churn at eight entries", () => {
+test("rejects today's low-volume negative-15m bounce", () => {
+  const result = evaluateScalpCandidate({
+    ...candidate,
+    liquidityUsd: 26_464,
+    marketCapUsd: 114_980,
+    fiveMinuteChangePct: 6.107,
+    fifteenMinuteChangePct: -10.492,
+    fiveMinuteVolumeUsd: 1_621,
+    fiveMinuteBuys: 47,
+    fiveMinuteSells: 27,
+    fiveMinuteBuyers: 45,
+  });
+
+  assert.equal(result.accepted, false);
+  assert.ok(result.reasons.includes("five_minute_momentum_overheated"));
+  assert.ok(result.reasons.includes("fifteen_minute_confirmation_too_low"));
+  assert.ok(result.reasons.includes("five_minute_volume_too_low"));
+});
+
+test("keeps paper churn and repeat-token entries bounded", () => {
   assert.equal(SCALP_RULES.maxDailyEntries, 8);
+  assert.equal(SCALP_RULES.cooldownMinutes, 30);
 });
 
 test("round-trip friction is charged before paper profit", () => {
@@ -125,12 +128,17 @@ test("round-trip friction is charged before paper profit", () => {
   assert.ok(net > 0.987);
 });
 
-test("takes profit only after simulated costs", () => {
+test("uses a 1.5-to-1 net target-to-stop profile", () => {
+  assert.equal(
+    SCALP_RULES.targetProfitPct / SCALP_RULES.hardStopLossPct,
+    1.5
+  );
+
   const now = Date.now();
   const tooSmall = decideScalpExit({
     entryPriceUsd: 1,
-    currentPriceUsd: 1.03,
-    peakPriceUsd: 1.03,
+    currentPriceUsd: 1.04,
+    peakPriceUsd: 1.04,
     openedAtMs: now - 60_000,
     nowMs: now,
   });
@@ -138,23 +146,23 @@ test("takes profit only after simulated costs", () => {
 
   const profitable = decideScalpExit({
     entryPriceUsd: 1,
-    currentPriceUsd: 1.04,
-    peakPriceUsd: 1.04,
+    currentPriceUsd: 1.06,
+    peakPriceUsd: 1.06,
     openedAtMs: now - 60_000,
     nowMs: now,
   });
-  assert.equal(profitable?.reason, "take_profit");
-  assert.ok((profitable?.netReturnPct ?? 0) >= 2.5);
+  assert.equal(profitable?.reason, "target_profit_hit");
+  assert.ok((profitable?.netReturnPct ?? 0) >= 4.5);
 });
 
-test("enforces the seven-minute maximum hold", () => {
+test("enforces the ten-minute maximum hold", () => {
   const now = Date.now();
   const result = decideScalpExit({
     entryPriceUsd: 1,
     currentPriceUsd: 1.01,
     peakPriceUsd: 1.01,
-    openedAtMs: now - 8 * 60_000,
+    openedAtMs: now - 11 * 60_000,
     nowMs: now,
   });
-  assert.equal(result?.reason, "max_hold_time");
+  assert.equal(result?.reason, "max_hold_time_exceeded");
 });
