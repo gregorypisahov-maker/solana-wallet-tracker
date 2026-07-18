@@ -51,18 +51,22 @@ export const SCALP_RULES = {
   minBuySellRatio: 0.6,
   minPoolAgeMinutes: 60,
   minimumSignalScore: 45,
-  fixedSizeSol: 0.25,
+  fixedSizeSol: 0.30,
   maxConcurrentPositions: 1,
   // Strong winners become runners instead of being sold at the old small target.
-  targetProfitPct: 15,
+  targetProfitPct: 25,
   hardStopLossPct: 3.0,
   trailingActivationNetPct: 4.5,
-  trailingGivebackPct: 2.0,
+  trailingGivebackPctLow: 2.0,
+  trailingGivebackPctMid: 1.5,
+  trailingGivebackPctHigh: 1.0,
+  trailingMidPeakNetPct: 8,
+  trailingHighPeakNetPct: 15,
   maxHoldSeconds: 600,
   runnerMaxHoldSeconds: 1_800,
   entryFrictionPct: 0.6,
   exitFrictionPct: 0.6,
-  maxDailyEntries: 8,
+  maxDailyEntries: 12,
   dailyLossLimitPct: 0.15,
   maxConsecutiveLosses: 3,
   cooldownMinutes: 30,
@@ -221,17 +225,22 @@ export function decideScalpExit(input: {
     return result("hard_stop");
   }
 
-  // Once a winner reaches +4.5% net, let it run and only sell after a
-  // meaningful pullback from its peak. This captures outsized moves while
-  // still locking profit instead of depending on a failed close.
+  // Give a fresh runner room, then tighten protection as its peak expands.
+  const trailingGivebackPct =
+    peakNetReturnPct >= SCALP_RULES.trailingHighPeakNetPct
+      ? SCALP_RULES.trailingGivebackPctHigh
+      : peakNetReturnPct >= SCALP_RULES.trailingMidPeakNetPct
+        ? SCALP_RULES.trailingGivebackPctMid
+        : SCALP_RULES.trailingGivebackPctLow;
+
   if (
     peakNetReturnPct >= SCALP_RULES.trailingActivationNetPct &&
-    netReturnPct <= peakNetReturnPct - SCALP_RULES.trailingGivebackPct
+    netReturnPct <= peakNetReturnPct - trailingGivebackPct
   ) {
     return result("trailing_stop");
   }
 
-  // Emergency profit cap for exceptional spikes.
+  // Emergency cap only for an exceptional spike; normal winners trail.
   if (netReturnPct >= SCALP_RULES.targetProfitPct) {
     return result("take_profit");
   }
