@@ -13,11 +13,27 @@ import {
 } from "./momentumScalperRules";
 
 const supabase = getSupabaseAdmin();
-const GECKO_TRENDING_URL =
-  "https://api.geckoterminal.com/api/v2/networks/solana/trending_pools?page=1";
+const GECKO_DISCOVERY_FEEDS = [
+  {
+    name: "trending_5m_page_1",
+    url: "https://api.geckoterminal.com/api/v2/networks/solana/trending_pools?duration=5m&page=1",
+  },
+  {
+    name: "trending_1h_page_1",
+    url: "https://api.geckoterminal.com/api/v2/networks/solana/trending_pools?duration=1h&page=1",
+  },
+  {
+    name: "trending_1h_page_2",
+    url: "https://api.geckoterminal.com/api/v2/networks/solana/trending_pools?duration=1h&page=2",
+  },
+  {
+    name: "new_pools_page_1",
+    url: "https://api.geckoterminal.com/api/v2/networks/solana/new_pools?page=1",
+  },
+] as const;
 const DEX_TOKEN_URL = "https://api.dexscreener.com/tokens/v1/solana";
 const REQUEST_TIMEOUT_MS = 12_000;
-const STRATEGY_VERSION = "momentum_focused_profile_v4_2026_07_18";
+const STRATEGY_VERSION = "momentum_expanded_profile_v5_2026_07_18";
 const WRAPPED_SOL_MINT = "So11111111111111111111111111111111111111112";
 const STABLE_MINTS = new Set([
   WRAPPED_SOL_MINT,
@@ -191,19 +207,42 @@ function parseTrendingCandidate(row: any): ScalpCandidate | null {
 }
 
 async function loadTrendingCandidates(): Promise<ScalpCandidate[]> {
-  const body = (await fetchJson(GECKO_TRENDING_URL, {
-    Accept: "application/vnd.api+json;version=20230302",
-    "User-Agent": "solana-wallet-tracker-paper-scalper/1.0",
-  })) as any;
-  const rows = Array.isArray(body?.data) ? body.data : [];
+  const results = await Promise.allSettled(
+    GECKO_DISCOVERY_FEEDS.map(async (feed) => ({
+      feed,
+      body: (await fetchJson(feed.url, {
+        Accept: "application/vnd.api+json;version=20230302",
+        "User-Agent": "solana-wallet-tracker-paper-scalper/1.0",
+      })) as any,
+    }))
+  );
+  const successful = results.filter(
+    (result): result is PromiseFulfilledResult<{
+      feed: (typeof GECKO_DISCOVERY_FEEDS)[number];
+      body: any;
+    }> => result.status === "fulfilled"
+  );
+
+  for (const result of results) {
+    if (result.status === "rejected") {
+      console.warn("[momentum-scalper] discovery feed failed:", result.reason);
+    }
+  }
+  if (successful.length === 0) {
+    throw new Error("all GeckoTerminal discovery feeds failed");
+  }
+
   const byMint = new Map<string, ScalpCandidate>();
 
-  for (const row of rows) {
-    const candidate = parseTrendingCandidate(row);
-    if (!candidate) continue;
-    const existing = byMint.get(candidate.mint);
-    if (!existing || candidate.liquidityUsd > existing.liquidityUsd) {
-      byMint.set(candidate.mint, candidate);
+  for (const { value } of successful) {
+    const rows = Array.isArray(value.body?.data) ? value.body.data : [];
+    for (const row of rows) {
+      const candidate = parseTrendingCandidate(row);
+      if (!candidate) continue;
+      const existing = byMint.get(candidate.mint);
+      if (!existing || candidate.liquidityUsd > existing.liquidityUsd) {
+        byMint.set(candidate.mint, candidate);
+      }
     }
   }
   return [...byMint.values()];
@@ -361,7 +400,7 @@ async function openScalp(
   const positionId = `scalp_${randomUUID()}`;
   const entrySnapshot = {
     strategyVersion: STRATEGY_VERSION,
-    source: "geckoterminal_trending",
+    source: "geckoterminal_trending_and_new",
     candidate,
     score: selected.evaluation.score,
     dexConfirmation: market,
@@ -463,6 +502,7 @@ export async function runMomentumScalperScan(): Promise<void> {
     let selected: EvaluatedCandidate | null = null;
     let selectedMarket: DexSnapshot | null = null;
     let confirmationRejections = 0;
+    const confirmationRejectionReasons = new Set<string>();
     let cooldownRejections = 0;
 
     for (const item of qualified) {
@@ -476,6 +516,9 @@ export async function runMomentumScalperScan(): Promise<void> {
         const confirmationReasons = evaluateScalpConfirmation(market);
         if (confirmationReasons.length > 0) {
           confirmationRejections += 1;
+          for (const reason of confirmationReasons) {
+            confirmationRejectionReasons.add(reason);
+          }
           console.log(
             `[MOMENTUM SCALP REJECT] ${item.candidate.symbol}: ` +
               confirmationReasons.join(",")
@@ -487,6 +530,7 @@ export async function runMomentumScalperScan(): Promise<void> {
         break;
       } catch (error) {
         confirmationRejections += 1;
+        confirmationRejectionReasons.add("dex_fetch_failed");
         console.warn(
           `[momentum-scalper] Dex confirmation failed for ${item.candidate.symbol}:`,
           error
@@ -502,7 +546,11 @@ export async function runMomentumScalperScan(): Promise<void> {
     const message = selected
       ? "paper_scalp_opened"
       : confirmationRejections > 0
-        ? `dex_confirmation_rejected:${confirmationRejections}`
+        ? `dex_confirmation_rejected:${confirmationRejections}:${[
+            ...confirmationRejectionReasons,
+          ]
+            .slice(0, 3)
+            .join(",")}`
         : cooldownRejections > 0
           ? "qualified_candidates_in_cooldown"
           : top
