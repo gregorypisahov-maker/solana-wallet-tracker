@@ -17,7 +17,7 @@ const GECKO_TRENDING_URL =
   "https://api.geckoterminal.com/api/v2/networks/solana/trending_pools?page=1";
 const DEX_TOKEN_URL = "https://api.dexscreener.com/tokens/v1/solana";
 const REQUEST_TIMEOUT_MS = 12_000;
-const STRATEGY_VERSION = "momentum_shadow_profile_v3_2026_07_18";
+const STRATEGY_VERSION = "momentum_focused_profile_v4_2026_07_18";
 const WRAPPED_SOL_MINT = "So11111111111111111111111111111111111111112";
 const STABLE_MINTS = new Set([
   WRAPPED_SOL_MINT,
