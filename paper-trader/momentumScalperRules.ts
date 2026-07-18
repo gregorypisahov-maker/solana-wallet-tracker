@@ -48,7 +48,7 @@ export const SCALP_RULES = {
   minBuyersIn5min: 12,
   buyToSellRatio: 0.6,
   minPositiveMomentum: 1.5,
-  fixedSizeSol: 0.08,
+  fixedSizeSol: 0.20,
   maxConcurrentPositions: 1,
   targetProfitPct: 2.5,
   hardStopLossPct: 3.0,
