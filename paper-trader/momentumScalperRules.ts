@@ -40,9 +40,9 @@ export type ExitDecision = {
 export const SCALP_RULES = {
   minLiquidityUsd: 35_000,
   minMarketCapUsd: 100_000,
-  maxMarketCapUsd: 500_000,
+  maxMarketCapUsd: 750_000,
   minFiveMinuteChangePct: 2,
-  maxFiveMinuteChangePct: 6,
+  maxFiveMinuteChangePct: 8,
   minFifteenMinuteChangePct: 5,
   maxFifteenMinuteChangePct: 20,
   minFiveMinuteVolumeUsd: 2_500,
@@ -98,7 +98,7 @@ export function evaluateScalpCandidate(
     reasons.push("market_cap_below_100k");
   }
   if (candidate.marketCapUsd > SCALP_RULES.maxMarketCapUsd) {
-    reasons.push("market_cap_above_500k");
+    reasons.push("market_cap_above_750k");
   }
   if (candidate.fiveMinuteChangePct < SCALP_RULES.minFiveMinuteChangePct) {
     reasons.push("five_minute_momentum_too_low");
@@ -183,7 +183,7 @@ export function evaluateScalpConfirmation(
     reasons.push("dex_market_cap_below_100k");
   }
   if (market.marketCapUsd > SCALP_RULES.maxMarketCapUsd) {
-    reasons.push("dex_market_cap_above_500k");
+    reasons.push("dex_market_cap_above_750k");
   }
   if (market.fiveMinuteChangePct < SCALP_RULES.minFiveMinuteChangePct) {
     reasons.push("dex_five_minute_momentum_too_low");
