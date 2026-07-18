@@ -216,10 +216,10 @@ export function decideScalpExit(input: {
   });
 
   if (netReturnPct <= -SCALP_RULES.hardStopLossPct) {
-    return result("hard_stop_loss");
+    return result("hard_stop");
   }
   if (netReturnPct >= SCALP_RULES.targetProfitPct) {
-    return result("target_profit_hit");
+    return result("take_profit");
   }
   if (
     peakNetReturnPct >= SCALP_RULES.trailingActivationNetPct &&
@@ -228,7 +228,7 @@ export function decideScalpExit(input: {
     return result("trailing_stop");
   }
   if (holdSeconds >= SCALP_RULES.maxHoldSeconds) {
-    return result("max_hold_time_exceeded");
+    return result("max_hold_time");
   }
 
   return null;
