@@ -14,7 +14,7 @@ function shouldStartWalletManagement(): boolean {
   return !serviceName || serviceName === WALLET_DISCOVERY_SERVICE;
 }
 
-function shouldStartMomentumScalper(): boolean {
+function shouldStartTradingStrategies(): boolean {
   const serviceName = process.env.RAILWAY_SERVICE_NAME?.trim();
   return !serviceName || serviceName === TRADING_ENGINE_SERVICE;
 }
@@ -29,16 +29,18 @@ async function bootstrap(): Promise<void> {
         `owned by ${WALLET_DISCOVERY_SERVICE}`
     );
   }
-  startAdaptiveStrategyScheduler();
-  startShadowStrategyScheduler();
-  if (shouldStartMomentumScalper()) {
+
+  if (shouldStartTradingStrategies()) {
+    startAdaptiveStrategyScheduler();
+    startShadowStrategyScheduler();
     startMomentumScalperScheduler();
   } else {
     console.log(
-      `[momentum-scalper] disabled on ${process.env.RAILWAY_SERVICE_NAME}; ` +
-        `only ${TRADING_ENGINE_SERVICE} owns the scalper scheduler`
+      `[monitor-bootstrap] trading schedulers disabled in ${process.env.RAILWAY_SERVICE_NAME}; ` +
+        `owned by ${TRADING_ENGINE_SERVICE}`
     );
   }
+
   startPaperAutoResumeScheduler();
   await import("./monitor");
 }
