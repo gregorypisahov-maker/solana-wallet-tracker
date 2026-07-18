@@ -40,8 +40,8 @@ export type ExitDecision = {
 // ==== SCALPER CONFIGURATION (PROFITABILITY OPTIMIZED) ====
 export const SCALP_RULES = {
   minScore: 45,
-  minLiquidityUsd: 50_000,
-  maxMarketCapUsd: 150_000,
+  minLiquidityUsd: 15_000,
+  maxMarketCapUsd: 120_000,
   minPoolAgeMinutes: 3,
   maxPoolAgeHours: 72,
   minFiveMinVolumeUsd: 25_000,
@@ -50,9 +50,9 @@ export const SCALP_RULES = {
   minPositiveMomentum: 1.5,
   fixedSizeSol: 0.20,
   maxConcurrentPositions: 1,
-  targetProfitPct: 2.5,
+  targetProfitPct: 4.5,
   hardStopLossPct: 3.0,
-  maxHoldSeconds: 420,
+  maxHoldSeconds: 600,
   entryFrictionPct: 0.6,
   exitFrictionPct: 0.6,
   maxDailyEntries: 12,
