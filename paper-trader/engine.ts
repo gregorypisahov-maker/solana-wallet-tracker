@@ -483,6 +483,22 @@ async function processOpenPositions(): Promise<void> {
     }
 
     if (
+      position.peakMultiple >=
+        config.exit.breakEvenActivationMultiple &&
+      currentMultiple <= 1
+    ) {
+      await closePosition(
+        position,
+        currentPrice,
+        position.remainingPct,
+        "break_even_protection",
+        state
+      );
+
+      continue;
+    }
+
+    if (
       holdMinutes >=
       config.exit.maxHoldMinutes
     ) {
@@ -497,7 +513,10 @@ async function processOpenPositions(): Promise<void> {
       continue;
     }
 
-    if (position.peakMultiple > 1) {
+    if (
+      position.peakMultiple >=
+      config.exit.trailingActivationMultiple
+    ) {
       const trailingFloor =
         position.peakMultiple *
         (1 - config.exit.trailingStopPct);
