@@ -10,11 +10,15 @@ export const config = {
     minAvgBuyPerWallet: 1.25,
     minAvgTrustScore: 55,
     eliteTwoWalletMinAvgBuySol: 1.25,
-    eliteTwoWalletMinAvgTrustScore: 60,
+    // Historical results were profitable from trust 55 upward. Let two-wallet
+    // signals use that same proven floor while retaining the larger-buy rule.
+    eliteTwoWalletMinAvgTrustScore: 55,
     minLiquidityToMcapRatio: 0.15,
     minMarketCapUsd: 20_000,
     maxMarketCapUsd: 200_000,
-    minLiquidityUsd: 15_000,
+    // Recent otherwise-valid signals clustered just below the old $15k floor.
+    // The liquidity/mcap guard still rejects thin pools independently.
+    minLiquidityUsd: 14_000,
     blockedConfidenceGrades: new Set(["D"]),
   },
 
