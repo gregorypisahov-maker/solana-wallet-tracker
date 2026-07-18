@@ -17,7 +17,7 @@ const GECKO_TRENDING_URL =
   "https://api.geckoterminal.com/api/v2/networks/solana/trending_pools?page=1";
 const DEX_TOKEN_URL = "https://api.dexscreener.com/tokens/v1/solana";
 const REQUEST_TIMEOUT_MS = 12_000;
-const STRATEGY_VERSION = "momentum_quality_v2_2026_07_17";
+const STRATEGY_VERSION = "momentum_shadow_profile_v3_2026_07_18";
 const WRAPPED_SOL_MINT = "So11111111111111111111111111111111111111112";
 const STABLE_MINTS = new Set([
   WRAPPED_SOL_MINT,
@@ -366,8 +366,8 @@ async function openScalp(
     score: selected.evaluation.score,
     dexConfirmation: market,
     friction: {
-      entryPct: SCALP_RULES.entryFrictionPct * 100,
-      exitPct: SCALP_RULES.exitFrictionPct * 100,
+      entryPct: SCALP_RULES.entryFrictionPct,
+      exitPct: SCALP_RULES.exitFrictionPct,
     },
   };
 
@@ -400,7 +400,7 @@ async function openScalp(
       `Liquidity: <b>$${Math.round(market.liquidityUsd).toLocaleString()}</b>`,
       `Signal score: <b>${selected.evaluation.score}/100</b>`,
       "",
-      "Target: +2.5% net • Stop: -3.0% net • Max hold: 7 min",
+      "Target: +4.5% net • Stop: -3.0% net • Max hold: 10 min",
       "Includes 1.2% simulated round-trip friction.",
       "",
       `<a href="https://dexscreener.com/solana/${candidate.mint}">Open DexScreener</a>`,
@@ -577,8 +577,8 @@ export async function checkMomentumScalpPositions(): Promise<void> {
         priceMultiple: market.priceUsd / entryPriceUsd,
         netMultiple: decision.netMultiple,
         friction: {
-          entryPct: SCALP_RULES.entryFrictionPct * 100,
-          exitPct: SCALP_RULES.exitFrictionPct * 100,
+          entryPct: SCALP_RULES.entryFrictionPct,
+          exitPct: SCALP_RULES.exitFrictionPct,
         },
       };
 
