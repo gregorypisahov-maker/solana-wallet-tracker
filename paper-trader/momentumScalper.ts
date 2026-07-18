@@ -354,7 +354,7 @@ async function openScalp(
     numberValue(state.bankroll_sol)
   );
   if (sizeSol < SCALP_RULES.fixedSizeSol) {
-    throw new Error("paper bankroll below the fixed 0.05 SOL scalp size");
+    throw new Error(`paper bankroll below the fixed ${SCALP_RULES.fixedSizeSol.toFixed(2)} SOL scalp size`);
   }
 
   const openedAt = new Date().toISOString();
