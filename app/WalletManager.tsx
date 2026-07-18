@@ -23,7 +23,7 @@ type OpsData = {
     replacementsLastRun: number;
     leaders: Array<{ wallet_address: string; trust_score: number; completed_trades: number; win_rate: number; profit_factor: number | null }>;
   };
-  decisions: Array<{ token: string; mint: string; score: number; wallets: number; updatedAt: string | null; accepted: boolean; reasons: string[] }>;
+  decisions: Array<{ token: string; mint: string; score: number; wallets: number; lane: string; updatedAt: string | null; accepted: boolean; reasons: string[] }>;
   coach: string[];
 };
 
@@ -149,8 +149,8 @@ export default function WalletManager({ onChanged }: Props) {
 
       <section className="grid two" style={{ marginBottom: 18 }}>
         <section className="panel">
-          <div className="panelHead"><h2>Entry decision viewer</h2><span>LATEST SIGNALS</span></div>
-          {!ops ? <div className="empty">Loading decisions…</div> : <div className="feed">{ops.decisions.slice(0, 8).map((decision) => <div className="feedRow" key={decision.mint}><i className={decision.accepted ? "up" : "down"}>{decision.accepted ? "✓" : "×"}</i><div><strong>{decision.token} · score {decision.score}</strong><small>{decision.reasons[0]}</small></div><div className="feedValue"><b className={decision.accepted ? "green" : "red"}>{decision.accepted ? "PASS" : "REJECT"}</b><small>{decision.wallets} wallets · {ago(decision.updatedAt)}</small></div></div>)}</div>}
+          <div className="panelHead"><h2>Signal evidence viewer</h2><span>MARKET PRE-CHECK</span></div>
+          {!ops ? <div className="empty">Loading signal evidence…</div> : <div className="feed">{ops.decisions.slice(0, 8).map((decision) => <div className="feedRow" key={decision.mint}><i className={decision.accepted ? "up" : "down"}>{decision.accepted ? "✓" : "×"}</i><div><strong>{decision.token} · score {decision.score}</strong><small>{decision.reasons[0]}</small></div><div className="feedValue"><b className={decision.accepted ? "green" : "red"}>{decision.accepted ? "PRE-CHECK" : "FILTERED"}</b><small>{decision.wallets} wallets · {decision.lane} · {ago(decision.updatedAt)}</small></div></div>)}</div>}
         </section>
         <section className="panel">
           <div className="panelHead"><h2>Strategy coach</h2><span>AUTO REVIEW</span></div>

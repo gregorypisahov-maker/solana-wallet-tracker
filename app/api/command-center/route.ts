@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { hasViewerAccess, unauthorized } from "@/lib/dashboardAuth";
+import { config } from "@/paper-trader/config";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -23,15 +24,22 @@ function decisionFor(token: any) {
   const averageBuy = wallets > 0 ? totalBuy / wallets : 0;
   const ratio = marketCap > 0 ? liquidity / marketCap : 0;
   const reasons: string[] = [];
+  const lane =
+    wallets >= config.entry.minWalletCount
+      ? "consensus path; wallet trust checked at execution"
+      : wallets === 2
+        ? `two-wallet path; avg trust ${config.entry.eliteTwoWalletMinAvgTrustScore}+ required`
+        : wallets === 1
+          ? "single-wallet path; verified profitable-trader profile required"
+          : "waiting for wallet evidence";
 
-  if (score < 10) reasons.push(`score ${score} below 10`);
-  if (score > 65) reasons.push(`score ${score} above late-entry ceiling 65`);
-  if (wallets < 3) reasons.push(`${wallets} wallets below 3-wallet consensus`);
-  if (averageBuy < 0.75) reasons.push(`average buy ${averageBuy.toFixed(2)} SOL below 0.75`);
-  if (liquidity < 15_000) reasons.push("liquidity below $15k");
-  if (ratio < 0.15) reasons.push(`liquidity/market-cap ${(ratio * 100).toFixed(0)}% below 15%`);
-  if (marketCap < 20_000) reasons.push("market cap below $20k");
-  if (marketCap > 200_000) reasons.push("market cap above $200k");
+  if (score < config.entry.minScore) reasons.push(`score ${score} below ${config.entry.minScore}`);
+  if (score > config.entry.maxScore) reasons.push(`score ${score} above late-entry ceiling ${config.entry.maxScore}`);
+  if (averageBuy < config.entry.minAvgBuyPerWallet) reasons.push(`average buy ${averageBuy.toFixed(2)} SOL below ${config.entry.minAvgBuyPerWallet}`);
+  if (liquidity < config.entry.minLiquidityUsd) reasons.push(`liquidity below $${Math.round(config.entry.minLiquidityUsd / 1000)}k`);
+  if (ratio < config.entry.minLiquidityToMcapRatio) reasons.push(`liquidity/market-cap ${(ratio * 100).toFixed(0)}% below ${config.entry.minLiquidityToMcapRatio * 100}%`);
+  if (marketCap < config.entry.minMarketCapUsd) reasons.push(`market cap below $${Math.round(config.entry.minMarketCapUsd / 1000)}k`);
+  if (marketCap > config.entry.maxMarketCapUsd) reasons.push(`market cap above $${Math.round(config.entry.maxMarketCapUsd / 1000)}k`);
   if (token.dump_flag) reasons.push("dump flag detected");
 
   return {
@@ -39,9 +47,10 @@ function decisionFor(token: any) {
     mint: token.token_mint,
     score,
     wallets,
+    lane,
     updatedAt: token.updated_at ?? token.last_buy_time,
     accepted: reasons.length === 0,
-    reasons: reasons.length ? reasons : ["passes visible market and consensus safeguards"],
+    reasons: reasons.length ? reasons : [`market pre-check passed; ${lane}`],
   };
 }
 
