@@ -4,28 +4,35 @@
 
 export const config = {
   entry: {
-    minScore: 8,
+    minScore: 10,
+    maxScore: 65,
     minWalletCount: 3,
-    minAvgBuyPerWallet: 1.5,
-    minLiquidityToMcapRatio: 0.08,
-    maxMarketCapUsd: 1_000_000,
+    minAvgBuyPerWallet: 1.25,
+    minAvgTrustScore: 55,
+    eliteTwoWalletMinAvgBuySol: 1.25,
+    eliteTwoWalletMinAvgTrustScore: 60,
+    minLiquidityToMcapRatio: 0.15,
+    minMarketCapUsd: 20_000,
+    maxMarketCapUsd: 200_000,
     minLiquidityUsd: 15_000,
+    blockedConfidenceGrades: new Set(["D"]),
   },
 
   position: {
     simulatedBankrollSol: 10,
     sizePctPerTrade: 0.03,
-    maxConcurrentPositions: 5,
+    maxConcurrentPositions: 3,
   },
 
   exit: {
     takeProfitLadder: [
-      { atMultiple: 1.3, sellPct: 0.5 },
-      { atMultiple: 1.6, sellPct: 0.5 },
+      { atMultiple: 1.35, sellPct: 1.0 },
     ],
-    trailingStopPct: 0.15,
-    hardStopLossPct: 0.15,
-    maxHoldMinutes: 45,
+    breakEvenActivationMultiple: 1.08,
+    trailingActivationMultiple: 1.18,
+    trailingStopPct: 0.10,
+    hardStopLossPct: 0.12,
+    maxHoldMinutes: 60,
   },
 
   risk: {
