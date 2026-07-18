@@ -120,6 +120,7 @@ test("rejects today's low-volume negative-15m bounce", () => {
 test("keeps paper churn and repeat-token entries bounded", () => {
   assert.equal(SCALP_RULES.maxDailyEntries, 8);
   assert.equal(SCALP_RULES.cooldownMinutes, 30);
+  assert.equal(SCALP_RULES.fixedSizeSol, 0.25);
 });
 
 test("round-trip friction is charged before paper profit", () => {
@@ -128,34 +129,31 @@ test("round-trip friction is charged before paper profit", () => {
   assert.ok(net > 0.987);
 });
 
-test("uses a 1.5-to-1 net target-to-stop profile", () => {
-  assert.equal(
-    SCALP_RULES.targetProfitPct / SCALP_RULES.hardStopLossPct,
-    1.5
-  );
-
+test("turns a strong winner into a runner instead of taking early profit", () => {
   const now = Date.now();
-  const tooSmall = decideScalpExit({
+  const strongWinner = decideScalpExit({
     entryPriceUsd: 1,
-    currentPriceUsd: 1.04,
-    peakPriceUsd: 1.04,
-    openedAtMs: now - 60_000,
+    currentPriceUsd: 1.07,
+    peakPriceUsd: 1.07,
+    openedAtMs: now - 11 * 60_000,
     nowMs: now,
   });
-  assert.equal(tooSmall, null);
-
-  const profitable = decideScalpExit({
-    entryPriceUsd: 1,
-    currentPriceUsd: 1.06,
-    peakPriceUsd: 1.06,
-    openedAtMs: now - 60_000,
-    nowMs: now,
-  });
-  assert.equal(profitable?.reason, "target_profit_hit");
-  assert.ok((profitable?.netReturnPct ?? 0) >= 4.5);
+  assert.equal(strongWinner, null);
 });
 
-test("enforces the ten-minute maximum hold", () => {
+test("trails a runner after a two-point giveback from peak", () => {
+  const now = Date.now();
+  const result = decideScalpExit({
+    entryPriceUsd: 1,
+    currentPriceUsd: 1.07,
+    peakPriceUsd: 1.10,
+    openedAtMs: now - 12 * 60_000,
+    nowMs: now,
+  });
+  assert.equal(result?.reason, "trailing_stop");
+});
+
+test("keeps the ten-minute maximum for trades that never become runners", () => {
   const now = Date.now();
   const result = decideScalpExit({
     entryPriceUsd: 1,
@@ -164,5 +162,18 @@ test("enforces the ten-minute maximum hold", () => {
     openedAtMs: now - 11 * 60_000,
     nowMs: now,
   });
-  assert.equal(result?.reason, "max_hold_time_exceeded");
+  assert.equal(result?.reason, "max_hold_time");
+});
+
+test("caps exceptional spikes at fifteen percent net", () => {
+  const now = Date.now();
+  const result = decideScalpExit({
+    entryPriceUsd: 1,
+    currentPriceUsd: 1.17,
+    peakPriceUsd: 1.17,
+    openedAtMs: now - 60_000,
+    nowMs: now,
+  });
+  assert.equal(result?.reason, "take_profit");
+  assert.ok((result?.netReturnPct ?? 0) >= SCALP_RULES.targetProfitPct);
 });
