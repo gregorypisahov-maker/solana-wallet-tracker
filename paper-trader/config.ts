@@ -7,28 +7,22 @@ export const config = {
     minScore: 10,
     maxScore: 65,
     minWalletCount: 3,
-    minAvgBuyPerWallet: 1.25,
-    minAvgTrustScore: 55,
-    eliteTwoWalletMinAvgBuySol: 1.25,
-    // Historical results were profitable from trust 55 upward. Let two-wallet
-    // signals use that same proven floor while retaining the larger-buy rule.
-    eliteTwoWalletMinAvgTrustScore: 55,
-    minLiquidityToMcapRatio: 0.15,
+    minAvgBuyPerWallet: 1.5,
+    minAvgTrustScore: 58,
+    eliteTwoWalletMinAvgBuySol: 1.5,
+    eliteTwoWalletMinAvgTrustScore: 60,
+    minLiquidityToMcapRatio: 0.18,
     minMarketCapUsd: 20_000,
-    maxMarketCapUsd: 200_000,
-    // Recent otherwise-valid signals clustered just below the old $15k floor.
-    // The liquidity/mcap guard still rejects thin pools independently.
-    minLiquidityUsd: 14_000,
+    maxMarketCapUsd: 180_000,
+    minLiquidityUsd: 15_000,
     blockedConfidenceGrades: new Set(["D"]),
   },
 
   position: {
     simulatedBankrollSol: 10,
-    sizePctPerTrade: 0.03,
-    // A single independently verified leader is useful, but carries less
-    // confirmation than multi-wallet consensus.
+    sizePctPerTrade: 0.02,
     provenTraderSizeMultiplier: 0.5,
-    maxConcurrentPositions: 3,
+    maxConcurrentPositions: 2,
   },
 
   execution: {
@@ -39,20 +33,18 @@ export const config = {
 
   exit: {
     takeProfitLadder: [
-      { atMultiple: 1.35, sellPct: 1.0 },
+      { atMultiple: 1.3, sellPct: 1.0 },
     ],
-    breakEvenActivationMultiple: 1.08,
-    trailingActivationMultiple: 1.18,
-    trailingStopPct: 0.10,
-    hardStopLossPct: 0.12,
-    maxHoldMinutes: 60,
+    breakEvenActivationMultiple: 1.07,
+    trailingActivationMultiple: 1.15,
+    trailingStopPct: 0.08,
+    hardStopLossPct: 0.10,
+    maxHoldMinutes: 45,
   },
 
   risk: {
-    dailyLossLimitPct: 0.10,
-
-    // Keep automatic paper-data collection running. This preserves the newer
-    // no-manual-resume safeguard while restoring the profitable strategy profile.
+    dailyLossLimitPct: 0.06,
+    // Keep paper collection automatic, but daily loss protection remains active.
     maxLossesInARow: Number.POSITIVE_INFINITY,
   },
 
