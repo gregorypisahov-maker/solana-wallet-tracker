@@ -15,7 +15,7 @@ const candidate: ScalpCandidate = {
   pairAddress: "Pair11111111111111111111111111111111111",
   priceUsd: 0.001,
   liquidityUsd: 80_000,
-  marketCapUsd: 500_000,
+  marketCapUsd: 300_000,
   fiveMinuteChangePct: 5,
   fifteenMinuteChangePct: 9,
   fiveMinuteVolumeUsd: 12_000,
@@ -25,30 +25,45 @@ const candidate: ScalpCandidate = {
   poolAgeMinutes: 180,
 };
 
-test("accepts the focused scalper market profile", () => {
+test("accepts the balanced, liquidity-backed scalper profile", () => {
   const result = evaluateScalpCandidate(candidate);
   assert.equal(result.accepted, true);
   assert.deepEqual(result.reasons, []);
   assert.ok(result.score >= SCALP_RULES.minimumSignalScore);
 });
 
-test("rejects the observed overheated OH loss on both feeds", () => {
+test("rejects discovery candidates with thin liquidity backing", () => {
+  const result = evaluateScalpCandidate({
+    ...candidate,
+    liquidityUsd: 45_000,
+    marketCapUsd: 300_000,
+  });
+
+  assert.equal(result.accepted, false);
+  assert.ok(result.reasons.includes("liquidity_to_market_cap_below_20pct"));
+});
+
+test("rejects Dex confirmation with thin liquidity backing", () => {
+  const reasons = evaluateScalpConfirmation({
+    priceUsd: 0.001,
+    liquidityUsd: 45_000,
+    marketCapUsd: 300_000,
+    fiveMinuteChangePct: 4,
+  });
+
+  assert.ok(reasons.includes("dex_liquidity_to_market_cap_below_20pct"));
+});
+
+test("rejects overheated momentum on discovery and confirmation", () => {
   const discovery = evaluateScalpCandidate({
     ...candidate,
-    liquidityUsd: 35_690.7991,
-    marketCapUsd: 198_389.2301,
-    fiveMinuteChangePct: 7.684,
-    fifteenMinuteChangePct: 9.924,
-    fiveMinuteVolumeUsd: 3_936.9,
-    fiveMinuteBuys: 39,
-    fiveMinuteSells: 48,
-    fiveMinuteBuyers: 35,
+    fiveMinuteChangePct: 8.5,
   });
   const confirmation = evaluateScalpConfirmation({
-    priceUsd: 0.0001994,
-    liquidityUsd: 35_964.36,
-    marketCapUsd: 199_400,
-    fiveMinuteChangePct: 6.89,
+    priceUsd: 0.001,
+    liquidityUsd: 80_000,
+    marketCapUsd: 300_000,
+    fiveMinuteChangePct: 8.5,
   });
 
   assert.equal(discovery.accepted, false);
@@ -56,71 +71,10 @@ test("rejects the observed overheated OH loss on both feeds", () => {
   assert.ok(confirmation.includes("dex_five_minute_momentum_overheated"));
 });
 
-test("rejects the observed low-quality SOLdiers loss", () => {
-  const discovery = evaluateScalpCandidate({
-    ...candidate,
-    liquidityUsd: 114_762.463,
-    marketCapUsd: 979_508.238,
-    fiveMinuteChangePct: 4.869,
-    fifteenMinuteChangePct: 2.979,
-    fiveMinuteVolumeUsd: 5_363.29,
-    fiveMinuteBuys: 22,
-    fiveMinuteSells: 25,
-    fiveMinuteBuyers: 17,
-  });
-
-  assert.equal(discovery.accepted, false);
-  assert.ok(discovery.reasons.includes("market_cap_above_500k"));
-  assert.ok(discovery.reasons.includes("fifteen_minute_confirmation_too_low"));
-  assert.ok(discovery.reasons.includes("signal_score_below_45"));
-});
-
-test("keeps the observed HOMIE winner eligible", () => {
-  const discovery = evaluateScalpCandidate({
-    ...candidate,
-    liquidityUsd: 41_966.0335,
-    marketCapUsd: 218_292.743,
-    fiveMinuteChangePct: 4.938,
-    fifteenMinuteChangePct: 10.187,
-    fiveMinuteVolumeUsd: 4_126.55,
-    fiveMinuteBuys: 42,
-    fiveMinuteSells: 65,
-    fiveMinuteBuyers: 42,
-  });
-  const confirmation = evaluateScalpConfirmation({
-    priceUsd: 0.0002168,
-    liquidityUsd: 42_177.56,
-    marketCapUsd: 216_800,
-    fiveMinuteChangePct: 2.94,
-  });
-
-  assert.equal(discovery.accepted, true);
-  assert.deepEqual(confirmation, []);
-});
-
-test("rejects today's low-volume negative-15m bounce", () => {
-  const result = evaluateScalpCandidate({
-    ...candidate,
-    liquidityUsd: 26_464,
-    marketCapUsd: 114_980,
-    fiveMinuteChangePct: 6.107,
-    fifteenMinuteChangePct: -10.492,
-    fiveMinuteVolumeUsd: 1_621,
-    fiveMinuteBuys: 47,
-    fiveMinuteSells: 27,
-    fiveMinuteBuyers: 45,
-  });
-
-  assert.equal(result.accepted, false);
-  assert.ok(result.reasons.includes("five_minute_momentum_overheated"));
-  assert.ok(result.reasons.includes("fifteen_minute_confirmation_too_low"));
-  assert.ok(result.reasons.includes("five_minute_volume_too_low"));
-});
-
-test("uses larger paper positions and a higher daily opportunity cap", () => {
-  assert.equal(SCALP_RULES.maxDailyEntries, 12);
-  assert.equal(SCALP_RULES.cooldownMinutes, 30);
-  assert.equal(SCALP_RULES.fixedSizeSol, 0.30);
+test("keeps the smaller paper size and blocks same-token churn for 24 hours", () => {
+  assert.equal(SCALP_RULES.maxDailyEntries, 6);
+  assert.equal(SCALP_RULES.cooldownMinutes, 24 * 60);
+  assert.equal(SCALP_RULES.fixedSizeSol, 0.20);
 });
 
 test("round-trip friction is charged before paper profit", () => {
@@ -129,63 +83,50 @@ test("round-trip friction is charged before paper profit", () => {
   assert.ok(net > 0.987);
 });
 
-test("turns a strong winner into a runner instead of taking early profit", () => {
+test("hard-stops a losing scalp after simulated friction", () => {
   const now = Date.now();
-  const strongWinner = decideScalpExit({
+  const result = decideScalpExit({
+    entryPriceUsd: 1,
+    currentPriceUsd: 0.98,
+    peakPriceUsd: 1,
+    openedAtMs: now - 60_000,
+    nowMs: now,
+  });
+
+  assert.equal(result?.reason, "hard_stop");
+});
+
+test("lets a strong winner run until its trailing floor is breached", () => {
+  const now = Date.now();
+  const stillRunning = decideScalpExit({
     entryPriceUsd: 1,
     currentPriceUsd: 1.07,
     peakPriceUsd: 1.07,
     openedAtMs: now - 11 * 60_000,
     nowMs: now,
   });
-  assert.equal(strongWinner, null);
-});
-
-test("allows a two-point giveback below an eight-percent peak", () => {
-  const now = Date.now();
-  const result = decideScalpExit({
+  const trailed = decideScalpExit({
     entryPriceUsd: 1,
     currentPriceUsd: 1.055,
     peakPriceUsd: 1.08,
     openedAtMs: now - 12 * 60_000,
     nowMs: now,
   });
-  assert.equal(result?.reason, "trailing_stop");
+
+  assert.equal(stillRunning, null);
+  assert.equal(trailed?.reason, "trailing_stop");
 });
 
-test("tightens to a one-and-a-half-point giveback after an eight-percent peak", () => {
-  const now = Date.now();
-  const result = decideScalpExit({
-    entryPriceUsd: 1,
-    currentPriceUsd: 1.085,
-    peakPriceUsd: 1.105,
-    openedAtMs: now - 12 * 60_000,
-    nowMs: now,
-  });
-  assert.equal(result?.reason, "trailing_stop");
-});
-
-test("tightens to a one-point giveback after a fifteen-percent peak", () => {
-  const now = Date.now();
-  const result = decideScalpExit({
-    entryPriceUsd: 1,
-    currentPriceUsd: 1.16,
-    peakPriceUsd: 1.175,
-    openedAtMs: now - 12 * 60_000,
-    nowMs: now,
-  });
-  assert.equal(result?.reason, "trailing_stop");
-});
-
-test("keeps the ten-minute maximum for trades that never become runners", () => {
+test("closes a non-runner at the maximum hold time", () => {
   const now = Date.now();
   const result = decideScalpExit({
     entryPriceUsd: 1,
     currentPriceUsd: 1.01,
     peakPriceUsd: 1.01,
-    openedAtMs: now - 11 * 60_000,
+    openedAtMs: now - 9 * 60_000,
     nowMs: now,
   });
+
   assert.equal(result?.reason, "max_hold_time");
 });
 
@@ -198,6 +139,7 @@ test("caps exceptional spikes at twenty-five percent net", () => {
     openedAtMs: now - 60_000,
     nowMs: now,
   });
+
   assert.equal(result?.reason, "take_profit");
   assert.ok((result?.netReturnPct ?? 0) >= SCALP_RULES.targetProfitPct);
 });
