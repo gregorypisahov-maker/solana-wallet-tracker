@@ -49,6 +49,8 @@ export default function WalletManager({ onChanged }: Props) {
   const [message, setMessage] = useState<string | null>(null);
   const [ops, setOps] = useState<OpsData | null>(null);
   const [opsError, setOpsError] = useState<string | null>(null);
+  const [resumingScalper, setResumingScalper] = useState(false);
+  const [scalperMessage, setScalperMessage] = useState<string | null>(null);
 
   const authorization = (value = password) => ({ Authorization: `Basic ${window.btoa(`owner:${value}`)}` });
 
@@ -69,6 +71,23 @@ export default function WalletManager({ onChanged }: Props) {
     const timer = window.setInterval(() => void loadOps(), 15_000);
     return () => window.clearInterval(timer);
   }, [loadOps]);
+
+  async function resumeScalpBot() {
+    setResumingScalper(true);
+    setScalperMessage(null);
+    try {
+      const response = await fetch("/api/scalper/resume", { method: "POST" });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(body.error ?? body.message ?? "Could not resume scalp bot");
+      setScalperMessage(body.message ?? "Momentum scalper resumed.");
+      onChanged();
+      await loadOps();
+    } catch (error) {
+      setScalperMessage(error instanceof Error ? error.message : "Could not resume scalp bot");
+    } finally {
+      setResumingScalper(false);
+    }
+  }
 
   async function readWallets(passwordValue = password) {
     const response = await fetch("/api/wallets", { cache: "no-store", headers: authorization(passwordValue) });
@@ -133,6 +152,10 @@ export default function WalletManager({ onChanged }: Props) {
       <section className="grid two" style={{ marginBottom: 18 }}>
         <section className="panel">
           <div className="panelHead"><h2>Bot health</h2><span>{ops?.health.every((item) => item.ok) ? "ALL SYSTEMS" : "ATTENTION"}</span></div>
+          <div style={{ padding: "14px 14px 0", display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+            <button type="button" onClick={resumeScalpBot} disabled={resumingScalper} style={{ padding: "11px 15px", borderRadius: 9, border: 0, fontWeight: 800, cursor: resumingScalper ? "wait" : "pointer" }}>{resumingScalper ? "Resuming…" : "▶ Resume scalp bot"}</button>
+            {scalperMessage && <small>{scalperMessage}</small>}
+          </div>
           {opsError ? <div className="errorBanner">{opsError}</div> : !ops ? <div className="empty">Loading operational status…</div> : <div className="feed">
             {ops.health.map((item) => <div className="feedRow" key={item.name}><i className={item.ok ? "up" : "down"}>{item.ok ? "✓" : "!"}</i><div><strong>{item.name}</strong><small>{item.detail}</small></div><div className="feedValue"><b className={item.ok ? "green" : "red"}>{item.ok ? "HEALTHY" : "CHECK"}</b></div></div>)}
           </div>}
