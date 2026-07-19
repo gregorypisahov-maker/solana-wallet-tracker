@@ -2,7 +2,7 @@
 // Central place to tune every threshold. Nothing else in this project
 // should hardcode a number — change behavior here.
 
-const config = {
+export const config = {
   entry: {
     minScore: 10,
     maxScore: 65,
@@ -66,5 +66,4 @@ const config = {
   },
 };
 
-export { config };
 export default config;
