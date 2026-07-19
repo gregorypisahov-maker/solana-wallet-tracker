@@ -2,7 +2,7 @@
 // Central place to tune every threshold. Nothing else in this project
 // should hardcode a number — change behavior here.
 
-export const config = {
+const config = {
   entry: {
     minScore: 10,
     maxScore: 65,
@@ -65,3 +65,6 @@ export const config = {
     dailySummaryHourUTC: 6,
   },
 };
+
+export { config };
+export default config;
