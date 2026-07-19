@@ -1,10 +1,6 @@
 // worker/telegramBot.ts
-//
 // Inbound Telegram command listener using Telegram getUpdates long polling.
 // Run as a separate Railway process from worker/monitor.ts.
-//
-// Security: commands are accepted only from TELEGRAM_CHAT_ID and optional
-// TELEGRAM_ALLOWED_CHAT_IDS entries.
 
 import 'dotenv/config';
 
@@ -26,6 +22,7 @@ import {
   handleEliteWallets,
   handleIntelligenceNow,
 } from './autoWalletCommands';
+import { resumeScalper } from './scalpResume';
 
 function cleanEnv(value: string | undefined): string {
   return (value ?? '').trim().replace(/^[\'\"]|[\'\"]$/g, '').trim();
@@ -62,7 +59,7 @@ const AUTHORIZED_CHAT_IDS = new Set([TELEGRAM_CHAT_ID, ...EXTRA_CHAT_IDS].filter
 const POLL_TIMEOUT_SECONDS = 30;
 const CONFLICT_BACKOFF_MIN_MS = 65_000;
 const CONFLICT_BACKOFF_JITTER_MS = 30_000;
-const TELEGRAM_WORKER_VERSION = '2026-07-17-dashboard-link-v14';
+const TELEGRAM_WORKER_VERSION = '2026-07-19-resume-scalper-v15';
 
 if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
   console.error('[telegram-bot] TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID must be set. Exiting.');
@@ -160,6 +157,18 @@ async function getUpdates(): Promise<TelegramUpdate[]> {
   return body.result ?? [];
 }
 
+async function handleResumeScalper(): Promise<string> {
+  const result = await resumeScalper();
+  if (!result.success) throw new Error(result.message);
+  return [
+    '▶️ <b>SCALP BOT RESUMED</b>',
+    '',
+    result.message,
+    'Scanning: ACTIVE',
+    'New paper scalp entries: ENABLED',
+  ].join('\n');
+}
+
 async function handleHelp(): Promise<string> {
   let status = '🟡 Paper Trader: status unavailable';
   let resumeHint = '/resume — Resume paper trading if halted';
@@ -196,6 +205,7 @@ async function handleHelp(): Promise<string> {
     '/intelligence_now — Re-score and rotate wallets now', '',
     '<b>🛠 Control</b>',
     resumeHint,
+    '/resume_scalp — Resume the momentum scalp bot',
     '/help — Show this command menu',
     '/commands — Same as /help',
     '/chatid — Show this chat ID for setup', '',
@@ -217,13 +227,14 @@ function helpKeyboard(): InlineKeyboard {
       { text: '⚡ Scalp Stats', callback_data: '/scalpstats' },
     ],
     [
+      { text: '▶️ Resume Paper', callback_data: '/resume' },
+      { text: '⚡ Resume Scalp', callback_data: '/resume_scalp' },
+    ],
+    [
       { text: '🧠 Auto Wallets', callback_data: '/auto_wallets' },
       { text: '✅ Readiness', callback_data: '/readiness' },
     ],
-    [
-      { text: '▶️ Resume', callback_data: '/resume' },
-      { text: '🔄 Wallet Scan', callback_data: '/walletscan' },
-    ],
+    [{ text: '🔄 Wallet Scan', callback_data: '/walletscan' }],
   );
   return { inline_keyboard: rows };
 }
@@ -244,6 +255,9 @@ const COMMAND_HANDLERS: Record<string, () => Promise<string>> = {
   '/helius': handleHeliusStats,
   '/readiness': handleReadiness,
   '/resume': handleResume,
+  '/resume_scalp': handleResumeScalper,
+  '/resumescalp': handleResumeScalper,
+  '/resume_scalper': handleResumeScalper,
   '/walletscan': handleWalletScan,
   '/scanwallets': handleWalletScan,
   '/auto_wallets': handleAutoWallets,
@@ -337,7 +351,7 @@ async function pollLoop(): Promise<void> {
   console.log(`[telegram-bot] Starting inbound command listener (${TELEGRAM_WORKER_VERSION})...`);
   console.log(`[telegram-bot] Bot-token fingerprint: ${tokenFingerprint}; authorized chats: ${AUTHORIZED_CHAT_IDS.size}`);
   console.log(`[telegram-bot] Dashboard button: ${DASHBOARD_URL ? 'configured' : 'not configured'}`);
-  console.log('[telegram-bot] Commands ready: /help /commands /chatid /paperstats /scalpstats /walletstats /exitstats /scorestats /heliusstats /readiness /resume /walletscan /auto_wallets /elite_wallets /discover_now /intelligence_now');
+  console.log('[telegram-bot] Commands ready: /help /commands /chatid /paperstats /scalpstats /walletstats /exitstats /scorestats /heliusstats /readiness /resume /resume_scalp /walletscan /auto_wallets /elite_wallets /discover_now /intelligence_now');
 
   await validateToken();
 
