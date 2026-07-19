@@ -38,38 +38,37 @@ export type ExitDecision = {
 };
 
 export const SCALP_RULES = {
-  minLiquidityUsd: 35_000,
+  minLiquidityUsd: 40_000,
   minMarketCapUsd: 100_000,
-  maxMarketCapUsd: 750_000,
-  minFiveMinuteChangePct: 2,
-  maxFiveMinuteChangePct: 8,
-  minFifteenMinuteChangePct: 5,
-  maxFifteenMinuteChangePct: 20,
-  minFiveMinuteVolumeUsd: 2_500,
-  minFiveMinuteTrades: 25,
-  minFiveMinuteBuyers: 10,
-  minBuySellRatio: 0.6,
-  minPoolAgeMinutes: 60,
-  minimumSignalScore: 45,
-  fixedSizeSol: 0.30,
+  maxMarketCapUsd: 650_000,
+  minFiveMinuteChangePct: 2.5,
+  maxFiveMinuteChangePct: 6,
+  minFifteenMinuteChangePct: 6,
+  maxFifteenMinuteChangePct: 18,
+  minFiveMinuteVolumeUsd: 4_000,
+  minFiveMinuteTrades: 35,
+  minFiveMinuteBuyers: 15,
+  minBuySellRatio: 0.9,
+  minPoolAgeMinutes: 90,
+  minimumSignalScore: 55,
+  fixedSizeSol: 0.20,
   maxConcurrentPositions: 1,
-  // Strong winners become runners instead of being sold at the old small target.
   targetProfitPct: 25,
-  hardStopLossPct: 3.0,
-  trailingActivationNetPct: 4.5,
+  hardStopLossPct: 2.5,
+  trailingActivationNetPct: 5.5,
   trailingGivebackPctLow: 2.0,
   trailingGivebackPctMid: 1.5,
   trailingGivebackPctHigh: 1.0,
-  trailingMidPeakNetPct: 8,
+  trailingMidPeakNetPct: 9,
   trailingHighPeakNetPct: 15,
-  maxHoldSeconds: 600,
-  runnerMaxHoldSeconds: 1_800,
+  maxHoldSeconds: 480,
+  runnerMaxHoldSeconds: 1_500,
   entryFrictionPct: 0.6,
   exitFrictionPct: 0.6,
-  maxDailyEntries: 12,
-  dailyLossLimitPct: 0.15,
+  maxDailyEntries: 6,
+  dailyLossLimitPct: 0.08,
   maxConsecutiveLosses: 3,
-  cooldownMinutes: 30,
+  cooldownMinutes: 60,
 } as const;
 
 const clamp = (value: number, min: number, max: number) =>
@@ -92,13 +91,13 @@ export function evaluateScalpCandidate(
     candidate.fiveMinuteBuys / Math.max(1, candidate.fiveMinuteSells);
 
   if (candidate.liquidityUsd < SCALP_RULES.minLiquidityUsd) {
-    reasons.push("liquidity_below_35k");
+    reasons.push("liquidity_below_40k");
   }
   if (candidate.marketCapUsd < SCALP_RULES.minMarketCapUsd) {
     reasons.push("market_cap_below_100k");
   }
   if (candidate.marketCapUsd > SCALP_RULES.maxMarketCapUsd) {
-    reasons.push("market_cap_above_750k");
+    reasons.push("market_cap_above_650k");
   }
   if (candidate.fiveMinuteChangePct < SCALP_RULES.minFiveMinuteChangePct) {
     reasons.push("five_minute_momentum_too_low");
@@ -162,7 +161,7 @@ export function evaluateScalpCandidate(
   );
 
   if (score < SCALP_RULES.minimumSignalScore) {
-    reasons.push("signal_score_below_45");
+    reasons.push("signal_score_below_55");
   }
 
   return { accepted: reasons.length === 0, score, reasons };
@@ -177,13 +176,13 @@ export function evaluateScalpConfirmation(
     reasons.push("dex_price_invalid");
   }
   if (market.liquidityUsd < SCALP_RULES.minLiquidityUsd) {
-    reasons.push("dex_liquidity_below_35k");
+    reasons.push("dex_liquidity_below_40k");
   }
   if (market.marketCapUsd < SCALP_RULES.minMarketCapUsd) {
     reasons.push("dex_market_cap_below_100k");
   }
   if (market.marketCapUsd > SCALP_RULES.maxMarketCapUsd) {
-    reasons.push("dex_market_cap_above_750k");
+    reasons.push("dex_market_cap_above_650k");
   }
   if (market.fiveMinuteChangePct < SCALP_RULES.minFiveMinuteChangePct) {
     reasons.push("dex_five_minute_momentum_too_low");
@@ -225,7 +224,6 @@ export function decideScalpExit(input: {
     return result("hard_stop");
   }
 
-  // Give a fresh runner room, then tighten protection as its peak expands.
   const trailingGivebackPct =
     peakNetReturnPct >= SCALP_RULES.trailingHighPeakNetPct
       ? SCALP_RULES.trailingGivebackPctHigh
@@ -240,7 +238,6 @@ export function decideScalpExit(input: {
     return result("trailing_stop");
   }
 
-  // Emergency cap only for an exceptional spike; normal winners trail.
   if (netReturnPct >= SCALP_RULES.targetProfitPct) {
     return result("take_profit");
   }
