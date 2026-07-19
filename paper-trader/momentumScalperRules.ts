@@ -38,19 +38,22 @@ export type ExitDecision = {
 };
 
 export const SCALP_RULES = {
-  minLiquidityUsd: 40_000,
+  minLiquidityUsd: 35_000,
   minMarketCapUsd: 100_000,
   maxMarketCapUsd: 650_000,
-  minFiveMinuteChangePct: 2.5,
-  maxFiveMinuteChangePct: 6,
-  minFifteenMinuteChangePct: 6,
-  maxFifteenMinuteChangePct: 18,
-  minFiveMinuteVolumeUsd: 4_000,
-  minFiveMinuteTrades: 35,
-  minFiveMinuteBuyers: 15,
+  // Reopen the useful momentum window, but require real liquidity backing below.
+  minFiveMinuteChangePct: 2,
+  maxFiveMinuteChangePct: 8,
+  minFifteenMinuteChangePct: 5,
+  maxFifteenMinuteChangePct: 20,
+  minFiveMinuteVolumeUsd: 3_000,
+  minFiveMinuteTrades: 30,
+  minFiveMinuteBuyers: 12,
   minBuySellRatio: 0.9,
-  minPoolAgeMinutes: 90,
-  minimumSignalScore: 55,
+  // Historical losses clustered in thin pools even when absolute liquidity passed.
+  minLiquidityToMcapRatio: 0.20,
+  minPoolAgeMinutes: 60,
+  minimumSignalScore: 45,
   fixedSizeSol: 0.20,
   maxConcurrentPositions: 1,
   targetProfitPct: 25,
@@ -68,7 +71,8 @@ export const SCALP_RULES = {
   maxDailyEntries: 6,
   dailyLossLimitPct: 0.08,
   maxConsecutiveLosses: 3,
-  cooldownMinutes: 60,
+  // Repeated entries in the same token were the largest measured loss cohort.
+  cooldownMinutes: 24 * 60,
 } as const;
 
 const clamp = (value: number, min: number, max: number) =>
@@ -89,15 +93,22 @@ export function evaluateScalpCandidate(
   const trades = candidate.fiveMinuteBuys + candidate.fiveMinuteSells;
   const buySellRatio =
     candidate.fiveMinuteBuys / Math.max(1, candidate.fiveMinuteSells);
+  const liquidityToMcapRatio =
+    candidate.marketCapUsd > 0
+      ? candidate.liquidityUsd / candidate.marketCapUsd
+      : 0;
 
   if (candidate.liquidityUsd < SCALP_RULES.minLiquidityUsd) {
-    reasons.push("liquidity_below_40k");
+    reasons.push("liquidity_below_35k");
   }
   if (candidate.marketCapUsd < SCALP_RULES.minMarketCapUsd) {
     reasons.push("market_cap_below_100k");
   }
   if (candidate.marketCapUsd > SCALP_RULES.maxMarketCapUsd) {
     reasons.push("market_cap_above_650k");
+  }
+  if (liquidityToMcapRatio < SCALP_RULES.minLiquidityToMcapRatio) {
+    reasons.push("liquidity_to_market_cap_below_20pct");
   }
   if (candidate.fiveMinuteChangePct < SCALP_RULES.minFiveMinuteChangePct) {
     reasons.push("five_minute_momentum_too_low");
@@ -161,7 +172,7 @@ export function evaluateScalpCandidate(
   );
 
   if (score < SCALP_RULES.minimumSignalScore) {
-    reasons.push("signal_score_below_55");
+    reasons.push("signal_score_below_45");
   }
 
   return { accepted: reasons.length === 0, score, reasons };
@@ -171,18 +182,23 @@ export function evaluateScalpConfirmation(
   market: ScalpMarketConfirmation
 ): string[] {
   const reasons: string[] = [];
+  const liquidityToMcapRatio =
+    market.marketCapUsd > 0 ? market.liquidityUsd / market.marketCapUsd : 0;
 
   if (!Number.isFinite(market.priceUsd) || market.priceUsd <= 0) {
     reasons.push("dex_price_invalid");
   }
   if (market.liquidityUsd < SCALP_RULES.minLiquidityUsd) {
-    reasons.push("dex_liquidity_below_40k");
+    reasons.push("dex_liquidity_below_35k");
   }
   if (market.marketCapUsd < SCALP_RULES.minMarketCapUsd) {
     reasons.push("dex_market_cap_below_100k");
   }
   if (market.marketCapUsd > SCALP_RULES.maxMarketCapUsd) {
     reasons.push("dex_market_cap_above_650k");
+  }
+  if (liquidityToMcapRatio < SCALP_RULES.minLiquidityToMcapRatio) {
+    reasons.push("dex_liquidity_to_market_cap_below_20pct");
   }
   if (market.fiveMinuteChangePct < SCALP_RULES.minFiveMinuteChangePct) {
     reasons.push("dex_five_minute_momentum_too_low");
