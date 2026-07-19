@@ -8,12 +8,16 @@ export const config = {
     maxScore: 65,
     minWalletCount: 3,
     minAvgBuyPerWallet: 1.5,
-    minAvgTrustScore: 58,
+    // Historical paper results were profitable from trust 55 upward; the
+    // temporary 58 floor suppressed otherwise valid three-wallet signals.
+    minAvgTrustScore: 55,
     eliteTwoWalletMinAvgBuySol: 1.5,
     eliteTwoWalletMinAvgTrustScore: 60,
-    minLiquidityToMcapRatio: 0.18,
+    // The strongest historical band had at least 25% liquidity backing.
+    minLiquidityToMcapRatio: 0.25,
     minMarketCapUsd: 20_000,
-    maxMarketCapUsd: 180_000,
+    // The 180k-200k band remained profitable; losses concentrated above 200k.
+    maxMarketCapUsd: 200_000,
     minLiquidityUsd: 15_000,
     blockedConfidenceGrades: new Set(["D"]),
   },
