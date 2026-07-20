@@ -1,0 +1,38 @@
+/* Final black-ops dashboard sizing and mobile corrections. */
+.cubeApp{background:#010202}
+.terminalShell{width:min(1220px,100%);grid-template-columns:64px minmax(0,1fr)}
+.iconRail{padding-top:88px}.railButton{height:68px;font-size:18px}
+.terminalMain{padding:0 20px 28px}.terminalHeader{height:88px}
+.terminalBrand h1{font-size:20px}.cubeMark{width:40px;height:40px}
+.headerStatus{height:42px}.headerStatus>*{padding:0 13px;font-size:11px}
+.healthStrip{min-height:62px;margin:14px 0;grid-template-columns:110px repeat(7,minmax(76px,1fr))}
+.healthStrip>strong{padding:12px;font-size:9px}.healthItem{padding:8px 10px}.healthItem span{font-size:9px}.healthItem small{font-size:8px;margin-top:4px}
+.overviewGrid{gap:9px;margin:14px 0}.metricCard{height:156px;padding:17px}.metricCard strong{font-size:24px;margin-top:13px}.metricCard>.lineChart{height:48px;bottom:12px}
+.terminalSection{margin-top:14px}.terminalSectionHead{height:44px}.terminalSectionHead h2{font-size:14px}
+.botStack{gap:9px;margin-top:9px}.botCardMain{min-height:174px;padding:13px 15px;grid-template-columns:minmax(260px,1.15fr) minmax(300px,1.05fr) minmax(180px,.72fr) 44px;gap:16px}
+.botIdentity{gap:18px}.botIdentity h3{font-size:22px;margin:9px 0 5px}.botIdentity p{font-size:9px}
+.botMark{width:126px;height:126px;background:radial-gradient(circle at 50% 38%,color-mix(in srgb,var(--accent) 16%,transparent),transparent 48%),linear-gradient(145deg,#0b100d,#030504)}
+.botMark svg{width:102px;height:112px}.botMark .armor,.botMark .shield,.botMark .hood{fill:#171d19;stroke:#59635b;stroke-width:2.4}.botMark .plate,.botMark .shieldLine{stroke:#6d786f;stroke-width:2.3}.botMark .jaw{fill:#222923;stroke:#667067}.botMark .face{fill:#030403;stroke:#343b35}.botMark .visor,.botMark .eye,.botMark .bolt{filter:drop-shadow(0 0 6px var(--accent)) drop-shadow(0 0 12px color-mix(in srgb,var(--accent) 55%,transparent))}
+.botNumbers>div{padding:6px 15px}.botNumbers strong{font-size:17px;margin:8px 0 4px}.botCardMain>.lineChart{height:70px}.openArrow{width:42px;height:42px;font-size:20px}
+.lineChart,.lineChart *{fill:none!important}.lineChart polyline{fill:none!important;stroke:currentColor!important;stroke-width:2!important;stroke-linejoin:round;stroke-linecap:round}
+.quickResume{right:70px;bottom:12px;padding:7px 11px;font-size:10px}
+.activityRow{min-height:52px}
+
+@media(max-width:760px){
+  .terminalMain{padding:0 9px 20px}.terminalHeader{height:68px}.terminalBrand h1{font-size:15px}.terminalBrand span{font-size:7px}.cubeMark{width:29px;height:29px}
+  .healthStrip{min-height:52px;margin:9px 0}.healthStrip>strong{min-width:92px}.healthItem{min-width:82px}
+  .overviewGrid{gap:6px;margin:9px 0}.metricCard{height:116px;padding:11px}.metricCard strong{font-size:18px;margin-top:10px}.metricCard small{font-size:8px}.metricCard>.lineChart{height:31px;bottom:9px}
+  .terminalSectionHead{height:39px}.terminalSectionHead h2{font-size:12px}
+  .botCardMain{grid-template-columns:76px minmax(0,1fr);grid-template-areas:"mark identity" "numbers numbers" "chart chart";gap:9px;padding:10px;min-height:0}
+  .botMark{width:76px;height:76px}.botMark svg{width:61px;height:67px}.botMark:before,.botMark:after{width:13px;height:13px}
+  .botIdentity h3{font-size:17px;margin:6px 0 3px}.statusPill{font-size:8px}.statusPill:before{width:6px;height:6px;margin-right:6px}
+  .botNumbers>div{padding:4px 7px}.botNumbers span,.botNumbers small{font-size:7px}.botNumbers strong{font-size:13px;margin:6px 0 3px;white-space:nowrap}
+  .botCardMain>.lineChart{height:38px}.quickResume{position:static;margin:0 10px 10px;width:calc(100% - 20px);padding:8px}
+  .activityRow{min-height:45px;padding:0 8px}
+}
+
+@media(max-width:390px){
+  .terminalMain{padding-inline:7px}.overviewGrid{grid-template-columns:repeat(2,minmax(0,1fr))}.metricCard{height:108px}
+  .botCardMain{grid-template-columns:68px minmax(0,1fr);gap:8px;padding:9px}.botMark{width:68px;height:68px}.botMark svg{width:54px;height:59px}
+  .botIdentity h3{font-size:15px}.botNumbers strong{font-size:12px}
+}
