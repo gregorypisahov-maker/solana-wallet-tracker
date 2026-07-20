@@ -41,6 +41,12 @@ export const SCALP_RULES = {
   minLiquidityUsd: 35_000,
   minMarketCapUsd: 100_000,
   maxMarketCapUsd: 650_000,
+  // Shadow results favored earlier, smaller-cap entries. Keep the wider hard
+  // safety range so the scalper still trades, but rank this band first.
+  shadowPreferredMaxMarketCapUsd: 200_000,
+  shadowPreferredMinLiquidityToMcapRatio: 0.30,
+  shadowMarketCapScoreBonus: 8,
+  shadowLiquidityScoreBonus: 8,
   // Reopen the useful momentum window, but require real liquidity backing below.
   minFiveMinuteChangePct: 2,
   maxFiveMinuteChangePct: 8,
@@ -163,12 +169,27 @@ export function evaluateScalpCandidate(
   const breadthScore =
     clamp(candidate.fiveMinuteBuyers / 50, 0, 1) * 20;
   const flowScore = clamp(buySellRatio / 2, 0, 1) * 15;
+  const shadowMarketCapBonus =
+    candidate.marketCapUsd <= SCALP_RULES.shadowPreferredMaxMarketCapUsd
+      ? SCALP_RULES.shadowMarketCapScoreBonus
+      : 0;
+  const shadowLiquidityBonus =
+    liquidityToMcapRatio >=
+    SCALP_RULES.shadowPreferredMinLiquidityToMcapRatio
+      ? SCALP_RULES.shadowLiquidityScoreBonus
+      : 0;
   const score = Math.round(
-    momentumScore +
-      confirmationScore +
-      volumeScore +
-      breadthScore +
-      flowScore
+    clamp(
+      momentumScore +
+        confirmationScore +
+        volumeScore +
+        breadthScore +
+        flowScore +
+        shadowMarketCapBonus +
+        shadowLiquidityBonus,
+      0,
+      100
+    )
   );
 
   if (score < SCALP_RULES.minimumSignalScore) {
