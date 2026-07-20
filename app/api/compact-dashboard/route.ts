@@ -64,6 +64,19 @@ function drawdown(trades: TradeRow[]): number {
   return maxDd;
 }
 
+function windowStats(trades: TradeRow[], hours: number, offsetHours = 0) {
+  const end = Date.now() - offsetHours * 60 * 60 * 1000;
+  const start = end - hours * 60 * 60 * 1000;
+  const selected = trades.filter((trade) => {
+    const timestamp = Date.parse(trade.happenedAt ?? trade.happened_at ?? trade.closed_at ?? 0);
+    return Number.isFinite(timestamp) && timestamp >= start && timestamp < end;
+  });
+  const wins = selected.filter((trade) => Number(trade.pnl ?? trade.pnl_sol ?? 0) > 0).length;
+  const losses = selected.filter((trade) => Number(trade.pnl ?? trade.pnl_sol ?? 0) < 0).length;
+  const pnlSol = selected.reduce((sum, trade) => sum + Number(trade.pnl ?? trade.pnl_sol ?? 0), 0);
+  return { trades: selected.length, wins, losses, pnlSol };
+}
+
 export async function GET(request: NextRequest) {
   if (!hasViewerAccess(request)) return unauthorized();
   const supabase = getSupabaseAdmin({ noStore: true });
@@ -118,6 +131,9 @@ export async function GET(request: NextRequest) {
       positions: paperPositions.data ?? [],
       openPositions: (paperPositions.data ?? []).length,
       ...legion,
+      recent24h: windowStats(legion.recentTrades, 24),
+      recent48h: windowStats(legion.recentTrades, 48),
+      previous48h: windowStats(legion.recentTrades, 48, 48),
       maxDrawdownSol: drawdown(legion.recentTrades),
     },
     {
@@ -133,6 +149,9 @@ export async function GET(request: NextRequest) {
       openPositions: (scalpPositions.data ?? []).length,
       scans: scalpScans.data ?? [],
       ...scalper,
+      recent24h: windowStats(scalper.recentTrades, 24),
+      recent48h: windowStats(scalper.recentTrades, 48),
+      previous48h: windowStats(scalper.recentTrades, 48, 48),
       maxDrawdownSol: drawdown(scalper.recentTrades),
     },
     {
@@ -147,6 +166,9 @@ export async function GET(request: NextRequest) {
       positions: shadowPositions.data ?? [],
       openPositions: (shadowPositions.data ?? []).length,
       ...shadow,
+      recent24h: windowStats(shadow.recentTrades, 24),
+      recent48h: windowStats(shadow.recentTrades, 48),
+      previous48h: windowStats(shadow.recentTrades, 48, 48),
       maxDrawdownSol: drawdown(shadow.recentTrades),
     },
   ];
@@ -162,6 +184,9 @@ export async function GET(request: NextRequest) {
     wins: bots.reduce((sum, bot) => sum + bot.wins, 0),
     losses: bots.reduce((sum, bot) => sum + bot.losses, 0),
     openPositions: bots.reduce((sum, bot) => sum + bot.openPositions, 0),
+    recent24hPnlSol: bots.reduce((sum, bot) => sum + bot.recent24h.pnlSol, 0),
+    recent48hPnlSol: bots.reduce((sum, bot) => sum + bot.recent48h.pnlSol, 0),
+    previous48hPnlSol: bots.reduce((sum, bot) => sum + bot.previous48h.pnlSol, 0),
     profitFactor: (() => {
       const profit = allRecent.filter((t) => Number(t.pnl) > 0).reduce((s, t) => s + Number(t.pnl), 0);
       const loss = Math.abs(allRecent.filter((t) => Number(t.pnl) < 0).reduce((s, t) => s + Number(t.pnl), 0));
