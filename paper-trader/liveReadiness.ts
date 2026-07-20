@@ -1,8 +1,7 @@
 import "dotenv/config";
 import { getSupabaseAdmin } from "../lib/supabase";
-import { config } from "./config";
 import { calculateLiveReadiness, ReadinessPosition } from "./liveReadinessRules";
-import { REGULAR_STRATEGY_VERSION } from "./strategyVersion";
+import { SHADOW_STRATEGY_VERSION } from "./strategyVersion";
 
 const supabase = getSupabaseAdmin();
 const CHECK_INTERVAL_MS = 30 * 60_000;
@@ -13,7 +12,7 @@ type ReadinessStateRow = {
 };
 
 export async function runLiveReadinessCheck(): Promise<void> {
-  const { data: state, error: stateError } = await supabase
+  const { data: readinessState, error: stateError } = await supabase
     .from("live_readiness_state")
     .select("started_at, ready")
     .eq("id", 1)
@@ -22,19 +21,29 @@ export async function runLiveReadinessCheck(): Promise<void> {
     throw new Error(`live readiness state load failed: ${stateError.message}`);
   }
 
-  const current = state as ReadinessStateRow;
-  const { data: rows, error: tradeError } = await supabase
-    .from("paper_trades")
-    .select("id, position_id, pnl_sol, happened_at, entry_alert")
-    .gte("happened_at", current.started_at)
-    .order("happened_at", { ascending: true });
+  const current = readinessState as ReadinessStateRow;
+  const [{ data: rows, error: tradeError }, { data: shadowState, error: shadowStateError }] =
+    await Promise.all([
+      supabase
+        .from("shadow_trades")
+        .select("id, position_id, pnl_sol, happened_at")
+        .gte("happened_at", current.started_at)
+        .order("happened_at", { ascending: true }),
+      supabase
+        .from("shadow_strategy_state")
+        .select("starting_bankroll_sol")
+        .eq("id", 1)
+        .single(),
+    ]);
   if (tradeError) {
-    throw new Error(`live readiness trade load failed: ${tradeError.message}`);
+    throw new Error(`shadow readiness trade load failed: ${tradeError.message}`);
+  }
+  if (shadowStateError) {
+    throw new Error(`shadow readiness state load failed: ${shadowStateError.message}`);
   }
 
   const grouped = new Map<string, ReadinessPosition>();
   for (const row of rows ?? []) {
-    if (row.entry_alert?.strategyVersion !== REGULAR_STRATEGY_VERSION) continue;
     const positionId = row.position_id ?? `legacy_${row.id}`;
     const prior = grouped.get(positionId);
     grouped.set(positionId, {
@@ -44,16 +53,21 @@ export async function runLiveReadinessCheck(): Promise<void> {
     });
   }
 
+  const startingBankrollSol = Number(shadowState?.starting_bankroll_sol ?? 0);
+  if (!Number.isFinite(startingBankrollSol) || startingBankrollSol <= 0) {
+    throw new Error(`invalid shadow starting bankroll: ${shadowState?.starting_bankroll_sol}`);
+  }
+
   const result = calculateLiveReadiness({
     positions: [...grouped.values()],
     startedAt: current.started_at,
-    startingBankrollSol: config.position.simulatedBankrollSol,
+    startingBankrollSol,
   });
   const now = new Date().toISOString();
   const { error: updateError } = await supabase
     .from("live_readiness_state")
     .update({
-      strategy_version: REGULAR_STRATEGY_VERSION,
+      strategy_version: SHADOW_STRATEGY_VERSION,
       ready: result.ready,
       completed_trades: result.completedTrades,
       active_days: Number(result.activeDays.toFixed(4)),
@@ -77,7 +91,7 @@ export async function runLiveReadinessCheck(): Promise<void> {
   }
 
   console.log(
-    `[live-readiness] ${result.ready ? "READY" : "NOT READY"}; ` +
+    `[live-readiness:shadow] ${result.ready ? "READY" : "NOT READY"}; ` +
       `${result.completedTrades}/100 trades; ${result.activeDays.toFixed(1)}/45 days; ` +
       `PF ${result.profitFactor?.toFixed(2) ?? "n/a"}; ` +
       `drawdown ${(result.maxDrawdownPct * 100).toFixed(1)}%`
@@ -93,7 +107,7 @@ export function startLiveReadinessScheduler(): void {
     try {
       await runLiveReadinessCheck();
     } catch (error) {
-      console.error("[live-readiness] check failed safely:", error);
+      console.error("[live-readiness:shadow] check failed safely:", error);
     } finally {
       running = false;
     }
@@ -101,5 +115,5 @@ export function startLiveReadinessScheduler(): void {
 
   void run();
   setInterval(() => void run(), CHECK_INTERVAL_MS);
-  console.log("[live-readiness] 100-trade/45-day paper gate enabled");
+  console.log("[live-readiness:shadow] 100-trade/45-day paper gate enabled");
 }
