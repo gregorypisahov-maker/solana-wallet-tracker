@@ -42,7 +42,9 @@ export const config = {
     breakEvenActivationMultiple: 1.07,
     trailingActivationMultiple: 1.15,
     trailingStopPct: 0.08,
-    hardStopLossPct: 0.10,
+    // The first 200+ trade sample showed hard stops consuming most gains.
+    // Tighten the forward-test loss cap while leaving entries and winners unchanged.
+    hardStopLossPct: 0.08,
     maxHoldMinutes: 45,
   },
 
