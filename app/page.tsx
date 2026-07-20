@@ -1,195 +1,56 @@
 "use client";
 
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
-import "./compact-dashboard.css";
+import "./platform-v2.css";
 
-type BotId = "legion" | "scalper" | "shadow";
-type View = "overview" | "bots" | "trades" | "wallets" | "analytics";
-type WindowStats = { trades: number; wins: number; losses: number; pnlSol: number };
-type Bot = {
-  id: BotId; name: string; subtitle: string; version: string; state: any;
-  lastScanAt: string | null; openPositions: number; positions: any[];
-  completedTrades: number; wins: number; losses: number; winRate: number;
-  profitFactor: number | null; totalPnlSol: number; bankrollSol: number;
-  startingBankrollSol: number; maxDrawdownSol: number; recentTrades: any[]; scans?: any[];
-  recent24h: WindowStats; recent48h: WindowStats; previous48h: WindowStats;
-};
-type DashboardData = {
-  generatedAt: string; bots: Bot[];
-  overview: { totalPnlSol: number; totalEquitySol: number; completedTrades: number; wins: number; losses: number; openPositions: number; profitFactor: number | null; recent24hPnlSol: number; recent48hPnlSol: number; previous48hPnlSol: number };
-  recentActivity: any[]; wallets: any[]; walletPerformance: any[]; tokenScores: any[];
-  readiness: any; adaptive: any; usage: any; discoveryRuns: any[];
-};
+type BotId = "legion" | "scalper" | "shadow" | "scalper-shadow";
+type View = "overview" | "bots" | "trades" | "analytics" | "lab";
+type Bot = { id:BotId; name:string; subtitle:string; version:string; state:any; config?:any; lastScanAt:string|null; openPositions:number; positions:any[]; completedTrades:number; wins:number; losses:number; winRate:number; profitFactor:number|null; totalPnlSol:number; bankrollSol:number; startingBankrollSol:number; maxDrawdownSol:number; recentTrades:any[]; recent24h:any; recent48h:any; previous48h:any };
+type Data = { generatedAt:string; bots:Bot[]; overview:any; recentActivity:any[]; walletPerformance:any[]; usage:any; strategyLab:any };
 
-const sol = (value: number) => `${value >= 0 ? "+" : ""}${value.toFixed(3)} SOL`;
-const pct = (value: number) => `${(value * 100).toFixed(1)}%`;
-const short = (value: string | null | undefined) => value ? `${value.slice(0, 5)}…${value.slice(-4)}` : "—";
-const ageSeconds = (value: string | null | undefined, now: number) => value ? Math.max(0, Math.floor((now - Date.parse(value)) / 1000)) : Infinity;
-const ageText = (value: string | null | undefined, now: number) => {
-  const seconds = ageSeconds(value, now);
-  if (!Number.isFinite(seconds)) return "No data";
-  if (seconds < 5) return "just now";
-  if (seconds < 60) return `${seconds}s ago`;
-  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
-  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
-  return `${Math.floor(seconds / 86400)}d ago`;
-};
+const sol=(v:number)=>`${v>=0?"+":""}${v.toFixed(3)} SOL`;
+const pct=(v:number)=>`${(v*100).toFixed(1)}%`;
+const age=(v:string|null,now:number)=>{if(!v)return"No data";const s=Math.max(0,Math.floor((now-Date.parse(v))/1000));return s<60?`${s}s ago`:s<3600?`${Math.floor(s/60)}m ago`:`${Math.floor(s/3600)}h ago`};
+const short=(v:string)=>v?`${v.slice(0,5)}…${v.slice(-4)}`:"—";
 
-function botStatus(bot: Bot) {
-  if (bot.state?.enabled === false) return { label: "Offline", tone: "offline" };
-  if (bot.state?.halted) return { label: "Paused", tone: "paused" };
-  return { label: "Active", tone: "active" };
+function status(bot:Bot){if(bot.state?.enabled===false)return["Offline","offline"];if(bot.state?.halted)return["Paused","paused"];return["Active","active"]}
+function series(trades:any[],fallback=0){let x=0;const a=[...trades].reverse().map(t=>x+=Number(t.pnl??t.pnl_sol??0));return a.length>1?[0,...a]:[0,fallback]}
+function Chart({values,tone="green",large=false}:{values:number[];tone?:string;large?:boolean}){const w=600,h=large?170:62,min=Math.min(...values),max=Math.max(...values),r=max-min||1;const p=values.map((v,i)=>`${i/Math.max(1,values.length-1)*w},${h-((v-min)/r)*(h-16)-8}`).join(" ");return <svg className={`v2Chart ${tone} ${large?"large":""}`} viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none"><polyline points={p}/></svg>}
+function Icon({id}:{id:BotId}){return <div className={`v2Icon ${id}`}>{id==="legion"?"L":id==="scalper"?"ϟ":id==="shadow"?"◆":"Sϟ"}</div>}
+
+export default function Dashboard(){
+  const [data,setData]=useState<Data|null>(null),[view,setView]=useState<View>("overview"),[selected,setSelected]=useState<BotId|null>(null);
+  const [error,setError]=useState<string|null>(null),[needsLogin,setNeedsLogin]=useState(false),[password,setPassword]=useState(""),[now,setNow]=useState(Date.now()),[notice,setNotice]=useState<string|null>(null);
+  const refresh=useCallback(async()=>{try{const r=await fetch("/api/compact-dashboard",{cache:"no-store"});if(r.status===401){setNeedsLogin(true);setData(null);return}if(!r.ok)throw new Error("Could not load dashboard");setData(await r.json());setNeedsLogin(false);setError(null)}catch(e){setError(e instanceof Error?e.message:"Could not load dashboard")}},[]);
+  useEffect(()=>{void refresh();const a=setInterval(()=>void refresh(),10000),b=setInterval(()=>setNow(Date.now()),1000);return()=>{clearInterval(a);clearInterval(b)}},[refresh]);
+  const login=async(e:FormEvent)=>{e.preventDefault();const r=await fetch("/api/viewer-login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({password})});if(!r.ok){setError("Wrong password");return}setPassword("");await refresh()};
+  const control=async(bot:Bot,action:"resume"|"pause")=>{const p=prompt(`Password required to ${action} ${bot.name}`);if(!p)return;const r=await fetch("/api/bot-control",{method:"POST",headers:{"Content-Type":"application/json",Authorization:`Basic ${btoa(`owner:${p}`)}`},body:JSON.stringify({bot:bot.id==="scalper-shadow"?"scalper":bot.id,action})});const j=await r.json().catch(()=>({}));setNotice(r.ok?`${bot.name} ${action}d.`:(j.error??"Control failed"));await refresh()};
+  const bot=data?.bots.find(b=>b.id===selected);
+  if(!data){if(needsLogin)return <main className="v2Login"><form onSubmit={login}><div className="v2Mark">S</div><h1>Solana Tracker</h1><p>Private trading intelligence platform</p><input type="password" value={password} onChange={e=>setPassword(e.target.value)} placeholder="Dashboard password" autoFocus/><button>Open platform</button>{error&&<small>{error}</small>}</form></main>;return <main className="v2Login"><div className="v2Loader"><span/><div><strong>Solana Tracker</strong><p>{error??"Synchronizing live strategy data"}</p></div></div></main>}
+  if(bot)return <BotDetail bot={bot} now={now} back={()=>setSelected(null)} control={control}/>;
+  const live=Date.now()-Date.parse(data.generatedAt)<25000;
+  return <main className="v2App">
+    <aside><div className="v2Brand"><div className="v2Mark">S</div><div><strong>Solana Tracker</strong><small>Trading Intelligence</small></div></div><nav>{(["overview","bots","trades","analytics","lab"] as View[]).map(v=><button key={v} className={view===v?"active":""} onClick={()=>setView(v)}><i>{v==="overview"?"⌂":v==="bots"?"◈":v==="trades"?"⇄":v==="analytics"?"⌁":"⚙"}</i>{v==="lab"?"Strategy Lab":v[0].toUpperCase()+v.slice(1)}</button>)}</nav><div className="v2System"><span className={live?"":"stale"}/><div><strong>{live?"All systems live":"Connection stale"}</strong><small>Updated {age(data.generatedAt,now)}</small></div></div></aside>
+    <section className="v2Main"><header><div><small>Workspace</small><h1>{view==="lab"?"Strategy Lab":view[0].toUpperCase()+view.slice(1)}</h1></div><div className="v2Live"><span className={live?"":"stale"}/>{live?"Live":"Stale"}</div></header>{error&&<div className="v2Toast">{error}</div>}{notice&&<div className="v2Toast ok">{notice}</div>}
+      {view==="overview"&&<Overview data={data} now={now} open={setSelected}/>} {view==="bots"&&<Bots bots={data.bots} now={now} open={setSelected}/>} {view==="trades"&&<Trades trades={data.recentActivity}/>} {view==="analytics"&&<Analytics data={data}/>} {view==="lab"&&<StrategyLab data={data} refresh={refresh}/>} </section>
+    <nav className="v2Mobile">{(["overview","bots","trades","analytics","lab"] as View[]).map(v=><button key={v} className={view===v?"active":""} onClick={()=>setView(v)}>{v==="overview"?"⌂":v==="bots"?"◈":v==="trades"?"⇄":v==="analytics"?"⌁":"⚙"}<small>{v==="lab"?"Lab":v}</small></button>)}</nav>
+  </main>
 }
 
-function equitySeries(trades: any[], fallback = 0) {
-  const ordered = [...trades].reverse();
-  let running = 0;
-  const values = ordered.map((trade) => running += Number(trade.pnl ?? trade.pnl_sol ?? 0));
-  return values.length > 1 ? [0, ...values] : [0, fallback];
-}
+function Overview({data,now,open}:{data:Data;now:number;open:(id:BotId)=>void}){const wr=data.overview.completedTrades?data.overview.wins/data.overview.completedTrades:0;return <div className="v2Stack"><section className="v2Kpis"><Kpi label="Total equity" value={`${data.overview.totalEquitySol.toFixed(3)} SOL`} sub="Across four paper strategies"/><Kpi label="Total PnL" value={sol(data.overview.totalPnlSol)} tone={data.overview.totalPnlSol>=0?"positive":"negative"} sub={`${data.overview.completedTrades} trades`}/><Kpi label="Win rate" value={pct(wr)} sub={`${data.overview.wins} wins · ${data.overview.losses} losses`}/><Kpi label="Profit factor" value={data.overview.profitFactor?.toFixed(2)??"—"} sub={`${data.overview.openPositions} open positions`}/></section><section className="v2Panel v2Hero"><div><Title title="Portfolio performance" sub="Combined realized PnL"/><Chart values={series(data.recentActivity,data.overview.totalPnlSol)} large/></div><div className="v2Trend"><small>Last 24 hours</small><strong className={data.overview.recent24hPnlSol>=0?"positive":"negative"}>{sol(data.overview.recent24hPnlSol)}</strong><small>Last 48 hours</small><strong className={data.overview.recent48hPnlSol>=0?"positive":"negative"}>{sol(data.overview.recent48hPnlSol)}</strong></div></section><Title title="Strategy modules" sub="Production and forward-test bots"/><section className="v2Bots">{data.bots.map(b=><BotCard key={b.id} bot={b} now={now} open={()=>open(b.id)}/>)}</section><section className="v2Panel"><Title title="Recent trades" sub="Newest completed positions"/><TradeRows trades={data.recentActivity.slice(0,8)}/></section></div>}
+function Bots({bots,now,open}:{bots:Bot[];now:number;open:(id:BotId)=>void}){return <div className="v2Stack"><div className="v2Intro"><h2>Strategy modules</h2><p>Every live and forward-test strategy in one place.</p></div><section className="v2Bots full">{bots.map(b=><BotCard key={b.id} bot={b} now={now} open={()=>open(b.id)}/>)}</section></div>}
+function BotCard({bot,now,open}:{bot:Bot;now:number;open:()=>void}){const [label,tone]=status(bot);return <article className="v2Panel v2Bot"><div className="v2BotHead"><Icon id={bot.id}/><div><h3>{bot.name}</h3><p>{bot.subtitle}</p><small>{bot.version}</small></div><span className={`v2Badge ${tone}`}>{label}</span></div><div className="v2BotStats"><div><small>PnL</small><strong className={bot.totalPnlSol>=0?"positive":"negative"}>{sol(bot.totalPnlSol)}</strong></div><div><small>Win rate</small><strong>{pct(bot.winRate)}</strong></div><div><small>PF</small><strong>{bot.profitFactor?.toFixed(2)??"—"}</strong></div></div><Chart values={series(bot.recentTrades,bot.totalPnlSol)} tone={bot.id}/><footer><span>Scan {age(bot.lastScanAt,now)}</span><button onClick={open}>Open</button></footer></article>}
 
-function Chart({ values, tone = "green", large = false }: { values: number[]; tone?: string; large?: boolean }) {
-  const width = 600; const height = large ? 180 : 68;
-  const min = Math.min(...values); const max = Math.max(...values); const range = max - min || 1;
-  const points = values.map((value, index) => {
-    const x = (index / Math.max(1, values.length - 1)) * width;
-    const y = height - ((value - min) / range) * (height - 18) - 9;
-    return `${x.toFixed(1)},${y.toFixed(1)}`;
-  }).join(" ");
-  return <svg className={`platformChart ${tone} ${large ? "large" : ""}`} viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" aria-hidden="true"><polyline points={points}/></svg>;
-}
+function Trades({trades}:{trades:any[]}){const[q,setQ]=useState("");const f=trades.filter(t=>`${t.token_symbol??""} ${t.botName??""} ${t.exit_reason??t.reason??""}`.toLowerCase().includes(q.toLowerCase()));return <div className="v2Stack"><div className="v2Intro split"><div><h2>Trade history</h2><p>Completed positions across every strategy.</p></div><input value={q} onChange={e=>setQ(e.target.value)} placeholder="Search token, bot or exit"/></div><section className="v2Panel"><TradeRows trades={f}/></section></div>}
+function TradeRows({trades}:{trades:any[]}){return <div className="v2Trades"><div className="head"><span>Token</span><span>Bot</span><span>Exit</span><span>PnL</span></div>{trades.map((t,i)=>{const p=Number(t.pnl??t.pnl_sol??0);return <div className="row" key={`${t.botId}-${t.id??i}`}><span><b>{t.token_symbol??t.symbol??"UNKNOWN"}</b><small>{short(t.mint??"")}</small></span><span>{t.botName??t.botId}</span><span>{String(t.exit_reason??t.reason??"—").replaceAll("_"," ")}</span><strong className={p>=0?"positive":"negative"}>{sol(p)}</strong></div>)}</div>}
 
-function BotIcon({ id }: { id: BotId }) {
-  return <div className={`botGlyph ${id}`}>{id === "legion" ? "L" : id === "scalper" ? "ϟ" : "◆"}</div>;
-}
+function Analytics({data}:{data:Data}){const ranked=[...data.bots].sort((a,b)=>(b.profitFactor??0)-(a.profitFactor??0));const recent=data.overview.recent48hPnlSol,prev=data.overview.previous48hPnlSol;let label="Stable",tone="";if(recent<0){label="Weakening";tone="negative"}else if(recent-prev>0.05){label="Improving";tone="positive"}else if(prev-recent>0.05){label="Positive, but slowing";tone="amber"}return <div className="v2Stack"><div className="v2Intro"><h2>Analytics</h2><p>Automatic explanation of current performance.</p></div><section className="v2Panel v2Summary"><div><small>Live performance summary</small><h2 className={tone}>{label}</h2><p>{label==="Improving"?"Recent results are stronger than the previous period.":label==="Weakening"?"The latest 48-hour result is negative and needs attention.":label==="Positive, but slowing"?"Recent results remain profitable, but the pace is slower than the previous period.":"Performance is broadly unchanged."}</p></div><div className="v2SummaryGrid"><Kpi label="Last 24h" value={sol(data.overview.recent24hPnlSol)} tone={data.overview.recent24hPnlSol>=0?"positive":"negative"} sub="Combined"/><Kpi label="Last 48h" value={sol(recent)} tone={recent>=0?"positive":"negative"} sub="Combined"/><Kpi label="Strongest" value={ranked[0].name} sub={`PF ${ranked[0].profitFactor?.toFixed(2)??"—"}`}/><Kpi label="Needs work" value={ranked.at(-1)!.name} sub={`PF ${ranked.at(-1)!.profitFactor?.toFixed(2)??"—"}`}/></div></section><section className="v2Compare">{data.bots.map(b=><article className="v2Panel" key={b.id}><div className="v2BotHead"><Icon id={b.id}/><div><h3>{b.name}</h3><p>{b.completedTrades} trades</p></div></div><Chart values={series(b.recentTrades,b.totalPnlSol)} tone={b.id}/><dl><div><dt>PnL</dt><dd className={b.totalPnlSol>=0?"positive":"negative"}>{sol(b.totalPnlSol)}</dd></div><div><dt>Profit factor</dt><dd>{b.profitFactor?.toFixed(2)??"—"}</dd></div><div><dt>48h</dt><dd className={b.recent48h.pnlSol>=0?"positive":"negative"}>{sol(b.recent48h.pnlSol)}</dd></div><div><dt>Drawdown</dt><dd>{b.maxDrawdownSol.toFixed(3)} SOL</dd></div></dl></article>)}</section></div>}
 
-export default function Dashboard() {
-  const [data, setData] = useState<DashboardData | null>(null);
-  const [view, setView] = useState<View>("overview");
-  const [selectedBot, setSelectedBot] = useState<BotId | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
-  const [busyBot, setBusyBot] = useState<string | null>(null);
-  const [needsLogin, setNeedsLogin] = useState(false);
-  const [password, setPassword] = useState("");
-  const [loggingIn, setLoggingIn] = useState(false);
-  const [now, setNow] = useState(Date.now());
+const labFields=[
+  ["min_liquidity_usd","Minimum liquidity","USD"],["min_market_cap_usd","Minimum market cap","USD"],["max_market_cap_usd","Maximum market cap","USD"],["min_liquidity_to_mcap","Liquidity / market cap","ratio"],["min_five_minute_change_pct","Minimum 5m move","%"],["max_five_minute_change_pct","Maximum 5m move","%"],["min_fifteen_minute_change_pct","Minimum 15m move","%"],["max_fifteen_minute_change_pct","Maximum 15m move","%"],["min_volume_usd","Minimum 5m volume","USD"],["min_buyers","Minimum buyers",""],["min_buy_sell_ratio","Buy / sell ratio","ratio"],["min_pool_age_minutes","Minimum pool age","min"],["max_pool_age_minutes","Maximum pool age","min"],["hard_stop_loss_pct","Hard stop","%"],["target_profit_pct","Take profit","%"],["trailing_activation_pct","Trail activation","%"],["trailing_giveback_pct","Trail giveback","%"],["max_hold_seconds","Maximum hold","sec"]
+] as const;
+function StrategyLab({data,refresh}:{data:Data;refresh:()=>Promise<void>}){const current=data.strategyLab?.scalperShadowConfig??{};const[form,setForm]=useState<any>(current),[msg,setMsg]=useState("");useEffect(()=>setForm(current),[data.generatedAt]);const scalper=data.bots.find(b=>b.id==="scalper")!;const matching=scalper.recentTrades.filter(t=>{const c=t.entry_snapshot?.candidate??t.entry_snapshot?.discovery??{};if(!c.marketCapUsd&&!c.market_cap_usd)return true;const m=Number(c.marketCapUsd??c.market_cap_usd),l=Number(c.liquidityUsd??c.liquidity_usd),m5=Number(c.fiveMinuteChangePct??c.five_minute_change_pct),m15=Number(c.fifteenMinuteChangePct??c.fifteen_minute_change_pct);return l>=Number(form.min_liquidity_usd)&&m>=Number(form.min_market_cap_usd)&&m<=Number(form.max_market_cap_usd)&&l/Math.max(1,m)>=Number(form.min_liquidity_to_mcap)&&m5>=Number(form.min_five_minute_change_pct)&&m5<=Number(form.max_five_minute_change_pct)&&m15>=Number(form.min_fifteen_minute_change_pct)&&m15<=Number(form.max_fifteen_minute_change_pct)});const pnl=matching.reduce((s,t)=>s+Number(t.pnl??t.pnl_sol??0),0),gp=matching.filter(t=>Number(t.pnl??t.pnl_sol)>0).reduce((s,t)=>s+Number(t.pnl??t.pnl_sol),0),gl=Math.abs(matching.filter(t=>Number(t.pnl??t.pnl_sol)<0).reduce((s,t)=>s+Number(t.pnl??t.pnl_sol),0)),pf=gl?gp/gl:null,win=matching.length?matching.filter(t=>Number(t.pnl??t.pnl_sol)>0).length/matching.length:0,retention=scalper.completedTrades?matching.length/scalper.completedTrades:0;const quality=Math.max(0,Math.min(100,Math.round((Math.min(2,pf??0)/2)*40+(pnl>0?20:0)+(1-Math.min(1,scalper.maxDrawdownSol))*15+Math.min(1,matching.length/50)*25)));const verdict=matching.length<15?"Promising only if more trades confirm it":pf&&pf>1.2&&pnl>0?"Better historical risk-adjusted result":retention<0.2?"Too restrictive — very few opportunities":"No reliable improvement yet";const save=async()=>{const p=prompt("Owner password required to start this Scalper Shadow experiment");if(!p)return;const r=await fetch("/api/strategy-lab",{method:"POST",headers:{"Content-Type":"application/json",Authorization:`Basic ${btoa(`owner:${p}`)}`},body:JSON.stringify({strategy:"scalper-shadow",config:form,savePreset:true,presetName:`Scalper Shadow ${new Date().toLocaleDateString()}`})});const j=await r.json().catch(()=>({}));setMsg(r.ok?"Scalper Shadow settings saved. The forward test will use them on its next scan.":j.error??"Could not save");if(r.ok)await refresh()};return <div className="v2Stack"><div className="v2Intro"><h2>Strategy Lab</h2><p>Adjust experimental filters without touching the regular Scalper.</p></div><section className="v2Lab"><div className="v2Panel v2Controls"><div className="v2LabHead"><div><h3>Scalper Shadow filters</h3><p>Changes apply only to the independent forward test.</p></div><span>Protected experiment</span></div><div className="v2FieldGrid">{labFields.map(([key,label,unit])=><label key={key}><span>{label}</span><div><input type="number" step="any" value={form[key]??0} onChange={e=>setForm({...form,[key]:Number(e.target.value)})}/><small>{unit}</small></div></label>)}</div><button className="v2Save" onClick={save}>Save & start forward test</button>{msg&&<p className="v2Message">{msg}</p>}</div><div className="v2Panel v2Preview"><small>Historical preview</small><div className={`v2Score ${quality>=65?"good":quality>=40?"mid":"bad"}`}>{quality}<span>/100</span></div><h3>{verdict}</h3><p>This preview filters the Scalper’s stored entry snapshots. The real decision must come from new Scalper Shadow forward trades.</p><dl><div><dt>Matching trades</dt><dd>{matching.length}</dd></div><div><dt>Opportunity retained</dt><dd>{(retention*100).toFixed(0)}%</dd></div><div><dt>Historical PnL</dt><dd className={pnl>=0?"positive":"negative"}>{sol(pnl)}</dd></div><div><dt>Profit factor</dt><dd>{pf?.toFixed(2)??"—"}</dd></div><div><dt>Win rate</dt><dd>{pct(win)}</dd></div></dl><div className="v2Warning">Historical previews can overfit. Promote settings only after 50–100 independent Scalper Shadow trades.</div></div></section></div>}
 
-  const refresh = useCallback(async () => {
-    try {
-      const response = await fetch("/api/compact-dashboard", { cache: "no-store" });
-      if (response.status === 401) { setNeedsLogin(true); setData(null); return; }
-      if (!response.ok) throw new Error("Could not load live dashboard data");
-      setData(await response.json()); setNeedsLogin(false); setError(null);
-    } catch (requestError) { setError(requestError instanceof Error ? requestError.message : "Could not load dashboard"); }
-  }, []);
-
-  useEffect(() => {
-    void refresh();
-    const refreshTimer = window.setInterval(() => void refresh(), 10_000);
-    const clockTimer = window.setInterval(() => setNow(Date.now()), 1000);
-    return () => { window.clearInterval(refreshTimer); window.clearInterval(clockTimer); };
-  }, [refresh]);
-
-  const login = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault(); setLoggingIn(true); setError(null);
-    try {
-      const response = await fetch("/api/viewer-login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ password }) });
-      const result = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(result.error ?? "Could not sign in");
-      setPassword(""); await refresh();
-    } catch (loginError) { setError(loginError instanceof Error ? loginError.message : "Could not sign in"); }
-    finally { setLoggingIn(false); }
-  };
-
-  const controlBot = async (bot: Bot, action: "resume" | "pause") => {
-    const ownerPassword = window.prompt(`Password required to ${action} ${bot.name}`);
-    if (!ownerPassword) return;
-    setBusyBot(bot.id); setNotice(null);
-    try {
-      const authorization = `Basic ${window.btoa(`owner:${ownerPassword}`)}`;
-      const response = await fetch("/api/bot-control", { method: "POST", headers: { "Content-Type": "application/json", Authorization: authorization }, body: JSON.stringify({ bot: bot.id, action }) });
-      const result = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(result.error ?? `Could not ${action} bot`);
-      setNotice(`${bot.name} ${action === "resume" ? "resumed" : "paused"}.`); await refresh();
-    } catch (controlError) { setNotice(controlError instanceof Error ? controlError.message : "Bot control failed"); }
-    finally { setBusyBot(null); }
-  };
-
-  const selected = useMemo(() => data?.bots.find((bot) => bot.id === selectedBot) ?? null, [data, selectedBot]);
-
-  if (!data) {
-    if (needsLogin) return <main className="platformLogin"><div className="loginPanel"><div className="productMark">S</div><div><h1>Solana Tracker</h1><p>Private trading intelligence platform</p></div><form onSubmit={login}><input type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="Dashboard password" autoFocus required/><button disabled={loggingIn}>{loggingIn ? "Opening…" : "Open platform"}</button></form>{error && <div className="toast error">{error}</div>}</div></main>;
-    return <main className="platformLogin"><div className="loadingPanel professionalLoader"><div className="loaderMark"><span/></div><div><strong>Solana Tracker</strong><p>{error ?? "Establishing secure connection"}</p><small>Synchronizing strategy data and system status</small></div><div className="loaderProgress"><i/></div></div></main>;
-  }
-
-  const dashboardLive = ageSeconds(data.generatedAt, now) < 25;
-  const overviewWinRate = data.overview.completedTrades ? data.overview.wins / data.overview.completedTrades : 0;
-  const combinedSeries = equitySeries(data.recentActivity, data.overview.totalPnlSol);
-
-  if (selected) return <BotDetail bot={selected} now={now} onBack={() => setSelectedBot(null)} onControl={controlBot} busy={busyBot === selected.id} notice={notice}/>;
-
-  return <main className="platformApp">
-    <aside className="platformSidebar">
-      <div className="brandBlock"><div className="productMark">S</div><div><strong>Solana Tracker</strong><span>Trading Intelligence</span></div></div>
-      <nav>{(["overview","bots","trades","wallets","analytics"] as View[]).map((item) => <button key={item} className={view === item ? "active" : ""} onClick={() => setView(item)}><span>{item === "overview" ? "⌂" : item === "bots" ? "◈" : item === "trades" ? "⇄" : item === "wallets" ? "◉" : "⌁"}</span>{item[0].toUpperCase() + item.slice(1)}</button>)}</nav>
-      <div className="sidebarFoot"><span className={`systemDot ${dashboardLive ? "" : "stale"}`}/><div><strong>{dashboardLive ? "All systems live" : "Connection stale"}</strong><small>Updated {ageText(data.generatedAt, now)}</small></div></div>
-    </aside>
-
-    <section className="platformMain">
-      <header className="platformTopbar"><div><p>Workspace</p><h1>{view[0].toUpperCase() + view.slice(1)}</h1></div><div className="topbarRight"><div className="livePill"><span className={`systemDot ${dashboardLive ? "" : "stale"}`}/>{dashboardLive ? "Live" : "Stale"}</div><time>{new Date(now).toLocaleTimeString([], { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" })}</time></div></header>
-      {error && <div className="toast error">{error}. Showing last snapshot.</div>}{notice && <div className="toast success">{notice}</div>}
-      {view === "overview" && <Overview data={data} overviewWinRate={overviewWinRate} combinedSeries={combinedSeries} now={now} onBot={(id: BotId) => setSelectedBot(id)} onControl={controlBot} busyBot={busyBot}/>}      
-      {view === "bots" && <BotsView bots={data.bots} now={now} onOpen={setSelectedBot} onControl={controlBot} busyBot={busyBot}/>}      
-      {view === "trades" && <TradesView trades={data.recentActivity}/>}      
-      {view === "wallets" && <WalletsView wallets={data.wallets} performance={data.walletPerformance}/>}      
-      {view === "analytics" && <AnalyticsView data={data}/>}      
-    </section>
-
-    <nav className="mobileNav">{(["overview","bots","trades","wallets","analytics"] as View[]).map((item) => <button key={item} className={view === item ? "active" : ""} onClick={() => setView(item)}>{item === "overview" ? "⌂" : item === "bots" ? "◈" : item === "trades" ? "⇄" : item === "wallets" ? "◉" : "⌁"}<span>{item}</span></button>)}</nav>
-  </main>;
-}
-
-function Overview({ data, overviewWinRate, combinedSeries, now, onBot, onControl, busyBot }: any) {
-  return <div className="viewStack"><section className="kpiGrid">
-    <Kpi label="Total equity" value={`${data.overview.totalEquitySol.toFixed(3)} SOL`} sub="Across all paper strategies"/>
-    <Kpi label="Total PnL" value={sol(data.overview.totalPnlSol)} tone={data.overview.totalPnlSol >= 0 ? "positive" : "negative"} sub={`${data.overview.completedTrades} completed trades`}/>
-    <Kpi label="Win rate" value={pct(overviewWinRate)} sub={`${data.overview.wins} wins · ${data.overview.losses} losses`}/>
-    <Kpi label="Profit factor" value={data.overview.profitFactor == null ? "—" : data.overview.profitFactor.toFixed(2)} sub={`${data.overview.openPositions} open positions`}/>
-  </section>
-  <section className="heroGrid"><div className="panel performancePanel"><PanelTitle title="Portfolio performance" sub="Combined realized PnL across all bots"/><Chart values={combinedSeries} tone="green" large/></div><div className="panel readinessPanel"><PanelTitle title="Live readiness" sub={data.readiness?.strategy_version ?? "Current forward test"}/><div className={`readinessScore ${data.readiness?.ready ? "ready" : "notReady"}`}>{data.readiness?.ready ? "Ready" : "Testing"}</div><dl><div><dt>Trades</dt><dd>{data.readiness?.completed_trades ?? 0}</dd></div><div><dt>Active days</dt><dd>{Number(data.readiness?.active_days ?? 0).toFixed(1)}</dd></div><div><dt>Drawdown</dt><dd>{Number(data.readiness?.max_drawdown_pct ?? 0).toFixed(1)}%</dd></div></dl></div></section>
-  <section><PanelTitle title="Strategy modules" sub="Live status and current performance"/><div className="strategyGrid">{data.bots.map((bot: Bot) => <BotModule key={bot.id} bot={bot} now={now} onOpen={() => onBot(bot.id)} onControl={onControl} busy={busyBot === bot.id}/>)}</div></section>
-  <section className="panel overviewTrades"><PanelTitle title="Recent trades" sub="Newest completed positions across all strategies"/><TradeTable trades={data.recentActivity.slice(0, 7)} compact/></section></div>;
-}
-
-function BotsView({ bots, now, onOpen, onControl, busyBot }: any) { return <div className="viewStack"><div className="pageIntro"><h2>Strategy modules</h2><p>Performance, risk state, scan freshness and controls for every bot.</p></div><div className="botsFullGrid">{bots.map((bot: Bot) => <BotModule key={bot.id} bot={bot} now={now} onOpen={() => onOpen(bot.id)} onControl={onControl} busy={busyBot === bot.id} expanded/>)}</div></div>; }
-function TradesView({ trades }: { trades: any[] }) { const [query,setQuery]=useState(""); const filtered=trades.filter((t)=>`${t.token_symbol ?? t.symbol ?? ""} ${t.botName ?? ""} ${t.reason ?? t.exit_reason ?? ""}`.toLowerCase().includes(query.toLowerCase())); return <div className="viewStack"><div className="pageIntro split"><div><h2>Trade history</h2><p>Searchable completed trades across every strategy.</p></div><input className="searchInput" placeholder="Search token, bot or reason" value={query} onChange={(e)=>setQuery(e.target.value)}/></div><div className="panel"><TradeTable trades={filtered}/></div></div>; }
-function WalletsView({ wallets, performance }: any) { const byAddress=new Map(performance.map((row:any)=>[row.wallet_address,row])); return <div className="viewStack"><div className="pageIntro"><h2>Wallet intelligence</h2><p>Tracked wallets, management state and historical trading quality.</p></div><div className="panel tableWrap"><table className="dataTable"><thead><tr><th>Wallet</th><th>Status</th><th>Trust</th><th>Win rate</th><th>Profit factor</th><th>PnL</th></tr></thead><tbody>{wallets.map((wallet:any)=>{const p:any=byAddress.get(wallet.address)??{};return <tr key={wallet.address}><td><strong>{wallet.label??short(wallet.address)}</strong><small>{short(wallet.address)}</small></td><td>{wallet.management_status}</td><td>{Number(p.trust_score??0).toFixed(0)}</td><td>{Number(p.win_rate??0).toFixed(1)}%</td><td>{p.profit_factor==null?"—":Number(p.profit_factor).toFixed(2)}</td><td className={Number(p.realized_pnl_sol??0)>=0?"positive":"negative"}>{sol(Number(p.realized_pnl_sol??0))}</td></tr>})}</tbody></table></div></div>; }
-
-function performanceText(bot: Bot) {
-  const pf = bot.profitFactor ?? 0;
-  const recent = bot.recent48h?.pnlSol ?? 0;
-  if (bot.completedTrades < 25) return `${bot.name} is still early in its test with ${bot.completedTrades} completed trades. More data is needed before trusting the result.`;
-  if (bot.totalPnlSol > 0 && pf >= 1.5) return `${bot.name} is showing the strongest quality: positive PnL, profit factor ${pf.toFixed(2)}, and ${sol(recent)} over the last 48 hours.`;
-  if (bot.totalPnlSol > 0 && pf >= 1) return `${bot.name} is profitable, but the edge is still modest. It has ${sol(bot.totalPnlSol)} overall and ${sol(recent)} over the last 48 hours.`;
-  if (recent > 0) return `${bot.name} is still below breakeven overall, but recent performance has improved with ${sol(recent)} over the last 48 hours.`;
-  return `${bot.name} remains below breakeven and has not yet shown a reliable edge. The last 48 hours produced ${sol(recent)}.`;
-}
-
-function AnalyticsView({ data }: { data: DashboardData }) {
-  const ranked = [...data.bots].sort((a,b)=>(b.profitFactor ?? 0)-(a.profitFactor ?? 0));
-  const strongest = ranked[0];
-  const weakest = ranked[ranked.length-1];
-  const trendDelta = data.overview.recent48hPnlSol - data.overview.previous48hPnlSol;
-  const trendLabel = trendDelta > 0.05 ? "Improving" : trendDelta < -0.05 ? "Weakening" : "Stable";
-  const tone = trendLabel === "Improving" ? "positive" : trendLabel === "Weakening" ? "negative" : "";
-  return <div className="viewStack"><div className="pageIntro"><h2>Analytics</h2><p>Live strategy comparison, recent direction and system health.</p></div>
-    <section className="panel analyticsSummary"><div className="summaryHeadline"><div><span>Live performance summary</span><h2 className={tone}>{trendLabel}</h2><p>Updated automatically from Supabase every 10 seconds.</p></div><div className="summaryQuick"><div><small>Last 24h</small><strong className={data.overview.recent24hPnlSol>=0?"positive":"negative"}>{sol(data.overview.recent24hPnlSol)}</strong></div><div><small>Last 48h</small><strong className={data.overview.recent48hPnlSol>=0?"positive":"negative"}>{sol(data.overview.recent48hPnlSol)}</strong></div><div><small>Strongest</small><strong>{strongest.name}</strong></div><div><small>Needs work</small><strong>{weakest.name}</strong></div></div></div><div className="summaryNarrative"><p>{trendLabel === "Improving" ? "Combined results are better than the previous 48-hour period." : trendLabel === "Weakening" ? "Combined results are worse than the previous 48-hour period, so the newest trades need attention." : "Combined performance is broadly unchanged compared with the previous 48-hour period."}</p>{data.bots.map((bot)=><div key={bot.id} className={`summaryBot ${bot.id}`}><BotIcon id={bot.id}/><p>{performanceText(bot)}</p></div>)}</div></section>
-    <div className="strategyCompare">{data.bots.map((bot)=><div key={bot.id} className="panel"><div className="compareHead"><BotIcon id={bot.id}/><div><strong>{bot.name}</strong><span>{bot.version}</span></div></div><Chart values={equitySeries(bot.recentTrades,bot.totalPnlSol)} tone={bot.id}/><dl className="compareStats"><div><dt>PnL</dt><dd className={bot.totalPnlSol>=0?"positive":"negative"}>{sol(bot.totalPnlSol)}</dd></div><div><dt>Profit factor</dt><dd>{bot.profitFactor?.toFixed(2)??"—"}</dd></div><div><dt>Last 48h</dt><dd className={bot.recent48h.pnlSol>=0?"positive":"negative"}>{sol(bot.recent48h.pnlSol)}</dd></div><div><dt>Sample</dt><dd>{bot.completedTrades} trades</dd></div></dl></div>)}</div><div className="twoCol"><div className="panel"><PanelTitle title="Top wallets" sub="Highest trust scores"/><div className="rankList">{[...data.walletPerformance].sort((a,b)=>Number(b.trust_score)-Number(a.trust_score)).slice(0,8).map((row,index)=><div key={row.wallet_address}><b>#{index+1}</b><span>{short(row.wallet_address)}</span><strong>{Number(row.trust_score).toFixed(0)}</strong></div>)}</div></div><div className="panel"><PanelTitle title="Infrastructure" sub="Latest monitor usage sample"/><dl className="healthStats"><div><dt>Mode</dt><dd>{data.usage?.mode??"—"}</dd></div><div><dt>WebSocket events</dt><dd>{data.usage?.websocket_notifications??0}</dd></div><div><dt>RPC failures</dt><dd>{data.usage?.rpc_failures??0}</dd></div><div><dt>Rate limits</dt><dd>{data.usage?.rate_limit_errors??0}</dd></div><div><dt>Queue depth</dt><dd>{data.usage?.max_queue_depth??0}</dd></div></dl></div></div></div>;
-}
-
-function BotDetail({ bot, now, onBack, onControl, busy, notice }: any) { const state=botStatus(bot);const canResume=state.tone!=="active";return <main className="platformApp detailOnly"><section className="platformMain"><button className="backButton" onClick={onBack}>← Back to platform</button>{notice&&<div className="toast success">{notice}</div>}<div className="viewStack"><section className="panel detailHero"><BotIcon id={bot.id}/><div><div className="detailName"><h1>{bot.name}</h1><span className={`badge ${state.tone}`}>{state.label}</span></div><p>{bot.subtitle}</p><span>{bot.version}</span></div><div className="detailPnl"><small>Total PnL</small><strong className={bot.totalPnlSol>=0?"positive":"negative"}>{sol(bot.totalPnlSol)}</strong></div></section><section className="kpiGrid"><Kpi label="Bankroll" value={`${bot.bankrollSol.toFixed(3)} SOL`} sub={`Started ${bot.startingBankrollSol.toFixed(3)} SOL`}/><Kpi label="Win rate" value={pct(bot.winRate)} sub={`${bot.wins}W · ${bot.losses}L`}/><Kpi label="Profit factor" value={bot.profitFactor?.toFixed(2)??"—"} sub={`${bot.completedTrades} trades`}/><Kpi label="Max drawdown" value={`${bot.maxDrawdownSol.toFixed(3)} SOL`} sub={`${bot.openPositions} open positions`}/></section><section className="panel detailPerformance"><PanelTitle title="Equity curve" sub={`Last scan ${ageText(bot.lastScanAt,now)}`}/><Chart values={equitySeries(bot.recentTrades,bot.totalPnlSol)} tone={bot.id} large/></section><div className="detailActions"><button className="primaryAction" disabled={busy||!canResume} onClick={()=>onControl(bot,"resume")}>{busy?"Updating…":canResume?"Resume bot":"Bot running"}</button><button className="dangerAction" disabled={busy||canResume} onClick={()=>onControl(bot,"pause")}>Pause bot</button></div><section className="twoCol"><div className="panel"><PanelTitle title="Recent trades" sub="Latest completed positions"/><TradeTable trades={bot.recentTrades}/></div><div className="panel"><PanelTitle title="Open positions" sub="Current exposure"/>{bot.positions.length?bot.positions.map((p:any)=><div className="positionRow" key={p.position_id??p.mint}><div><strong>{p.token_symbol}</strong><span>{short(p.mint)}</span></div><b>{Number(p.size_sol??0).toFixed(3)} SOL</b></div>):<div className="emptyState">No open positions</div>}</div></section></div></section></main>; }
-function BotModule({ bot, now, onOpen, onControl, busy, expanded=false }: any){const state=botStatus(bot);return <article className={`panel strategyCard ${expanded?"expanded":""}`}><div className="strategyHead"><BotIcon id={bot.id}/><div><div><h3>{bot.name}</h3><span className={`badge ${state.tone}`}>{state.label}</span></div><p>{bot.subtitle}</p><span>{bot.version}</span></div></div><div className="strategyNumbers"><div><small>PnL</small><strong className={bot.totalPnlSol>=0?"positive":"negative"}>{sol(bot.totalPnlSol)}</strong></div><div><small>Win rate</small><strong>{pct(bot.winRate)}</strong></div><div><small>PF</small><strong>{bot.profitFactor?.toFixed(2)??"—"}</strong></div></div><Chart values={equitySeries(bot.recentTrades,bot.totalPnlSol)} tone={bot.id}/><div className="strategyFoot"><span>Scan {ageText(bot.lastScanAt,now)}</span><div><button className="openSmall" onClick={onOpen}>Open</button>{state.tone!=="active"&&<button className="resumeSmall" disabled={busy} onClick={()=>onControl(bot,"resume")}>Resume</button>}</div></div></article>}
-function TradeTable({ trades, compact=false }: any){return <div className="tableWrap"><table className="dataTable"><thead><tr><th>Token</th><th>Bot</th><th>Exit</th><th>PnL</th>{!compact&&<><th>Return</th><th>Time</th></>}</tr></thead><tbody>{trades.map((t:any,index:number)=>{const pnl=Number(t.pnl??t.pnl_sol??0);return <tr key={`${t.botId}-${t.id??t.position_id??index}`}><td><strong>{t.token_symbol??t.symbol??"UNKNOWN"}</strong><small>{short(t.mint)}</small></td><td>{t.botName??t.botId??"—"}</td><td>{String(t.reason??t.exit_reason??"—").replaceAll("_"," ")}</td><td className={pnl>=0?"positive":"negative"}>{sol(pnl)}</td>{!compact&&<><td>{Number(t.net_return_pct??((Number(t.multiple??1)-1)*100)).toFixed(1)}%</td><td>{t.happenedAt?new Date(t.happenedAt).toLocaleString():"—"}</td></>}</tr>})}</tbody></table></div>}
-function PanelTitle({title,sub}:{title:string;sub:string}){return <div className="panelTitle"><h2>{title}</h2><p>{sub}</p></div>}
-function Kpi({label,value,sub,tone}:{label:string;value:string;sub:string;tone?:string}){return <div className="kpiCard"><span>{label}</span><strong className={tone}>{value}</strong><small>{sub}</small></div>}
+function BotDetail({bot,now,back,control}:{bot:Bot;now:number;back:()=>void;control:(b:Bot,a:"resume"|"pause")=>void}){const[label,tone]=status(bot);return <main className="v2Detail"><button onClick={back}>← Back to platform</button><section className="v2Panel v2DetailHead"><Icon id={bot.id}/><div><h1>{bot.name}</h1><p>{bot.subtitle}</p><small>{bot.version}</small></div><span className={`v2Badge ${tone}`}>{label}</span></section><section className="v2Kpis"><Kpi label="Bankroll" value={`${bot.bankrollSol.toFixed(3)} SOL`} sub={`Started ${bot.startingBankrollSol.toFixed(3)}`}/><Kpi label="PnL" value={sol(bot.totalPnlSol)} tone={bot.totalPnlSol>=0?"positive":"negative"} sub={`${bot.completedTrades} trades`}/><Kpi label="Win rate" value={pct(bot.winRate)} sub={`${bot.wins}W · ${bot.losses}L`}/><Kpi label="Profit factor" value={bot.profitFactor?.toFixed(2)??"—"} sub={`Drawdown ${bot.maxDrawdownSol.toFixed(3)}`}/></section><section className="v2Panel"><Title title="Equity curve" sub={`Last scan ${age(bot.lastScanAt,now)}`}/><Chart values={series(bot.recentTrades,bot.totalPnlSol)} tone={bot.id} large/></section>{bot.id!=="scalper-shadow"&&<div className="v2Actions"><button onClick={()=>control(bot,"resume")}>Resume</button><button className="danger" onClick={()=>control(bot,"pause")}>Pause</button></div>}<section className="v2Panel"><Title title="Recent trades" sub="Latest completed positions"/><TradeRows trades={bot.recentTrades}/></section></main>}
+function Kpi({label,value,sub,tone}:{label:string;value:string;sub:string;tone?:string}){return <div className="v2Kpi"><small>{label}</small><strong className={tone}>{value}</strong><span>{sub}</span></div>}
+function Title({title,sub}:{title:string;sub:string}){return <div className="v2Title"><h2>{title}</h2><p>{sub}</p></div>}
