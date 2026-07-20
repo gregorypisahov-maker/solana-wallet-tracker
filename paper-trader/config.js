@@ -35,7 +35,7 @@ const config = {
     breakEvenActivationMultiple: 1.07,
     trailingActivationMultiple: 1.15,
     trailingStopPct: 0.08,
-    hardStopLossPct: 0.10,
+    hardStopLossPct: 0.08,
     maxHoldMinutes: 45,
   },
 
