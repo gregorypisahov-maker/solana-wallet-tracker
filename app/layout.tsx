@@ -1,5 +1,6 @@
 import "./globals.css";
 import "./professional-loader.css";
+import "./mobile-trades.css";
 import type { ReactNode } from "react";
 
 export const metadata = {
