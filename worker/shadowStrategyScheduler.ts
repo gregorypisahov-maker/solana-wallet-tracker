@@ -9,7 +9,7 @@ import { getTrustScoresForWallets } from "../paper-trader/walletPerformance";
 
 const supabase = getSupabaseAdmin();
 const ALERT_POLL_MS = 5_000;
-const POSITION_CHECK_MS = 5_000;
+const POSITION_CHECK_MS = 3_000;
 const SUMMARY_INTERVAL_MS = 30 * 60_000;
 
 const SHADOW_FILTERS = {
