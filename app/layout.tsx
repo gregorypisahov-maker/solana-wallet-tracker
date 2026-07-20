@@ -2,6 +2,7 @@ import "./globals.css";
 import "./professional-loader.css";
 import "./mobile-trades.css";
 import "./analytics-summary.css";
+import AnalyticsToneFix from "./AnalyticsToneFix";
 import type { ReactNode } from "react";
 
 export const metadata = {
@@ -12,7 +13,10 @@ export const metadata = {
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (
     <html lang="en">
-      <body>{children}</body>
+      <body>
+        <AnalyticsToneFix />
+        {children}
+      </body>
     </html>
   );
 }
