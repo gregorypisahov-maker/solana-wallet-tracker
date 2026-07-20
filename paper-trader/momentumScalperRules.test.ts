@@ -32,6 +32,28 @@ test("accepts the balanced, liquidity-backed scalper profile", () => {
   assert.ok(result.score >= SCALP_RULES.minimumSignalScore);
 });
 
+test("ranks a shadow-quality market profile above an otherwise identical candidate", () => {
+  const ordinary = evaluateScalpCandidate(candidate);
+  const shadowAligned = evaluateScalpCandidate({
+    ...candidate,
+    liquidityUsd: 65_000,
+    marketCapUsd: 180_000,
+  });
+
+  assert.equal(shadowAligned.accepted, true);
+  assert.ok(shadowAligned.score > ordinary.score);
+  assert.equal(
+    shadowAligned.score - ordinary.score,
+    SCALP_RULES.shadowMarketCapScoreBonus +
+      SCALP_RULES.shadowLiquidityScoreBonus
+  );
+});
+
+test("keeps valid wider-range candidates eligible instead of over-filtering", () => {
+  const result = evaluateScalpCandidate(candidate);
+  assert.equal(result.accepted, true);
+});
+
 test("rejects discovery candidates with thin liquidity backing", () => {
   const result = evaluateScalpCandidate({
     ...candidate,
