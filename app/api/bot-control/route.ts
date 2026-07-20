@@ -22,34 +22,61 @@ export async function POST(request: NextRequest) {
 
   const supabase = getSupabaseAdmin({ noStore: true });
   const now = new Date().toISOString();
-  let query;
+
+  let table: "paper_state" | "scalp_state" | "shadow_strategy_state";
+  let update: Record<string, unknown>;
 
   if (bot === "legion") {
-    query = supabase
-      .from("paper_state")
-      .update(action === "resume"
-        ? { halted: false, halt_reason: null, consecutive_losses: 0, updated_at: now }
-        : { halted: true, halt_reason: "manual_dashboard_pause", updated_at: now })
-      .eq("id", 1);
+    table = "paper_state";
+    update = action === "resume"
+      ? { halted: false, halt_reason: null, consecutive_losses: 0, updated_at: now }
+      : { halted: true, halt_reason: "manual_dashboard_pause", updated_at: now };
   } else if (bot === "scalper") {
-    query = supabase
-      .from("scalp_state")
-      .update(action === "resume"
-        ? { enabled: true, halted: false, halt_reason: null, consecutive_losses: 0, updated_at: now }
-        : { halted: true, halt_reason: "manual_dashboard_pause", updated_at: now })
-      .eq("id", 1);
+    table = "scalp_state";
+    update = action === "resume"
+      ? {
+          enabled: true,
+          halted: false,
+          halt_reason: null,
+          consecutive_losses: 0,
+          // A scalper halted at the daily-entry guard otherwise re-halts on the
+          // very next scan. A deliberate owner resume starts a fresh manual
+          // entry allowance while leaving bankroll and PnL untouched.
+          entries_today: 0,
+          daily_date: now.slice(0, 10),
+          updated_at: now,
+        }
+      : { halted: true, halt_reason: "manual_dashboard_pause", updated_at: now };
   } else {
-    query = supabase
-      .from("shadow_strategy_state")
-      .update({ enabled: action === "resume", updated_at: now })
-      .eq("id", 1);
+    table = "shadow_strategy_state";
+    update = { enabled: action === "resume", updated_at: now };
   }
 
-  const { error } = await query;
+  const { data, error } = await supabase
+    .from(table)
+    .update(update)
+    .eq("id", 1)
+    .select("*")
+    .single();
+
   if (error) {
     console.error(`[bot-control] ${bot} ${action} failed`, error);
-    return NextResponse.json({ error: "Could not update bot state" }, { status: 500 });
+    return NextResponse.json({ error: `Could not ${action} ${bot}: ${error.message}` }, { status: 500 });
   }
 
-  return NextResponse.json({ ok: true, bot, action, updatedAt: now }, { headers: { "Cache-Control": "no-store" } });
+  const resumed = action !== "resume" || (
+    bot === "shadow"
+      ? data?.enabled === true
+      : data?.halted === false && (bot !== "scalper" || data?.enabled === true)
+  );
+
+  if (!resumed) {
+    console.error(`[bot-control] ${bot} resume did not persist`, data);
+    return NextResponse.json({ error: "Resume did not persist in the database" }, { status: 409 });
+  }
+
+  return NextResponse.json(
+    { ok: true, bot, action, state: data, updatedAt: now },
+    { headers: { "Cache-Control": "no-store" } }
+  );
 }
