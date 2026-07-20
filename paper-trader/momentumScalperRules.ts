@@ -64,7 +64,7 @@ export const SCALP_RULES = {
   maxConcurrentPositions: 1,
   targetProfitPct: 25,
   hardStopLossPct: 2.5,
-  trailingActivationNetPct: 5.5,
+  trailingActivationNetPct: 3.0,
   trailingGivebackPctLow: 2.0,
   trailingGivebackPctMid: 1.5,
   trailingGivebackPctHigh: 1.0,
