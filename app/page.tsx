@@ -1,139 +1,96 @@
 "use client";
 
-import { FormEvent, useCallback, useEffect, useState } from "react";
-import WalletManager from "./WalletManager";
-import StrategyStatus from "./StrategyStatus";
+import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import "./compact-dashboard.css";
 
-type StrategyAssumptions = {
-  normalPositionSizePct: number;
-  provenTraderSizeMultiplier: number;
-  entryFrictionPct: number;
-  exitFrictionPct: number;
-  roundTripFrictionPct: number;
-  takeProfitLadder: Array<{ atMultiple: number; sellPct: number }>;
-  breakEvenActivationMultiple: number;
-  trailingActivationMultiple: number;
-  trailingStopPct: number;
-  hardStopLossPct: number;
-  maxHoldMinutes: number;
-  readinessRules: {
-    minimumCompletedTrades: number;
-    minimumActiveDays: number;
-    minimumProfitFactor: number;
-    maximumDrawdownPct: number;
-    maximumSingleWinnerShare: number;
-  };
+type Bot = {
+  id: "legion" | "scalper" | "shadow";
+  name: string;
+  subtitle: string;
+  state: any;
+  openPositions: number;
+  completedTrades: number;
+  wins: number;
+  losses: number;
+  winRate: number;
+  profitFactor: number | null;
+  totalPnlSol: number;
+  recentTrades: any[];
 };
 
 type DashboardData = {
   generatedAt: string;
-  state: any;
-  summary: {
-    completedPositions: number;
+  bots: Bot[];
+  overview: {
+    totalPnlSol: number;
+    completedTrades: number;
     wins: number;
     losses: number;
-    winRate: number;
-    totalPnlSol: number;
-    profitFactor: number | null;
-    liveEquitySol: number;
-    cashSol: number;
-    openPositionValueSol: number;
-    unrealizedPnlSol: number;
-    livePricesUnavailable: number;
     openPositions: number;
-    activeWallets: number;
-    configuredWallets: number;
   };
-  positions: any[];
-  trades: any[];
-  tokens: any[];
-  performance: any[];
-  transactions: any[];
-  readiness: any;
-  discovery: any;
-  verifiedTraders: any[];
-  strategyPerformance: {
-    strategyVersion: string;
-    lanes: Array<{
-      signalSource: "wallet_consensus" | "proven_trader_copy";
-      completedTrades: number;
-      wins: number;
-      losses: number;
-      winRate: number;
-      realizedPnlSol: number;
-      profitFactor: number | null;
-    }>;
-  };
-  strategyAssumptions: StrategyAssumptions;
-  scalper: {
-    state: any;
-    positions: any[];
-    trades: any[];
-    lastScan: any;
-    summary: {
-      cashSol: number;
-      openPositionValueSol: number;
-      equitySol: number;
-      totalPnlSol: number;
-      completedTrades: number;
-      wins: number;
-      losses: number;
-      winRate: number;
-      profitFactor: number | null;
-    };
-  };
+  recentActivity: any[];
 };
 
-const short = (value: string) => `${value.slice(0, 4)}…${value.slice(-4)}`;
 const sol = (value: number) => `${value >= 0 ? "+" : ""}${value.toFixed(3)} SOL`;
-const usd = (value: number | null) => {
-  if (value == null) return "—";
-  if (value >= 1_000_000) return `$${(value / 1_000_000).toFixed(2)}M`;
-  if (value >= 1_000) return `$${(value / 1_000).toFixed(1)}K`;
-  return `$${value.toFixed(0)}`;
+const pct = (value: number) => `${(value * 100).toFixed(1)}%`;
+const timeAgo = (value: string | null) => {
+  if (!value) return "—";
+  const seconds = Math.max(0, (Date.now() - Date.parse(value)) / 1000);
+  if (seconds < 60) return `${Math.floor(seconds)}s ago`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
+  return `${Math.floor(seconds / 86400)}d ago`;
 };
-const price = (value: number | null) => value == null || !Number.isFinite(value) ? "—" : `$${value.toPrecision(7)}`;
-const time = (value: string | null) => value ? new Date(value).toLocaleString() : "—";
-const sourceLabel = (alert: any) =>
-  alert?.signalSource === "proven_trader_copy"
-    ? `Verified copy${alert.leaderWallet ? ` ${alert.leaderWallet}` : ""}`
-    : "Wallet consensus";
+
+function CubeMark() {
+  return <div className="cubeMark" aria-hidden="true"><i /><i /><i /></div>;
+}
+
+function BotMark({ id }: { id: Bot["id"] }) {
+  return <div className={`botMark ${id}`} aria-hidden="true"><span>{id === "legion" ? "L" : id === "scalper" ? "S" : "Ø"}</span></div>;
+}
+
+function status(bot: Bot) {
+  if (!bot.state?.enabled) return { text: "Offline", className: "offline" };
+  if (bot.state?.halted) return { text: "Paused", className: "paused" };
+  return { text: "Active", className: "active" };
+}
 
 export default function Dashboard() {
   const [data, setData] = useState<DashboardData | null>(null);
+  const [selectedBot, setSelectedBot] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [refreshing, setRefreshing] = useState(false);
   const [needsLogin, setNeedsLogin] = useState(false);
   const [password, setPassword] = useState("");
   const [loggingIn, setLoggingIn] = useState(false);
-  const [loginError, setLoginError] = useState<string | null>(null);
-  const [selectedMint, setSelectedMint] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
-    setRefreshing(true);
     try {
-      const response = await fetch("/api/dashboard", { cache: "no-store" });
+      const response = await fetch("/api/compact-dashboard", { cache: "no-store" });
       if (response.status === 401) {
         setNeedsLogin(true);
         setData(null);
-        setError(null);
         return;
       }
-      if (!response.ok) throw new Error("Could not load live data");
+      if (!response.ok) throw new Error("Could not load live dashboard data");
       setData(await response.json());
       setNeedsLogin(false);
       setError(null);
     } catch (requestError) {
-      setError(requestError instanceof Error ? requestError.message : "Could not load live data");
-    } finally {
-      setRefreshing(false);
+      setError(requestError instanceof Error ? requestError.message : "Could not load dashboard");
     }
   }, []);
+
+  useEffect(() => {
+    void refresh();
+    const timer = window.setInterval(() => void refresh(), 10_000);
+    return () => window.clearInterval(timer);
+  }, [refresh]);
 
   const login = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setLoggingIn(true);
-    setLoginError(null);
+    setError(null);
     try {
       const response = await fetch("/api/viewer-login", {
         method: "POST",
@@ -145,117 +102,42 @@ export default function Dashboard() {
       setPassword("");
       await refresh();
     } catch (requestError) {
-      setLoginError(requestError instanceof Error ? requestError.message : "Could not sign in");
+      setError(requestError instanceof Error ? requestError.message : "Could not sign in");
     } finally {
       setLoggingIn(false);
     }
   };
 
-  useEffect(() => {
-    refresh();
-    const timer = window.setInterval(refresh, 10_000);
-    return () => window.clearInterval(timer);
-  }, [refresh]);
+  const selected = useMemo(() => data?.bots.find((bot) => bot.id === selectedBot) ?? null, [data, selectedBot]);
 
   if (!data) {
     if (needsLogin) {
-      return <main className="shell"><div className="loading" style={{ maxWidth: 460, margin: "12vh auto", textAlign: "left" }}><div className="eyebrow">PRIVATE • VIEW ONLY</div><h1 style={{ marginBottom: 8 }}>Smart Wallet Command Center</h1><p style={{ marginBottom: 24 }}>Enter your dashboard key to view the live paper-trading dashboard.</p><form onSubmit={login} style={{ display: "grid", gap: 12 }}><input type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="Dashboard key" autoComplete="current-password" autoFocus required style={{ width: "100%", padding: "14px 16px", borderRadius: 10, border: "1px solid rgba(255,255,255,.18)", background: "rgba(0,0,0,.25)", color: "inherit", fontSize: 16 }} /><button type="submit" disabled={loggingIn} style={{ padding: "14px 16px", borderRadius: 10, border: 0, fontWeight: 800, cursor: "pointer" }}>{loggingIn ? "Unlocking…" : "Open view-only dashboard"}</button>{loginError && <div className="errorBanner">{loginError}</div>}</form></div></main>;
+      return <main className="cubeLogin"><div className="loginPanel"><CubeMark /><div><span className="micro">PRIVATE DASHBOARD</span><h1>Solana Tracker</h1><p>Enter the dashboard key to continue.</p></div><form onSubmit={login}><input type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="Dashboard key" autoFocus required /><button disabled={loggingIn}>{loggingIn ? "Opening…" : "Open dashboard"}</button></form>{error && <div className="notice error">{error}</div>}</div></main>;
     }
-    return <main className="shell"><div className="loading">{error ?? "Connecting to live bot data…"}</div></main>;
+    return <main className="cubeLogin"><div className="loadingPanel"><CubeMark /><span>{error ?? "Connecting to live data…"}</span></div></main>;
   }
 
-  const state = data.state;
-  const halted = Boolean(state?.halted);
-  const selectedPosition = selectedMint ? data.positions.find((position) => position.mint === selectedMint) : null;
-
-  if (selectedPosition) {
-    return <TradeDetail position={selectedPosition} assumptions={data.strategyAssumptions} generatedAt={data.generatedAt} refreshing={refreshing} onBack={() => setSelectedMint(null)} />;
+  if (selected) {
+    const state = status(selected);
+    return <main className="cubeApp"><div className="detailShell"><button className="backButton" onClick={() => setSelectedBot(null)}>← Back</button><section className={`detailHero ${selected.id}`}><BotMark id={selected.id} /><div><div className="botTitleRow"><h1>{selected.name}</h1><span className={`statusPill ${state.className}`}>{state.text}</span></div><p>{selected.subtitle}</p><strong className={selected.totalPnlSol >= 0 ? "positive" : "negative"}>{sol(selected.totalPnlSol)}</strong></div></section><section className="detailStats"><Metric label="Win rate" value={pct(selected.winRate)} sub={`${selected.wins}W / ${selected.losses}L`} /><Metric label="Profit factor" value={selected.profitFactor == null ? "—" : selected.profitFactor.toFixed(2)} /><Metric label="Completed trades" value={String(selected.completedTrades)} /><Metric label="Open positions" value={String(selected.openPositions)} /></section><section className="activityPanel"><div className="sectionHead"><h2>Recent trades</h2><span>Latest activity</span></div>{selected.recentTrades.length ? selected.recentTrades.map((trade, index) => <ActivityRow key={`${trade.id ?? trade.position_id ?? index}`} trade={{ ...trade, botId: selected.id, botName: selected.name }} />) : <div className="emptyState">No completed trades yet.</div>}</section></div></main>;
   }
 
-  return (
-    <main className="shell">
-      <header className="topbar"><div><div className="eyebrow">PAPER TRADING • VIEW ONLY</div><h1>Smart Wallet Command Center</h1><p>Live Solana wallet consensus, verified-trader copy signals and simulated performance.</p></div><div className="liveBlock"><span className={`status ${halted ? "halted" : "live"}`}><i />{halted ? "TRADING HALTED" : "MONITORING LIVE"}</span><span className="updated">Updated {new Date(data.generatedAt).toLocaleTimeString()} {refreshing ? "• syncing" : ""}</span></div></header>
-      {error && <div className="errorBanner">{error}. Showing the last successful snapshot.</div>}
-      {halted && <div className="haltBanner">Paper entries are paused: {state?.halt_reason ?? "risk limit reached"}. Use <code>/resume</code> in the authorized Telegram chat.</div>}
-      <section className="metrics"><Metric label="Cash balance" value={`${data.summary.cashSol.toFixed(3)} SOL`} sub="Available simulated cash" /><Metric label="Open position value" value={`${data.summary.openPositionValueSol.toFixed(3)} SOL`} sub={data.summary.livePricesUnavailable > 0 ? `${data.summary.livePricesUnavailable} live price${data.summary.livePricesUnavailable === 1 ? "" : "s"} unavailable • estimated` : `Unrealized ${sol(data.summary.unrealizedPnlSol)}`} /><Metric label="Live equity" value={`${data.summary.liveEquitySol.toFixed(3)} SOL`} sub="Cash + open position value" tone="cyan" /><Metric label="Realized PnL" value={sol(data.summary.totalPnlSol)} tone={data.summary.totalPnlSol >= 0 ? "green" : "red"} /><Metric label="Win rate" value={`${(data.summary.winRate * 100).toFixed(1)}%`} sub={`${data.summary.wins}W / ${data.summary.losses}L`} /><Metric label="Profit factor" value={data.summary.profitFactor == null ? "—" : data.summary.profitFactor.toFixed(2)} /><Metric label="Positions" value={`${data.summary.openPositions} open`} sub={`${data.summary.completedPositions} completed`} /><Metric label="Wallets online" value={`${data.summary.activeWallets}`} sub={`${data.verifiedTraders.length} verified copy trader${data.verifiedTraders.length === 1 ? "" : "s"}`} /></section>
-      <StrategyStatus readiness={data.readiness} discovery={data.discovery} verifiedTraders={data.verifiedTraders} strategyPerformance={data.strategyPerformance} assumptions={data.strategyAssumptions} />
-      <ScalperPanel scalper={data.scalper} />
-      <WalletManager onChanged={refresh} />
-      <section className="grid two"><Panel title="Open paper positions" badge={`${data.positions.length} LIVE`}>{data.positions.length === 0 ? <Empty text="Waiting for the next qualified consensus or verified-trader signal." /> : <div className="stack">{data.positions.map((position) => <button type="button" className="position" key={position.mint} onClick={() => setSelectedMint(position.mint)} style={{ width: "100%", color: "inherit", textAlign: "left", cursor: "pointer", font: "inherit" }}><div><strong>{position.token_symbol}</strong><span>{short(position.mint)} • {sourceLabel(position.entry_alert)}</span></div><div><span>Size</span><b>{Number(position.size_sol).toFixed(3)} SOL</b></div><div><span>Current</span><b>{position.current_multiple == null ? "—" : `${Number(position.current_multiple).toFixed(2)}x`}</b></div><div><span>PnL</span><b className={Number(position.unrealized_pnl_sol ?? 0) >= 0 ? "green" : "red"}>{position.unrealized_pnl_sol == null ? "—" : sol(Number(position.unrealized_pnl_sol))}</b></div><div><span>Open details</span><b>View →</b></div></button>)}</div>}</Panel><Panel title="Wallet leaderboard" badge="TRUST SCORE">{data.performance.length === 0 ? <Empty text="Wallet scores appear after matched paper positions close." /> : <div className="leaderboard">{data.performance.slice(0, 8).map((wallet, index) => <div className="leader" key={wallet.wallet_address}><span className="rank">{index + 1}</span><code>{wallet.wallet_address}</code><div className="bar"><i style={{ width: `${Math.max(2, Number(wallet.trust_score))}%` }} /></div><strong>{Number(wallet.trust_score).toFixed(0)}</strong><small>{(Number(wallet.win_rate) * 100).toFixed(0)}% win</small></div>)}</div>}</Panel></section>
-      <Panel title="Signal radar" badge="LATEST TOKENS"><div className="tableWrap"><table><thead><tr><th>Token</th><th>Wallets</th><th>Total buy</th><th>Score</th><th>Market cap</th><th>Liquidity</th><th>Last signal</th><th>Flags</th></tr></thead><tbody>{data.tokens.slice(0, 15).map((token) => <tr key={token.token_mint}><td><a href={`https://dexscreener.com/solana/${token.token_mint}`} target="_blank" rel="noreferrer"><strong>{token.token_symbol ?? "UNKNOWN"}</strong><small>{short(token.token_mint)}</small></a></td><td>{token.wallets_count}</td><td>{Number(token.total_sol_bought).toFixed(2)} SOL</td><td><span className={`score score${Math.floor(Number(token.score) / 20)}`}>{token.score}</span></td><td>{usd(token.market_cap == null ? null : Number(token.market_cap))}</td><td>{usd(token.liquidity_usd == null ? null : Number(token.liquidity_usd))}</td><td>{time(token.last_buy_time)}</td><td>{token.dump_flag ? <em className="flag red">DUMP</em> : null}{token.scalp_flag ? <em className="flag amber">SCALP</em> : null}{!token.dump_flag && !token.scalp_flag ? "—" : null}</td></tr>)}</tbody></table>{data.tokens.length === 0 && <Empty text="No token signal evidence has been recorded yet." />}</div></Panel>
-      <section className="grid two"><Panel title="Recent paper exits" badge="REALIZED"><Feed rows={data.trades.slice(0, 10)} type="trade" /></Panel><Panel title="Smart-wallet activity" badge="ON CHAIN"><Feed rows={data.transactions.slice(0, 10)} type="transaction" /></Panel></section>
-      <footer>This dashboard can observe and simulate trades only. It cannot access a wallet or execute real transactions.</footer>
-    </main>
-  );
+  const overviewWinRate = data.overview.completedTrades ? data.overview.wins / data.overview.completedTrades : 0;
+
+  return <main className="cubeApp"><div className="appShell"><aside className="sideRail"><div className="brand"><CubeMark /><div><strong>Solana Tracker</strong><span>Live paper trading</span></div></div><nav><button className="selected">Overview</button><button onClick={() => document.getElementById("bots")?.scrollIntoView({ behavior: "smooth" })}>Bots</button><button onClick={() => document.getElementById("activity")?.scrollIntoView({ behavior: "smooth" })}>Activity</button></nav><div className="systemBox"><span><i /> Systems online</span><small>Updated {new Date(data.generatedAt).toLocaleTimeString()}</small></div></aside><div className="mainPanel"><header className="mainHeader"><div><span className="micro">LIVE DASHBOARD</span><h1>Overview</h1><p>Simple performance view across all trading strategies.</p></div><div className="liveBadge"><i /> Live</div></header>{error && <div className="notice error">{error}. Showing the last successful snapshot.</div>}<section className="overviewGrid"><Metric label="Total PnL" value={sol(data.overview.totalPnlSol)} tone={data.overview.totalPnlSol >= 0 ? "positive" : "negative"} /><Metric label="Win rate" value={pct(overviewWinRate)} sub={`${data.overview.wins}W / ${data.overview.losses}L`} /><Metric label="Completed trades" value={String(data.overview.completedTrades)} /><Metric label="Open positions" value={String(data.overview.openPositions)} /></section><section id="bots"><div className="sectionHead"><div><span className="micro">TRADING BOTS</span><h2>Your bots</h2></div><span>Tap a bot for details</span></div><div className="botStack">{data.bots.map((bot) => <BotCard key={bot.id} bot={bot} onOpen={() => setSelectedBot(bot.id)} />)}</div></section><section id="activity" className="activityPanel"><div className="sectionHead"><div><span className="micro">RECENT ACTIVITY</span><h2>Latest trades</h2></div><span>{data.recentActivity.length} shown</span></div>{data.recentActivity.length ? data.recentActivity.map((trade, index) => <ActivityRow key={`${trade.botId}-${trade.id ?? trade.position_id ?? index}`} trade={trade} />) : <div className="emptyState">Waiting for completed trades.</div>}</section><footer>View-only paper trading dashboard. No wallet execution.</footer></div></div></main>;
 }
 
-
-function ScalperPanel({ scalper }: { scalper: DashboardData["scalper"] }) {
-  const state = scalper.state;
-  const summary = scalper.summary;
-  const position = scalper.positions[0];
-  const scan = scalper.lastScan;
-  const active = Boolean(state?.enabled) && !state?.halted;
-  const latestTrades = scalper.trades.slice(0, 5);
-
-  return <Panel title="Parallel momentum scalper" badge="PAPER • WALLET-FREE">
-    <div className="scalpIntro">
-      <div><span className={`scalpDot ${active ? "active" : "paused"}`} /> <strong>{active ? "Scanning every minute" : `Paused: ${state?.halt_reason ?? "disabled"}`}</strong><small>GeckoTerminal discovery + DexScreener prices • zero Helius credits</small></div>
-      <code>/scalpstats</code>
-    </div>
-    <div className="scalpMetrics">
-      <div><span>Equity</span><b>{summary.equitySol.toFixed(4)} SOL</b><small>Started with 1.0000</small></div>
-      <div><span>Net PnL</span><b className={summary.totalPnlSol >= 0 ? "green" : "red"}>{sol(summary.totalPnlSol)}</b><small>After simulated costs</small></div>
-      <div><span>Win rate</span><b>{(summary.winRate * 100).toFixed(1)}%</b><small>{summary.wins}W / {summary.losses}L</small></div>
-      <div><span>Scalps</span><b>{summary.completedTrades}</b><small>{state?.entries_today ?? 0}/8 today</small></div>
-      <div><span>Profit factor</span><b>{summary.profitFactor == null ? "—" : summary.profitFactor.toFixed(2)}</b><small>Closed paper trades</small></div>
-    </div>
-    <div className="scalpBody">
-      <div>
-        <h3>Open scalp</h3>
-        {position ? <a className="scalpPosition" href={`https://dexscreener.com/solana/${position.mint}`} target="_blank" rel="noreferrer">
-          <div><strong>{position.token_symbol}</strong><small>{short(position.mint)}</small></div>
-          <div><span>Size</span><b>{Number(position.size_sol).toFixed(3)} SOL</b></div>
-          <div><span>Net now</span><b className={Number(position.current_net_return_pct) >= 0 ? "green" : "red"}>{signedPct(Number(position.current_net_return_pct))}</b></div>
-          <div><span>Age</span><b>{Math.max(0, (Date.now() - Date.parse(position.entry_time)) / 60_000).toFixed(1)} min</b></div>
-        </a> : <Empty text="Waiting for liquid, confirmed momentum. No forced trade." />}
-        <div className="scanLine"><span>Last market scan</span><b>{scan ? time(scan.finished_at) : "Starting…"}</b><small>{scan?.message?.replaceAll("_", " ") ?? "waiting for first run"}{scan ? ` • ${scan.scanned_count} checked • ${scan.qualified_count} qualified` : ""}</small></div>
-      </div>
-      <div>
-        <h3>Recent scalp exits</h3>
-        {latestTrades.length ? <div className="miniTrades">{latestTrades.map((trade) => <div key={trade.id}><span><strong>{trade.token_symbol}</strong><small>{String(trade.exit_reason).replaceAll("_", " ")}</small></span><b className={Number(trade.pnl_sol) >= 0 ? "green" : "red"}>{sol(Number(trade.pnl_sol))}</b><time>{time(trade.closed_at)}</time></div>)}</div> : <Empty text="No completed scalps yet." />}
-      </div>
-    </div>
-    <div className="scalpRules">Rules v2 • score 45+ • 5m 2–6% on both feeds • 15m 5%+ • 0.05 SOL • +2.5% net target • −3.0% net stop • 8 entries/day</div>
-  </Panel>;
+function Metric({ label, value, sub, tone }: { label: string; value: string; sub?: string; tone?: "positive" | "negative" }) {
+  return <div className="metricCard"><span>{label}</span><strong className={tone}>{value}</strong>{sub && <small>{sub}</small>}<i className="metricLine" /></div>;
 }
 
-const signedPct = (value: number) => `${value >= 0 ? "+" : ""}${value.toFixed(2)}%`;
-
-function TradeDetail({ position, assumptions, generatedAt, refreshing, onBack }: { position: any; assumptions: StrategyAssumptions; generatedAt: string; refreshing: boolean; onBack: () => void }) {
-  const entryPrice = Number(position.entry_price);
-  const currentPrice = position.current_price_usd == null ? null : Number(position.current_price_usd);
-  const currentMultiple = position.current_multiple == null ? null : Number(position.current_multiple);
-  const peakMultiple = Number(position.peak_multiple ?? 1);
-  const remainingPct = Number(position.remaining_pct ?? 1);
-  const sizeSol = Number(position.size_sol);
-  const hardStopMultiple = 1 - assumptions.hardStopLossPct;
-  const hardStopPrice = entryPrice * hardStopMultiple;
-  const primaryTarget = assumptions.takeProfitLadder[0];
-  const targetPrice = primaryTarget ? entryPrice * primaryTarget.atMultiple : null;
-  const trailingFloorMultiple = peakMultiple >= assumptions.trailingActivationMultiple ? peakMultiple * (1 - assumptions.trailingStopPct) : null;
-  const trailingFloorPrice = trailingFloorMultiple == null ? null : entryPrice * trailingFloorMultiple;
-  const openedAt = new Date(position.entry_time);
-  const maxExitAt = new Date(openedAt.getTime() + assumptions.maxHoldMinutes * 60_000);
-  const alert = position.entry_alert ?? {};
-  const nextTarget = primaryTarget ? `${primaryTarget.atMultiple.toFixed(2)}x — sell ${(primaryTarget.sellPct * 100).toFixed(0)}%` : "No configured target";
-  const leaderProfile = alert.leaderProfile ?? {};
-
-  return <main className="shell"><header className="topbar"><div><button type="button" onClick={onBack} style={{ marginBottom: 18, padding: "10px 14px", borderRadius: 9, cursor: "pointer", fontWeight: 800 }}>← Back to dashboard</button><div className="eyebrow">OPEN PAPER POSITION • LIVE DETAIL</div><h1>{position.token_symbol}</h1><p>{position.mint}</p></div><div className="liveBlock"><span className="status live"><i />POSITION OPEN</span><span className="updated">Updated {new Date(generatedAt).toLocaleTimeString()} {refreshing ? "• syncing" : ""}</span></div></header><section className="metrics"><Metric label="Entry price" value={price(entryPrice)} sub={time(position.entry_time)} /><Metric label="Current price" value={price(currentPrice)} sub={position.price_status === "live" ? "Live DexScreener price" : "Live price unavailable"} tone={currentMultiple != null && currentMultiple >= 1 ? "green" : "red"} /><Metric label="Current multiple" value={currentMultiple == null ? "—" : `${currentMultiple.toFixed(3)}x`} sub={`Peak ${peakMultiple.toFixed(3)}x`} /><Metric label="Unrealized PnL" value={position.unrealized_pnl_sol == null ? "—" : sol(Number(position.unrealized_pnl_sol))} sub={`Current value ${Number(position.current_value_sol ?? sizeSol * remainingPct).toFixed(3)} SOL`} tone={Number(position.unrealized_pnl_sol ?? 0) >= 0 ? "green" : "red"} /><Metric label="Original size" value={`${sizeSol.toFixed(3)} SOL`} sub={`${(remainingPct * 100).toFixed(1)}% still open`} /><Metric label="Next planned sell" value={nextTarget} sub="Automatic paper-trader rule" tone="cyan" /></section><section className="grid two"><Panel title="Where the bot will sell" badge="CURRENT EXIT PLAN"><div className="stack"><DetailRow label="Hard stop" value={`${price(hardStopPrice)} • ${hardStopMultiple.toFixed(2)}x`} note={`Closes all remaining tokens if price falls ${(assumptions.hardStopLossPct * 100).toFixed(0)}% below entry.`} />{primaryTarget && <DetailRow label="Take profit" value={`${price(targetPrice)} • ${primaryTarget.atMultiple.toFixed(2)}x`} note={`Sells ${(primaryTarget.sellPct * 100).toFixed(0)}% of the remaining position when reached.`} />}<DetailRow label="Break-even protection" value={`Activates at ${assumptions.breakEvenActivationMultiple.toFixed(2)}x`} note="Protects the position after the configured activation level." /><DetailRow label="Trailing stop" value={trailingFloorPrice == null ? `Activates at ${assumptions.trailingActivationMultiple.toFixed(2)}x` : `${price(trailingFloorPrice)} • ${trailingFloorMultiple?.toFixed(3)}x`} note={`Closes all remaining tokens after a ${(assumptions.trailingStopPct * 100).toFixed(0)}% drop from the highest recorded price.`} /><DetailRow label="Maximum hold" value={maxExitAt.toLocaleString()} note={`Closes all remaining tokens after ${assumptions.maxHoldMinutes} minutes, regardless of profit or loss.`} /></div></Panel><Panel title="Why the bot bought" badge={alert.signalSource === "proven_trader_copy" ? "VERIFIED TRADER COPY" : "WALLET CONSENSUS"}><div className="stack"><DetailRow label="Signal source" value={sourceLabel(alert)} /><DetailRow label="Score" value={`${alert.score ?? "—"}`} /><DetailRow label="Wallets" value={`${alert.walletCount ?? "—"}`} /><DetailRow label="Total bought" value={alert.totalBoughtSol == null ? "—" : `${Number(alert.totalBoughtSol).toFixed(2)} SOL`} /><DetailRow label="Average wallet trust" value={alert.averageTrustScore == null ? "—" : Number(alert.averageTrustScore).toFixed(1)} />{alert.signalSource === "proven_trader_copy" && <><DetailRow label="Leader sample" value={`${leaderProfile.closedTrades ?? "—"} closed • ${leaderProfile.distinctClosedTokens ?? "—"} tokens`} /><DetailRow label="Leader performance" value={`${leaderProfile.profitFactor == null ? "PF —" : `PF ${Number(leaderProfile.profitFactor).toFixed(2)}`} • ${leaderProfile.realizedPnlSol == null ? "PnL —" : sol(Number(leaderProfile.realizedPnlSol))}`} /></>}<DetailRow label="Market cap at signal" value={alert.marketCapUsd == null ? "—" : usd(Number(alert.marketCapUsd))} /><DetailRow label="Liquidity at signal" value={alert.liquidityUsd == null ? "—" : usd(Number(alert.liquidityUsd))} /><DetailRow label="Simulated friction" value={`${(assumptions.roundTripFrictionPct * 100).toFixed(1)}% round trip`} /></div></Panel></section><Panel title="Live token chart and market" badge="DEXSCREENER"><div style={{ padding: 20, display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center" }}><a href={`https://dexscreener.com/solana/${position.mint}`} target="_blank" rel="noreferrer" style={{ padding: "13px 18px", border: "1px solid rgba(255,255,255,.18)", borderRadius: 10, fontWeight: 800 }}>Open live DexScreener chart ↗</a><span style={{ opacity: .7 }}>This opens the real token chart. The trade shown here is simulated and does not move real SOL.</span></div></Panel></main>;
+function BotCard({ bot, onOpen }: { bot: Bot; onOpen: () => void }) {
+  const botStatus = status(bot);
+  return <button className={`botCard ${bot.id}`} onClick={onOpen}><div className="botIdentity"><BotMark id={bot.id} /><div><span className={`statusPill ${botStatus.className}`}>{botStatus.text}</span><h3>{bot.name}</h3><p>{bot.subtitle}</p></div></div><div className="botPnl"><strong className={bot.totalPnlSol >= 0 ? "positive" : "negative"}>{sol(bot.totalPnlSol)}</strong><span>{bot.completedTrades} trades</span></div><div className="botStats"><div><span>Win rate</span><b>{pct(bot.winRate)}</b></div><div><span>Profit factor</span><b>{bot.profitFactor == null ? "—" : bot.profitFactor.toFixed(2)}</b></div><div><span>Open</span><b>{bot.openPositions}</b></div></div><div className="openArrow">→</div></button>;
 }
 
-function DetailRow({ label, value, note }: { label: string; value: string; note?: string }) { return <div className="position" style={{ gridTemplateColumns: "minmax(130px,.7fr) minmax(180px,1fr)" }}><div><span>{label}</span>{note && <small style={{ display: "block", marginTop: 5, opacity: .65 }}>{note}</small>}</div><div><b>{value}</b></div></div>; }
-function Metric({ label, value, sub, tone = "" }: { label: string; value: string; sub?: string; tone?: string }) { return <div className="metric"><span>{label}</span><strong className={tone}>{value}</strong>{sub && <small>{sub}</small>}</div>; }
-function Panel({ title, badge, children }: { title: string; badge: string; children: React.ReactNode }) { return <section className="panel"><div className="panelHead"><h2>{title}</h2><span>{badge}</span></div>{children}</section>; }
-function Empty({ text }: { text: string }) { return <div className="empty">{text}</div>; }
-function Feed({ rows, type }: { rows: any[]; type: "trade" | "transaction" }) { if (!rows.length) return <Empty text="No activity recorded yet." />; return <div className="feed">{rows.map((row, index) => { const positive = type === "trade" ? Number(row.pnl_sol) >= 0 : row.side === "buy"; return <div className="feedRow" key={`${row.id ?? row.token_mint}:${index}`}><i className={positive ? "up" : "down"}>{positive ? "↗" : "↘"}</i><div><strong>{type === "trade" ? row.token_symbol : short(row.token_mint)}</strong><small>{type === "trade" ? `${row.reason.replaceAll("_", " ")} • ${sourceLabel(row.entry_alert)}` : `${row.wallet_address} • ${row.side}`}</small></div><div className="feedValue"><b className={positive ? "green" : "red"}>{type === "trade" ? sol(Number(row.pnl_sol)) : `${Number(row.sol_amount).toFixed(3)} SOL`}</b><small>{time(type === "trade" ? row.happened_at : row.tx_time)}</small></div></div>; })}</div>; }
+function ActivityRow({ trade }: { trade: any }) {
+  const pnl = Number(trade.pnl ?? trade.pnl_sol ?? 0);
+  const symbol = trade.token_symbol ?? trade.symbol ?? "UNKNOWN";
+  return <div className="activityRow"><BotMark id={trade.botId} /><div><strong>{symbol}</strong><span>{trade.botName}</span></div><span className={`resultTag ${pnl >= 0 ? "win" : "loss"}`}>{pnl >= 0 ? "WIN" : "LOSS"}</span><b className={pnl >= 0 ? "positive" : "negative"}>{sol(pnl)}</b><time>{timeAgo(trade.happenedAt)}</time></div>;
+}
