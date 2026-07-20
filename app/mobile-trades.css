@@ -1,0 +1,72 @@
+@media (max-width: 760px) {
+  .overviewTrades {
+    padding: 16px;
+  }
+
+  .overviewTrades .tableWrap {
+    overflow: visible;
+  }
+
+  .overviewTrades .dataTable {
+    display: block;
+    width: 100%;
+    min-width: 0;
+  }
+
+  .overviewTrades .dataTable thead {
+    display: none;
+  }
+
+  .overviewTrades .dataTable tbody {
+    display: block;
+  }
+
+  .overviewTrades .dataTable tr {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(104px, .9fr) auto;
+    align-items: center;
+    gap: 10px;
+    min-height: 64px;
+    border-top: 1px solid var(--line);
+  }
+
+  .overviewTrades .dataTable tr:first-child {
+    border-top: 0;
+  }
+
+  .overviewTrades .dataTable td {
+    display: block;
+    min-width: 0;
+    padding: 10px 0;
+    border: 0;
+  }
+
+  .overviewTrades .dataTable td:nth-child(2) {
+    display: none;
+  }
+
+  .overviewTrades .dataTable td:nth-child(3) {
+    color: #b9c3d0;
+    font-size: 11px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .overviewTrades .dataTable td:nth-child(4) {
+    text-align: right;
+    white-space: nowrap;
+    font-size: 12px;
+    font-weight: 700;
+  }
+
+  .overviewTrades .dataTable td strong {
+    font-size: 13px;
+    line-height: 1.2;
+  }
+
+  .overviewTrades .dataTable td small {
+    margin-top: 4px;
+    font-size: 9px;
+  }
+}
