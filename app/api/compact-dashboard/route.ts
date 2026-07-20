@@ -46,6 +46,12 @@ function summarizeRegular(rows: TradeRow[]) {
   return summarize(completed, "pnl_sol", "happened_at");
 }
 
+function newest(...values: Array<string | null | undefined>): string | null {
+  const valid = values.filter((value): value is string => Boolean(value) && Number.isFinite(Date.parse(value as string)));
+  if (!valid.length) return null;
+  return valid.sort((a, b) => Date.parse(b) - Date.parse(a))[0];
+}
+
 export async function GET(request: NextRequest) {
   if (!hasViewerAccess(request)) return unauthorized();
   const supabase = getSupabaseAdmin({ noStore: true });
@@ -79,6 +85,12 @@ export async function GET(request: NextRequest) {
       name: "Legion Bot",
       subtitle: "Wallet consensus strategy",
       state: { ...(paperState.data ?? {}), enabled: true },
+      lastScanAt: newest(
+        paperState.data?.last_scan_at,
+        paperState.data?.last_evaluation_at,
+        paperState.data?.updated_at,
+        legion.recentTrades[0]?.happenedAt
+      ),
       openPositions: (paperPositions.data ?? []).length,
       ...legion,
     },
@@ -87,6 +99,11 @@ export async function GET(request: NextRequest) {
       name: "Scalper Bot",
       subtitle: "Momentum v6",
       state: scalpState.data,
+      lastScanAt: newest(
+        scalpState.data?.last_scan_at,
+        scalpState.data?.updated_at,
+        scalper.recentTrades[0]?.happenedAt
+      ),
       openPositions: (scalpPositions.data ?? []).length,
       ...scalper,
     },
@@ -95,6 +112,11 @@ export async function GET(request: NextRequest) {
       name: "Shadow Bot",
       subtitle: "Research strategy",
       state: shadowState.data,
+      lastScanAt: newest(
+        shadowState.data?.last_scan_at,
+        shadowState.data?.updated_at,
+        shadow.recentTrades[0]?.happenedAt
+      ),
       openPositions: (shadowPositions.data ?? []).length,
       ...shadow,
     },
@@ -116,5 +138,5 @@ export async function GET(request: NextRequest) {
       openPositions: bots.reduce((sum, bot) => sum + bot.openPositions, 0),
     },
     recentActivity: allRecent,
-  });
+  }, { headers: { "Cache-Control": "no-store, max-age=0" } });
 }
