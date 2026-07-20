@@ -1,5 +1,5 @@
 import "./globals.css";
-import "./loading-heart.css";
+import "./professional-loader.css";
 import type { ReactNode } from "react";
 
 export const metadata = {
