@@ -123,7 +123,7 @@ export default function StrategyStatus({
                 : "Paper trading continues until every forward-performance threshold passes."}
             </small>
           </div>
-          <code>{strategyPerformance.strategyVersion}</code>
+          <code>{readiness?.strategy_version ?? "shadow strategy"}</code>
         </div>
         <div className="readinessGrid">
           <div>
