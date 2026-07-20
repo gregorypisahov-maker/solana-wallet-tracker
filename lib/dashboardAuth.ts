@@ -23,7 +23,13 @@ export function hasViewerAccess(request: NextRequest): boolean {
 }
 
 export function hasAdminAccess(request: NextRequest): boolean {
-  const expected = process.env.DASHBOARD_ADMIN_PASSWORD?.trim();
+  // Prefer a dedicated owner password when configured. If the deployment only
+  // has the normal dashboard key/share token, allow that same key to control
+  // the paper bots so the Resume/Pause buttons do not fail unexpectedly.
+  const expected =
+    process.env.DASHBOARD_ADMIN_PASSWORD?.trim() ||
+    process.env.DASHBOARD_KEY?.trim() ||
+    process.env.VIEWER_SHARE_TOKEN?.trim();
   const authorization = request.headers.get("authorization");
   if (!expected || !authorization?.startsWith("Basic ")) return false;
 
