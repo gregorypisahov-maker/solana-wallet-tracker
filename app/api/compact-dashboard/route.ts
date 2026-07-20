@@ -78,7 +78,7 @@ export async function GET(request: NextRequest) {
       id: "legion",
       name: "Legion Bot",
       subtitle: "Wallet consensus strategy",
-      state: paperState.data,
+      state: { ...(paperState.data ?? {}), enabled: true },
       openPositions: (paperPositions.data ?? []).length,
       ...legion,
     },
