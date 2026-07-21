@@ -35,13 +35,13 @@ export const config = {
 
   exit: {
     takeProfitLadder: [
-      // Lock half the position near the level WHALE reached, then let the rest run.
-      { atMultiple: 1.09, sellPct: 0.5 },
+      // 1.075x after paper friction corresponds to roughly a +9% chart move.
+      { atMultiple: 1.075, sellPct: 0.5 },
       // Close everything still open if the larger Shadow target is reached.
       { atMultiple: 1.35, sellPct: 1.0 },
     ],
-    // After the first profit level is reached, protect the remaining half at entry.
-    breakEvenActivationMultiple: 1.08,
+    // Once the first profit zone has been reached, protect the remaining half at entry.
+    breakEvenActivationMultiple: 1.075,
     trailingActivationMultiple: 1.18,
     trailingStopPct: 0.10,
     hardStopLossPct: 0.12,
