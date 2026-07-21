@@ -19,7 +19,7 @@ function assertSuccess(label: string, error: { message: string } | null): void {
 }
 
 function currentUtcDate(): string {
-  return new Date().toISOString().slice(0, 10);
+  return new Date().toDateString();
 }
 
 async function rolloverDailyStateIfNeeded(state: PaperState): Promise<PaperState> {
