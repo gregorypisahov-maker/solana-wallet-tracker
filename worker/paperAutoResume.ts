@@ -24,34 +24,48 @@ async function checkAndAutoResume(): Promise<void> {
 
 async function tryAutoResumePaperTrader(): Promise<void> {
   try {
-    const { data, error } = await supabase
-      .from("paper_state")
-      .select(
-        "halted, halt_reason, daily_reset_date, bankroll_sol, daily_start_bankroll_sol"
-      )
-      .eq("id", 1)
-      .maybeSingle();
+    const [stateResult, positionsResult] = await Promise.all([
+      supabase
+        .from("paper_state")
+        .select(
+          "halted, halt_reason, daily_reset_date, bankroll_sol, daily_start_bankroll_sol"
+        )
+        .eq("id", 1)
+        .maybeSingle(),
+      supabase.from("paper_positions").select("size_sol,remaining_pct"),
+    ]);
+    const { data, error } = stateResult;
+    const positionsError = positionsResult.error;
 
-    if (error) {
-      console.warn("[paper-auto-resume] Failed to load paper state:", error);
+    if (error || positionsError) {
+      console.warn(
+        "[paper-auto-resume] Failed to load paper rollover state:",
+        error ?? positionsError
+      );
       return;
     }
     if (!data) return;
 
-    // paper_state stores the same Date.toDateString() format used by the
-    // regular paper-trading engine. The old scheduler queried a non-existent
-    // daily_date column, creating repeated Postgres errors every five minutes.
-    const today = new Date().toDateString();
+    // daily_reset_date is the canonical UTC date key everywhere: YYYY-MM-DD.
+    const today = new Date().toISOString().slice(0, 10);
     if (data.daily_reset_date !== today) {
       const bankrollSol = Number(data.bankroll_sol ?? 0);
+      const committedCapitalSol = (positionsResult.data ?? []).reduce(
+        (sum: number, row: any) =>
+          sum + Number(row.size_sol ?? 0) * Number(row.remaining_pct ?? 0),
+        0
+      );
+      const dailyStartEquitySol = bankrollSol + committedCapitalSol;
       const { error: updateError } = await supabase
         .from("paper_state")
         .update({
           halted: false,
           halt_reason: null,
           daily_reset_date: today,
-          daily_start_bankroll_sol: Number.isFinite(bankrollSol)
-            ? bankrollSol
+          // Legacy compatibility only; daily_reset_date remains canonical.
+          daily_date: today,
+          daily_start_bankroll_sol: Number.isFinite(dailyStartEquitySol)
+            ? dailyStartEquitySol
             : Number(data.daily_start_bankroll_sol ?? 0),
           consecutive_losses: 0,
         })
