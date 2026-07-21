@@ -1,0 +1,115 @@
+/* Dashboard polish: neutral position status and explicit trade outcomes */
+.v2Bot > .v2Toast {
+  margin: 14px 0 18px;
+  padding: 11px 13px;
+  border-radius: 12px;
+  line-height: 1.25;
+}
+
+.v2Bot > .v2Toast:not(.ok) {
+  position: relative;
+  border: 1px solid rgba(141, 153, 168, 0.14);
+  background: rgba(141, 153, 168, 0.055);
+  color: transparent;
+  font-size: 0;
+}
+
+.v2Bot > .v2Toast:not(.ok)::before {
+  content: "○  No open position";
+  color: #9aa6b5;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.v2Bot > .v2Toast.ok {
+  border-color: rgba(69, 212, 131, 0.24);
+  background: linear-gradient(90deg, rgba(69, 212, 131, 0.10), rgba(69, 212, 131, 0.045));
+  color: #84e9ad;
+  box-shadow: inset 3px 0 0 rgba(69, 212, 131, 0.7);
+}
+
+.v2Bot > .v2Toast.ok strong {
+  font-size: 10px;
+  letter-spacing: 0.08em;
+}
+
+.v2BotHead small {
+  opacity: 0.72;
+}
+
+/* Make the bot responsible for each trade unmistakable. */
+.v2Trades .row > span:nth-child(2) {
+  justify-self: start;
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  padding: 5px 8px;
+  border: 1px solid rgba(100, 168, 255, 0.16);
+  border-radius: 999px;
+  background: rgba(100, 168, 255, 0.07);
+  color: #b9d7ff;
+  font-size: 9px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+/* Explicitly label every completed trade as a win or loss. */
+.v2Trades .row > strong {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 7px;
+  white-space: nowrap;
+}
+
+.v2Trades .row > strong.positive::before,
+.v2Trades .row > strong.negative::before {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 38px;
+  padding: 4px 7px;
+  border-radius: 999px;
+  font-size: 8px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+}
+
+.v2Trades .row > strong.positive::before {
+  content: "WIN";
+  background: rgba(69, 212, 131, 0.12);
+  border: 1px solid rgba(69, 212, 131, 0.22);
+  color: #72e6a2;
+}
+
+.v2Trades .row > strong.negative::before {
+  content: "LOSS";
+  background: rgba(255, 111, 127, 0.11);
+  border: 1px solid rgba(255, 111, 127, 0.22);
+  color: #ff8b98;
+}
+
+@media (max-width: 760px) {
+  .v2Bot > .v2Toast {
+    margin: 12px 0 16px;
+    padding: 10px 12px;
+    border-radius: 11px;
+  }
+
+  .v2Trades .row > span:nth-child(2) {
+    padding: 4px 7px;
+    font-size: 8px;
+  }
+
+  .v2Trades .row > strong {
+    gap: 5px;
+  }
+
+  .v2Trades .row > strong.positive::before,
+  .v2Trades .row > strong.negative::before {
+    min-width: 34px;
+    padding: 3px 6px;
+    font-size: 7px;
+  }
+}
