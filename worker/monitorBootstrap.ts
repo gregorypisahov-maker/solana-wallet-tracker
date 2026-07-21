@@ -8,6 +8,8 @@ import { startPaperAutoResumeScheduler } from "./paperAutoResume";
 import { startTieredEntryShadowScheduler } from "../paper-trader/tieredEntryShadow";
 import { startTieredRecentSignalPump } from "../paper-trader/tieredRecentSignalPump";
 import { startLiveReadinessScheduler } from "../paper-trader/liveReadiness";
+import { startMomentumScalperScheduler } from "../paper-trader/momentumScalper";
+import { startScalperShadowScheduler } from "../paper-trader/scalperShadow";
 
 const WALLET_DISCOVERY_SERVICE = "Wallet Discovery & Monitor";
 const TRADING_ENGINE_SERVICE = "Trading Engine";
@@ -44,13 +46,15 @@ async function bootstrap(): Promise<void> {
     startAdaptiveStrategyScheduler();
     startShadowStrategyScheduler();
     startLabStrategyScheduler();
-    // The failed Momentum Scalper and its shadow scheduler are intentionally retired.
-    // Historical data stays in Supabase, but neither scheduler starts or consumes resources.
+    // Losing scalper entry scans are disabled by their per-module flags.
+    // Exit managers stay active so any existing paper positions can close normally.
+    startMomentumScalperScheduler();
+    startScalperShadowScheduler();
     startTieredEntryShadowScheduler();
     startTieredRecentSignalPump();
     startLiveReadinessScheduler();
     console.log(
-      "[monitor-bootstrap] active paper strategies: Legion, Shadow, Lab Shadow, Lab Legion"
+      "[monitor-bootstrap] active paper strategies: Legion, Shadow, Lab Shadow, Lab Legion; scalpers exit-only"
     );
   } else {
     console.log(
