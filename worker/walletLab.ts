@@ -2,13 +2,14 @@ import "dotenv/config";
 import { PublicKey } from "@solana/web3.js";
 import { getSupabaseAdmin } from "../lib/supabase";
 import { fetchProvenTraderProfile, ProvenTraderProfile } from "./provenTraderProfile";
+import {
+  getDiscoveryHeliusStats,
+  heliusFetchJson,
+  resetDiscoveryHeliusStats,
+} from "./discoveryHeliusClient";
 
 const supabase = getSupabaseAdmin();
 
-const SOURCE = "gmgn_smart_money_7d";
-const DEFAULT_ENDPOINT =
-  "https://gmgn.ai/defi/quotation/v1/rank/sol/wallets/7d?orderby=realized_profit_7d&direction=desc";
-const ENDPOINT = process.env.WALLET_LAB_ENDPOINT?.trim() || DEFAULT_ENDPOINT;
 const INTERVAL_HOURS = bounded(process.env.WALLET_LAB_INTERVAL_HOURS, 6, 1, 24);
 const OBSERVATION_HOURS = bounded(process.env.WALLET_LAB_OBSERVATION_HOURS, 72, 48, 120);
 const MIN_OBSERVATIONS = Math.floor(
@@ -16,6 +17,15 @@ const MIN_OBSERVATIONS = Math.floor(
 );
 const PAGE_COUNT = Math.floor(bounded(process.env.WALLET_LAB_PAGES, 20, 1, 50));
 const PAGE_SIZE = Math.floor(bounded(process.env.WALLET_LAB_PAGE_SIZE, 100, 25, 200));
+const SEED_TOKEN_LIMIT = Math.floor(
+  bounded(process.env.WALLET_LAB_SEED_TOKENS, 10, 4, 15)
+);
+const SEED_TRANSACTIONS = Math.floor(
+  bounded(process.env.WALLET_LAB_SEED_TRANSACTIONS, 100, 25, 100)
+);
+const MAX_CANDIDATES_STORED = Math.floor(
+  bounded(process.env.WALLET_LAB_MAX_CANDIDATES, 2_000, 250, 5_000)
+);
 const MAX_PROFILE_PER_RUN = Math.floor(
   bounded(process.env.WALLET_LAB_PROFILE_PER_RUN, 3, 1, 6)
 );
@@ -25,6 +35,7 @@ const REQUEST_TIMEOUT_MS = Math.floor(
 
 interface CandidateSnapshot {
   address: string;
+  source: string;
   score: number;
   metrics: Record<string, unknown>;
 }
@@ -35,6 +46,16 @@ interface CandidateRow {
   first_seen_at: string;
   observation_count: number | string;
   leaderboard_score: number | string;
+}
+
+interface SeedToken {
+  token_mint: string;
+  token_symbol: string | null;
+  score: number | string;
+}
+
+interface EnhancedTransaction {
+  feePayer?: string;
 }
 
 function bounded(raw: string | undefined, fallback: number, min: number, max: number): number {
@@ -51,6 +72,12 @@ function finite(value: unknown, fallback = 0): number {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
+function object(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
 function isWalletAddress(value: unknown): value is string {
   if (typeof value !== "string") return false;
   try {
@@ -60,23 +87,18 @@ function isWalletAddress(value: unknown): value is string {
   }
 }
 
-function firstNumber(row: Record<string, unknown>, keys: string[]): number {
-  for (const key of keys) {
-    const value = finite(row[key], Number.NaN);
-    if (Number.isFinite(value)) return value;
+function firstNumber(rows: Record<string, unknown>[], keys: string[]): number {
+  for (const row of rows) {
+    for (const key of keys) {
+      const value = finite(row[key], Number.NaN);
+      if (Number.isFinite(value)) return value;
+    }
   }
   return 0;
 }
 
 function firstAddress(row: Record<string, unknown>): string | null {
-  const keys = [
-    "wallet_address",
-    "walletAddress",
-    "address",
-    "wallet",
-    "owner",
-    "account",
-  ];
+  const keys = ["wallet_address", "walletAddress", "address", "wallet", "owner", "account"];
   for (const key of keys) {
     const value = row[key];
     if (isWalletAddress(value)) return value;
@@ -98,60 +120,89 @@ function collectWalletRows(value: unknown, output: Record<string, unknown>[], de
   }
 }
 
-function normalizeSnapshot(row: Record<string, unknown>): CandidateSnapshot | null {
+function normalizeLeaderboardSnapshot(
+  row: Record<string, unknown>,
+  source: string
+): CandidateSnapshot | null {
   const address = firstAddress(row);
   if (!address) return null;
+  const period = object(row.period);
+  const days = object(period.days);
+  const counts = object(row.counts);
+  const pnl = object(row.pnl);
+  const ending = object(row.ending);
+  const endingPnl = object(ending.pnl);
+  const value = object(row.value);
+  const nested = [row, period, days, counts, pnl, endingPnl, value];
 
-  const realizedPnl = firstNumber(row, [
+  const realizedPnl = firstNumber(nested, [
     "realized_profit_7d",
     "realized_pnl_7d",
     "realized_profit",
     "realizedPnl",
+    "realized",
     "pnl",
     "profit",
   ]);
-  let winRate = firstNumber(row, ["winrate", "win_rate", "winRate", "profit_rate"]);
+  let winRate = firstNumber(nested, [
+    "winrate",
+    "win_rate",
+    "winRate",
+    "win_percentage",
+    "profit_rate",
+  ]);
   if (winRate > 1) winRate /= 100;
   winRate = Math.max(0, Math.min(1, winRate));
-  const trades = firstNumber(row, [
+  const trades = firstNumber(nested, [
     "trade_count",
     "trades",
+    "total_trade",
     "tx_count",
     "transactions",
     "buy_count",
     "swap_count",
   ]);
-  const volume = firstNumber(row, ["volume_7d", "volume", "buy_volume", "total_volume"]);
-  const leaderboardRank = firstNumber(row, ["rank", "ranking", "index"]);
+  const volume = firstNumber(nested, [
+    "volume_7d",
+    "volume",
+    "buy_volume",
+    "total_volume",
+    "invested",
+  ]);
+  const totalValue = firstNumber(nested, ["total_value", "totalValue", "net_worth", "netWorth"]);
+  const leaderboardRank = firstNumber(nested, ["rank", "ranking", "index"]);
 
   const score = Math.max(
     0,
-    realizedPnl * 100 + winRate * 120 + Math.log1p(Math.max(0, trades)) * 24 +
-      Math.log1p(Math.max(0, volume)) * 2 - Math.max(0, leaderboardRank - 1) * 0.1
+    Math.sign(realizedPnl) * Math.log1p(Math.abs(realizedPnl)) * 100 +
+      winRate * 120 +
+      Math.log1p(Math.max(0, trades)) * 24 +
+      Math.log1p(Math.max(0, volume)) * 2 +
+      Math.log1p(Math.max(0, totalValue)) * 3 -
+      Math.max(0, leaderboardRank - 1) * 0.1
   );
 
   return {
     address,
+    source,
     score: Number(score.toFixed(4)),
     metrics: {
-      realized_pnl_7d: realizedPnl,
+      realized_pnl: realizedPnl,
       win_rate: winRate,
       trades,
       volume,
+      total_value: totalValue,
       leaderboard_rank: leaderboardRank || null,
+      provider: source,
       raw: row,
     },
   };
 }
 
-function pageUrl(page: number): string {
-  const url = new URL(ENDPOINT);
-  url.searchParams.set("page", String(page));
-  url.searchParams.set("limit", String(PAGE_SIZE));
-  return url.toString();
-}
-
-async function fetchJson(url: string): Promise<unknown> {
+async function fetchPublicJson(
+  url: string,
+  headers: Record<string, string> = {}
+): Promise<unknown> {
   const delays = [0, 1_500, 4_000];
   let lastError: unknown;
   for (let attempt = 0; attempt < delays.length; attempt += 1) {
@@ -163,7 +214,8 @@ async function fetchJson(url: string): Promise<unknown> {
         signal: controller.signal,
         headers: {
           accept: "application/json",
-          "user-agent": "Mozilla/5.0 WalletDiscoveryLab/1.0",
+          "user-agent": "WalletDiscoveryLab/2.0",
+          ...headers,
         },
       });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -181,31 +233,238 @@ async function fetchJson(url: string): Promise<unknown> {
   throw lastError;
 }
 
-async function collectCandidates(): Promise<{ fetched: number; candidates: CandidateSnapshot[] }> {
+async function collectConfiguredProviderCandidates(): Promise<{
+  candidates: CandidateSnapshot[];
+  rowsFetched: number;
+  providerCalls: number;
+  providers: string[];
+}> {
   const byAddress = new Map<string, CandidateSnapshot>();
-  let fetched = 0;
-  let emptyGrowthPages = 0;
+  let rowsFetched = 0;
+  let providerCalls = 0;
+  const providers: string[] = [];
 
-  for (let page = 1; page <= PAGE_COUNT; page += 1) {
-    const payload = await fetchJson(pageUrl(page));
+  const ingest = (payload: unknown, source: string) => {
     const rows: Record<string, unknown>[] = [];
     collectWalletRows(payload, rows);
-    fetched += rows.length;
-    const before = byAddress.size;
+    rowsFetched += rows.length;
     for (const row of rows) {
-      const candidate = normalizeSnapshot(row);
+      const candidate = normalizeLeaderboardSnapshot(row, source);
       if (!candidate) continue;
       const existing = byAddress.get(candidate.address);
       if (!existing || candidate.score > existing.score) byAddress.set(candidate.address, candidate);
     }
-    emptyGrowthPages = byAddress.size === before ? emptyGrowthPages + 1 : 0;
-    if (emptyGrowthPages >= 3) break;
-    if (page < PAGE_COUNT) await sleep(550);
+  };
+
+  const solanaTrackerKey = process.env.SOLANA_TRACKER_API_KEY?.trim();
+  if (solanaTrackerKey) {
+    try {
+      const payload = await fetchPublicJson(
+        "https://data.solanatracker.io/v2/pnl/leaderboard/top?period=7&limit=100",
+        { "x-api-key": solanaTrackerKey }
+      );
+      providerCalls += 1;
+      providers.push("solana_tracker_top_traders");
+      ingest(payload, "solana_tracker_top_traders");
+    } catch (error) {
+      console.warn("[wallet-lab] Solana Tracker source unavailable:", error);
+    }
+  }
+
+  const birdeyeKey = process.env.BIRDEYE_API_KEY?.trim();
+  if (birdeyeKey) {
+    try {
+      for (let page = 0; page < PAGE_COUNT; page += 1) {
+        const offset = page * PAGE_SIZE;
+        const url =
+          "https://public-api.birdeye.so/wallet/v2/leaderboard" +
+          `?from_value=100000&limit=${PAGE_SIZE}&offset=${offset}`;
+        const payload = await fetchPublicJson(url, {
+          "X-API-KEY": birdeyeKey,
+          "x-chain": "solana",
+        });
+        providerCalls += 1;
+        ingest(payload, "birdeye_wallet_leaderboard");
+        if (page + 1 < PAGE_COUNT) await sleep(250);
+      }
+      providers.push("birdeye_wallet_leaderboard");
+    } catch (error) {
+      console.warn("[wallet-lab] Birdeye source unavailable:", error);
+    }
+  }
+
+  const customEndpoint = process.env.WALLET_LAB_ENDPOINT?.trim();
+  if (customEndpoint) {
+    try {
+      for (let page = 1; page <= PAGE_COUNT; page += 1) {
+        const url = new URL(customEndpoint);
+        url.searchParams.set("page", String(page));
+        url.searchParams.set("limit", String(PAGE_SIZE));
+        const payload = await fetchPublicJson(url.toString());
+        providerCalls += 1;
+        ingest(payload, "configured_wallet_leaderboard");
+        if (page < PAGE_COUNT) await sleep(350);
+      }
+      providers.push("configured_wallet_leaderboard");
+    } catch (error) {
+      console.warn("[wallet-lab] configured public source unavailable:", error);
+    }
   }
 
   return {
-    fetched,
-    candidates: [...byAddress.values()].sort((a, b) => b.score - a.score),
+    candidates: [...byAddress.values()],
+    rowsFetched,
+    providerCalls,
+    providers,
+  };
+}
+
+function heliusApiKey(): string {
+  const direct = process.env.HELIUS_API_KEY?.trim();
+  if (direct) return direct;
+  const rpcUrl = process.env.HELIUS_RPC_URL?.trim();
+  if (rpcUrl) {
+    try {
+      const key = new URL(rpcUrl).searchParams.get("api-key");
+      if (key) return key;
+    } catch {
+      // Safe configuration error below.
+    }
+  }
+  throw new Error("HELIUS_API_KEY or HELIUS_RPC_URL is required for Wallet Lab");
+}
+
+async function loadSeedTokens(): Promise<SeedToken[]> {
+  const cutoff = new Date(Date.now() - 7 * 86_400_000).toISOString();
+  const { data, error } = await supabase
+    .from("token_scores")
+    .select("token_mint,token_symbol,score")
+    .gte("score", 8)
+    .eq("dump_flag", false)
+    .gte("liquidity_usd", 10_000)
+    .gte("updated_at", cutoff)
+    .order("score", { ascending: false })
+    .order("updated_at", { ascending: false })
+    .limit(SEED_TOKEN_LIMIT);
+  if (error) throw new Error(`Wallet Lab seed-token load failed: ${error.message}`);
+  return ((data ?? []) as SeedToken[]).filter((row) => isWalletAddress(row.token_mint));
+}
+
+async function collectHeliusSeedCandidates(): Promise<{
+  candidates: CandidateSnapshot[];
+  rowsFetched: number;
+  heliusCalls: number;
+}> {
+  resetDiscoveryHeliusStats();
+  const [seedTokens, apiKey, coreWalletRows] = await Promise.all([
+    loadSeedTokens(),
+    Promise.resolve(heliusApiKey()),
+    supabase.from("wallets").select("address"),
+  ]);
+  if (coreWalletRows.error) {
+    throw new Error(`Wallet Lab core-wallet exclusion load failed: ${coreWalletRows.error.message}`);
+  }
+  const excluded = new Set((coreWalletRows.data ?? []).map((row) => row.address));
+  const evidence = new Map<
+    string,
+    {
+      tokens: Set<string>;
+      transactionCount: number;
+      seedScoreTotal: number;
+      maxSeedScore: number;
+      symbols: Set<string>;
+    }
+  >();
+  let rowsFetched = 0;
+
+  for (const seed of seedTokens) {
+    try {
+      const url =
+        `https://api-mainnet.helius-rpc.com/v0/addresses/${encodeURIComponent(seed.token_mint)}/transactions` +
+        `?api-key=${encodeURIComponent(apiKey)}&type=SWAP&limit=${SEED_TRANSACTIONS}`;
+      const payload = await heliusFetchJson(url, REQUEST_TIMEOUT_MS);
+      if (!Array.isArray(payload)) continue;
+      rowsFetched += payload.length;
+      const seenForSeed = new Set<string>();
+      const seedScore = finite(seed.score);
+      for (const transaction of payload as EnhancedTransaction[]) {
+        const address = transaction.feePayer?.trim();
+        if (!address || !isWalletAddress(address) || excluded.has(address)) continue;
+        const current = evidence.get(address) ?? {
+          tokens: new Set<string>(),
+          transactionCount: 0,
+          seedScoreTotal: 0,
+          maxSeedScore: 0,
+          symbols: new Set<string>(),
+        };
+        current.transactionCount += 1;
+        current.maxSeedScore = Math.max(current.maxSeedScore, seedScore);
+        if (!seenForSeed.has(address)) {
+          current.tokens.add(seed.token_mint);
+          if (seed.token_symbol) current.symbols.add(seed.token_symbol);
+          current.seedScoreTotal += seedScore;
+          seenForSeed.add(address);
+        }
+        evidence.set(address, current);
+      }
+    } catch (error) {
+      console.warn(`[wallet-lab] seed ${seed.token_mint.slice(0, 6)}… skipped:`, error);
+    }
+  }
+
+  const candidates = [...evidence.entries()].map(([address, row]) => {
+    const score =
+      row.tokens.size * 100 + row.seedScoreTotal * 3 + row.transactionCount + row.maxSeedScore * 2;
+    return {
+      address,
+      source: "helius_seed_token_cotrader",
+      score: Number(score.toFixed(4)),
+      metrics: {
+        provider: "helius_seed_token_cotrader",
+        seed_token_count: row.tokens.size,
+        transaction_count: row.transactionCount,
+        seed_score_total: row.seedScoreTotal,
+        max_seed_score: row.maxSeedScore,
+        seed_tokens: [...row.tokens],
+        seed_symbols: [...row.symbols],
+      },
+    } satisfies CandidateSnapshot;
+  });
+
+  return {
+    candidates,
+    rowsFetched,
+    heliusCalls: getDiscoveryHeliusStats().heliusCallsMade,
+  };
+}
+
+async function collectCandidates(): Promise<{
+  fetched: number;
+  candidates: CandidateSnapshot[];
+  providerCalls: number;
+  heliusCalls: number;
+  providers: string[];
+}> {
+  const byAddress = new Map<string, CandidateSnapshot>();
+  const provider = await collectConfiguredProviderCandidates();
+  for (const candidate of provider.candidates) byAddress.set(candidate.address, candidate);
+
+  const seed = await collectHeliusSeedCandidates();
+  for (const candidate of seed.candidates) {
+    const existing = byAddress.get(candidate.address);
+    if (!existing || candidate.score > existing.score) byAddress.set(candidate.address, candidate);
+  }
+
+  const candidates = [...byAddress.values()]
+    .sort((a, b) => b.score - a.score)
+    .slice(0, MAX_CANDIDATES_STORED);
+  const providers = [...provider.providers, "helius_seed_token_cotrader"];
+  return {
+    fetched: provider.rowsFetched + seed.rowsFetched,
+    candidates,
+    providerCalls: provider.providerCalls,
+    heliusCalls: seed.heliusCalls,
+    providers,
   };
 }
 
@@ -217,7 +476,7 @@ async function loadExisting(addresses: string[]): Promise<Map<string, CandidateR
       .from("wallet_lab_candidates")
       .select("wallet_address,status,first_seen_at,observation_count,leaderboard_score")
       .in("wallet_address", batch);
-    if (error) throw new Error(`wallet lab existing-candidate load failed: ${error.message}`);
+    if (error) throw new Error(`Wallet Lab existing-candidate load failed: ${error.message}`);
     for (const row of data ?? []) map.set(row.wallet_address, row as CandidateRow);
   }
   return map;
@@ -229,10 +488,12 @@ async function storeObservations(candidates: CandidateSnapshot[]): Promise<numbe
   const existing = await loadExisting(candidates.map((candidate) => candidate.address));
   const candidateRows = candidates.map((candidate) => {
     const prior = existing.get(candidate.address);
-    const protectedStatus = ["qualified", "trial", "disabled"].includes(prior?.status ?? "");
+    const protectedStatus = ["qualified", "rejected", "trial", "disabled"].includes(
+      prior?.status ?? ""
+    );
     return {
       wallet_address: candidate.address,
-      source: SOURCE,
+      source: candidate.source,
       status: protectedStatus ? prior!.status : "observing",
       first_seen_at: prior?.first_seen_at ?? now,
       last_seen_at: now,
@@ -246,37 +507,22 @@ async function storeObservations(candidates: CandidateSnapshot[]): Promise<numbe
     wallet_address: candidate.address,
     captured_at: now,
     leaderboard_score: candidate.score,
-    metrics: candidate.metrics,
+    metrics: { ...candidate.metrics, source: candidate.source },
   }));
 
   for (let offset = 0; offset < candidateRows.length; offset += 300) {
     const { error } = await supabase
       .from("wallet_lab_candidates")
       .upsert(candidateRows.slice(offset, offset + 300), { onConflict: "wallet_address" });
-    if (error) throw new Error(`wallet lab candidate upsert failed: ${error.message}`);
+    if (error) throw new Error(`Wallet Lab candidate upsert failed: ${error.message}`);
   }
   for (let offset = 0; offset < observationRows.length; offset += 500) {
     const { error } = await supabase
       .from("wallet_lab_observations")
       .insert(observationRows.slice(offset, offset + 500));
-    if (error) throw new Error(`wallet lab observation insert failed: ${error.message}`);
+    if (error) throw new Error(`Wallet Lab observation insert failed: ${error.message}`);
   }
   return candidates.length;
-}
-
-function heliusApiKey(): string {
-  const direct = process.env.HELIUS_API_KEY?.trim();
-  if (direct) return direct;
-  const rpcUrl = process.env.HELIUS_RPC_URL?.trim();
-  if (rpcUrl) {
-    try {
-      const key = new URL(rpcUrl).searchParams.get("api-key");
-      if (key) return key;
-    } catch {
-      // Safe error below.
-    }
-  }
-  throw new Error("HELIUS_API_KEY or HELIUS_RPC_URL is required for finalist profiling");
 }
 
 function labProfileReasons(profile: ProvenTraderProfile): string[] {
@@ -326,7 +572,7 @@ async function profileMatureCandidates(): Promise<{
     .gte("observation_count", MIN_OBSERVATIONS)
     .order("leaderboard_score", { ascending: false })
     .limit(MAX_PROFILE_PER_RUN);
-  if (error) throw new Error(`wallet lab mature-candidate load failed: ${error.message}`);
+  if (error) throw new Error(`Wallet Lab mature-candidate load failed: ${error.message}`);
   if (!data?.length) return { profiled: 0, qualified: 0, rejected: 0, heliusCalls: 0 };
 
   const apiKey = heliusApiKey();
@@ -398,13 +644,14 @@ export async function runWalletLab(): Promise<void> {
     .single();
   if (runError) {
     running = false;
-    throw new Error(`wallet lab run start failed: ${runError.message}`);
+    throw new Error(`Wallet Lab run start failed: ${runError.message}`);
   }
 
   try {
     const collected = await collectCandidates();
     const observed = await storeObservations(collected.candidates);
     const profiled = await profileMatureCandidates();
+    const totalHeliusCalls = collected.heliusCalls + profiled.heliusCalls;
     const finishedAt = new Date().toISOString();
     await supabase
       .from("wallet_lab_runs")
@@ -416,21 +663,25 @@ export async function runWalletLab(): Promise<void> {
         profiled_count: profiled.profiled,
         qualified_count: profiled.qualified,
         rejected_count: profiled.rejected,
-        helius_calls: profiled.heliusCalls,
+        helius_calls: totalHeliusCalls,
         notes: {
           observation_hours: OBSERVATION_HOURS,
           minimum_observations: MIN_OBSERVATIONS,
-          pages_requested: PAGE_COUNT,
-          page_size: PAGE_SIZE,
+          seed_tokens_per_run: SEED_TOKEN_LIMIT,
+          seed_transactions_per_token: SEED_TRANSACTIONS,
+          public_provider_calls: collected.providerCalls,
+          providers: collected.providers,
+          candidate_storage_cap: MAX_CANDIDATES_STORED,
+          mature_profiles_per_run: MAX_PROFILE_PER_RUN,
           automatic_promotion: false,
         },
         finished_at: finishedAt,
       })
       .eq("id", run.id);
     console.log(
-      `[wallet-lab] collected ${collected.candidates.length} unique wallets; ` +
-        `profiled ${profiled.profiled}; qualified ${profiled.qualified}; ` +
-        `Helius calls ${profiled.heliusCalls}`
+      `[wallet-lab] observed ${collected.candidates.length} unique wallets from ` +
+        `${collected.providers.join(", ")}; profiled ${profiled.profiled}; ` +
+        `qualified ${profiled.qualified}; Helius calls ${totalHeliusCalls}`
     );
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -450,7 +701,7 @@ export function startWalletLabScheduler(): void {
   void runWalletLab();
   setInterval(() => void runWalletLab(), INTERVAL_HOURS * 3_600_000);
   console.log(
-    `[wallet-lab] enabled every ${INTERVAL_HOURS}h; observing up to ${PAGE_COUNT * PAGE_SIZE} ` +
-      `leaderboard rows for ${OBSERVATION_HOURS}h; profiles only ${MAX_PROFILE_PER_RUN} mature finalists/run`
+    `[wallet-lab] enabled every ${INTERVAL_HOURS}h; observes candidates for ${OBSERVATION_HOURS}h; ` +
+      `capped at ${SEED_TOKEN_LIMIT} Helius seed calls plus ${MAX_PROFILE_PER_RUN} mature profiles/run`
   );
 }
