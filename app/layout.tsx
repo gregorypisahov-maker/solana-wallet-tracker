@@ -2,6 +2,7 @@ import "./globals.css";
 import "./professional-loader.css";
 import "./mobile-trades.css";
 import "./analytics-summary.css";
+import "./dashboard-polish.css";
 import AnalyticsToneFix from "./AnalyticsToneFix";
 import type { ReactNode } from "react";
 
