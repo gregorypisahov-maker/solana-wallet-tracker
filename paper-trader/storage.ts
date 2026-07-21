@@ -18,6 +18,39 @@ function assertSuccess(label: string, error: { message: string } | null): void {
   if (error) throw new Error(`${label}: ${error.message}`);
 }
 
+function currentUtcDate(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
+async function rolloverDailyStateIfNeeded(state: PaperState): Promise<PaperState> {
+  const today = currentUtcDate();
+  if (state.dailyResetDate === today) return state;
+
+  const { data: positions, error: positionsError } = await supabase
+    .from('paper_positions')
+    .select('size_sol,remaining_pct');
+  assertSuccess('Failed to load positions for daily rollover', positionsError);
+
+  const committedCapitalSol = (positions ?? []).reduce(
+    (sum: number, row: any) =>
+      sum + Number(row.size_sol ?? 0) * Number(row.remaining_pct ?? 0),
+    0
+  );
+
+  const rolled: PaperState = {
+    ...state,
+    dailyResetDate: today,
+    dailyStartBankrollSol: state.bankrollSol + committedCapitalSol,
+    consecutiveLosses: 0,
+    halted: false,
+    haltReason: null,
+  };
+
+  await saveState(rolled);
+  console.log(`[paper-trader] daily UTC rollover persisted for ${today}`);
+  return rolled;
+}
+
 export async function loadState(): Promise<PaperState> {
   const { data, error } = await supabase
     .from('paper_state')
@@ -31,7 +64,7 @@ export async function loadState(): Promise<PaperState> {
     const fresh: PaperState = {
       bankrollSol: config.position.simulatedBankrollSol,
       dailyStartBankrollSol: config.position.simulatedBankrollSol,
-      dailyResetDate: new Date().toDateString(),
+      dailyResetDate: currentUtcDate(),
       consecutiveLosses: 0,
       halted: false,
       haltReason: null,
@@ -49,7 +82,7 @@ export async function loadState(): Promise<PaperState> {
     return fresh;
   }
 
-  return {
+  const loaded: PaperState = {
     bankrollSol: Number(row.bankroll_sol),
     dailyStartBankrollSol: Number(row.daily_start_bankroll_sol),
     dailyResetDate: row.daily_reset_date,
@@ -57,6 +90,8 @@ export async function loadState(): Promise<PaperState> {
     halted: row.halted,
     haltReason: row.halt_reason,
   };
+
+  return rolloverDailyStateIfNeeded(loaded);
 }
 
 export async function saveState(state: PaperState): Promise<void> {
