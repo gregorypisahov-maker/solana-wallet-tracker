@@ -15,7 +15,7 @@ export interface AlertInput {
   weightedWalletScore?: number;
   averageTrustScore?: number;
   confidenceGrade?: 'A' | 'B' | 'C' | 'D';
-  signalSource?: 'wallet_consensus' | 'proven_trader_copy';
+  signalSource?: 'wallet_consensus' | 'proven_trader_copy' | 'wallet_lab';
   leaderWallet?: string;
   leaderProfile?: ProvenTraderSignalProfile;
   strategyVersion?: string;
@@ -30,7 +30,7 @@ export interface OpenPosition {
   peakMultiple: number;
   ladderHits: number[];
   entryAlert: AlertInput;
-  // New: stable identifier for this position, generated once at open
+  // New: stable identifier for this position, generated once when the position opens
   // time. Lets analytics correctly group every partial sell belonging
   // to this position instead of double-counting them as separate trades.
   positionId: string;
