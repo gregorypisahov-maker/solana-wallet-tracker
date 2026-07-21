@@ -7,6 +7,7 @@ import { startPaperAutoResumeScheduler } from "./paperAutoResume";
 import { startMomentumScalperScheduler } from "../paper-trader/momentumScalper";
 import { startScalperShadowScheduler } from "../paper-trader/scalperShadow";
 import { startTieredEntryShadowScheduler } from "../paper-trader/tieredEntryShadow";
+import { startTieredRecentSignalPump } from "../paper-trader/tieredRecentSignalPump";
 import { startLiveReadinessScheduler } from "../paper-trader/liveReadiness";
 
 const WALLET_DISCOVERY_SERVICE = "Wallet Discovery & Monitor";
@@ -37,6 +38,7 @@ async function bootstrap(): Promise<void> {
     startMomentumScalperScheduler();
     startScalperShadowScheduler();
     startTieredEntryShadowScheduler();
+    startTieredRecentSignalPump();
     startLiveReadinessScheduler();
   } else {
     console.log(`[monitor-bootstrap] trading schedulers disabled in ${process.env.RAILWAY_SERVICE_NAME}; owned by ${TRADING_ENGINE_SERVICE}`);
