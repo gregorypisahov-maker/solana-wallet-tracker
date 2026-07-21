@@ -17,9 +17,7 @@ function summarize(rows: Row[], pnlKey: string, timeKey: string) {
   }));
   const wins = trades.filter((row) => row.pnl > 0).length;
   const losses = trades.filter((row) => row.pnl < 0).length;
-  const grossProfit = trades
-    .filter((row) => row.pnl > 0)
-    .reduce((sum, row) => sum + row.pnl, 0);
+  const grossProfit = trades.filter((row) => row.pnl > 0).reduce((sum, row) => sum + row.pnl, 0);
   const grossLoss = Math.abs(
     trades.filter((row) => row.pnl < 0).reduce((sum, row) => sum + row.pnl, 0)
   );
@@ -34,14 +32,14 @@ function summarize(rows: Row[], pnlKey: string, timeKey: string) {
   };
 }
 
-function summarizeRegular(rows: Row[]) {
+function summarizeLogical(rows: Row[]) {
   const grouped = new Map<string, { pnl: number; soldPct: number; row: Row }>();
   for (const row of rows) {
     const key = row.position_id ?? `${row.mint}:${row.entry_price}`;
     const current = grouped.get(key) ?? { pnl: 0, soldPct: 0, row };
     current.pnl += Number(row.pnl_sol ?? 0);
     current.soldPct += Number(row.sold_pct ?? 0);
-    current.row = row;
+    if (Date.parse(row.happened_at ?? 0) >= Date.parse(current.row.happened_at ?? 0)) current.row = row;
     grouped.set(key, current);
   }
   const completed = [...grouped.values()]
@@ -71,9 +69,7 @@ function drawdown(trades: Row[]) {
 
 function windowStats(trades: Row[], fromMs: number, toMs = Date.now()) {
   const filtered = trades.filter((trade) => {
-    const time = Date.parse(
-      trade.happenedAt ?? trade.closed_at ?? trade.happened_at ?? 0
-    );
+    const time = Date.parse(trade.happenedAt ?? trade.closed_at ?? trade.happened_at ?? 0);
     return time >= fromMs && time < toMs;
   });
   const pnlSol = filtered.reduce(
@@ -95,35 +91,38 @@ export async function GET(request: NextRequest) {
     paperState,
     paperPositions,
     paperTrades,
-    scalpState,
-    scalpPositions,
-    scalpTrades,
-    scalpScans,
     shadowState,
     shadowPositions,
     shadowTrades,
+    labStates,
+    labPositions,
+    labTrades,
+    labCandidates,
+    labRuns,
+    labSignals,
     wallets,
     walletPerformance,
     tokenScores,
     readiness,
     adaptive,
     usage,
-    discoveryRuns,
   ] = await Promise.all([
     supabase.from("paper_state").select("*").eq("id", 1).maybeSingle(),
     supabase.from("paper_positions").select("*").order("entry_time", { ascending: false }),
     supabase.from("paper_trades").select("*").order("happened_at", { ascending: false }).limit(1000),
-    supabase.from("scalp_state").select("*").eq("id", 1).maybeSingle(),
-    supabase.from("scalp_positions").select("*").order("entry_time", { ascending: false }),
-    supabase.from("scalp_trades").select("*").order("closed_at", { ascending: false }).limit(500),
-    supabase
-      .from("scalp_scan_runs")
-      .select("id,started_at,finished_at,status,scanned_count,qualified_count,top_symbol,top_score,message")
-      .order("started_at", { ascending: false })
-      .limit(12),
     supabase.from("shadow_strategy_state").select("*").eq("id", 1).maybeSingle(),
     supabase.from("shadow_positions").select("*").order("entry_time", { ascending: false }),
     supabase.from("shadow_trades").select("*").order("happened_at", { ascending: false }).limit(500),
+    supabase.from("lab_strategy_state").select("*").order("variant"),
+    supabase.from("lab_positions").select("*").order("entry_time", { ascending: false }),
+    supabase.from("lab_trades").select("*").order("happened_at", { ascending: false }).limit(1000),
+    supabase
+      .from("wallet_lab_candidates")
+      .select("wallet_address,status,first_seen_at,last_seen_at,observation_count,leaderboard_score,leaderboard_metrics,final_profile,lab_trust_score,profiled_at,qualified_at,rejection_reasons,promoted_at,updated_at")
+      .order("leaderboard_score", { ascending: false })
+      .limit(100),
+    supabase.from("wallet_lab_runs").select("*").order("started_at", { ascending: false }).limit(10),
+    supabase.from("wallet_lab_signals").select("*").order("created_at", { ascending: false }).limit(30),
     supabase
       .from("wallets")
       .select("address,label,active,management_status,discovery_source,last_signature,management_updated_at")
@@ -138,27 +137,27 @@ export async function GET(request: NextRequest) {
     supabase.from("live_readiness_state").select("*").eq("id", 1).maybeSingle(),
     supabase.from("adaptive_strategy_state").select("*").eq("id", 1).maybeSingle(),
     supabase.from("monitor_usage_samples").select("*").order("recorded_at", { ascending: false }).limit(1).maybeSingle(),
-    supabase.from("wallet_discovery_runs").select("*").order("ran_at", { ascending: false }).limit(5),
   ]);
 
   const results = {
     paperState,
     paperPositions,
     paperTrades,
-    scalpState,
-    scalpPositions,
-    scalpTrades,
-    scalpScans,
     shadowState,
     shadowPositions,
     shadowTrades,
+    labStates,
+    labPositions,
+    labTrades,
+    labCandidates,
+    labRuns,
+    labSignals,
     wallets,
     walletPerformance,
     tokenScores,
     readiness,
     adaptive,
     usage,
-    discoveryRuns,
   };
   const failed = Object.entries(results).find(([, result]) => result.error);
   if (failed) {
@@ -169,17 +168,23 @@ export async function GET(request: NextRequest) {
     );
   }
 
-  const legion = summarizeRegular(paperTrades.data ?? []);
-  const scalper = summarize(scalpTrades.data ?? [], "pnl_sol", "closed_at");
+  const legion = summarizeLogical(paperTrades.data ?? []);
   const shadow = summarize(shadowTrades.data ?? [], "pnl_sol", "happened_at");
+  const labStateMap = new Map((labStates.data ?? []).map((row) => [row.variant, row]));
+  const labShadowRows = (labTrades.data ?? []).filter((row) => row.variant === "shadow");
+  const labLegionRows = (labTrades.data ?? []).filter((row) => row.variant === "legion");
+  const labShadow = summarizeLogical(labShadowRows);
+  const labLegion = summarizeLogical(labLegionRows);
+  const latestLabSignal = labSignals.data?.[0]?.created_at ?? null;
   const now = Date.now();
   const h24 = 86_400_000;
   const h48 = 2 * h24;
+
   const bots = [
     {
       id: "legion",
       name: "Legion Bot",
-      subtitle: "Shadow-filtered wallet consensus",
+      subtitle: "Core wallets · staged profit taking",
       version: REGULAR_STRATEGY_VERSION,
       state: { ...(paperState.data ?? {}), enabled: true },
       bankrollSol: Number(paperState.data?.bankroll_sol ?? 0),
@@ -191,29 +196,10 @@ export async function GET(request: NextRequest) {
       maxDrawdownSol: drawdown(legion.recentTrades),
     },
     {
-      id: "scalper",
-      name: "Scalper Bot",
-      subtitle: "Momentum scalper",
-      version: "momentum_hardstop_blacklist_v6_2026_07_21",
-      state: scalpState.data,
-      bankrollSol: Number(scalpState.data?.bankroll_sol ?? 0),
-      startingBankrollSol: Number(scalpState.data?.starting_bankroll_sol ?? 1),
-      lastScanAt: newest(
-        scalpState.data?.last_scan_at,
-        scalpState.data?.updated_at,
-        scalper.recentTrades[0]?.happenedAt
-      ),
-      positions: scalpPositions.data ?? [],
-      openPositions: (scalpPositions.data ?? []).length,
-      scans: scalpScans.data ?? [],
-      ...scalper,
-      maxDrawdownSol: drawdown(scalper.recentTrades),
-    },
-    {
       id: "shadow",
       name: "Shadow Bot",
-      subtitle: "Legion forward test",
-      version: "shadow_forward_test",
+      subtitle: "Core wallets · full-position runner",
+      version: "shadow_strategy_v1_2026_07_20",
       state: shadowState.data,
       bankrollSol: Number(shadowState.data?.bankroll_sol ?? 0),
       startingBankrollSol: Number(shadowState.data?.starting_bankroll_sol ?? 10),
@@ -222,6 +208,34 @@ export async function GET(request: NextRequest) {
       openPositions: (shadowPositions.data ?? []).length,
       ...shadow,
       maxDrawdownSol: drawdown(shadow.recentTrades),
+    },
+    {
+      id: "lab_shadow",
+      name: "Lab Shadow",
+      subtitle: "New lab wallets · full-position runner",
+      version: "wallet_lab_shadow_v1_2026_07_21",
+      state: labStateMap.get("shadow") ?? { enabled: false },
+      bankrollSol: Number(labStateMap.get("shadow")?.bankroll_sol ?? 10),
+      startingBankrollSol: Number(labStateMap.get("shadow")?.starting_bankroll_sol ?? 10),
+      lastScanAt: newest(labStateMap.get("shadow")?.updated_at, latestLabSignal, labShadow.recentTrades[0]?.happenedAt),
+      positions: (labPositions.data ?? []).filter((row) => row.variant === "shadow"),
+      openPositions: (labPositions.data ?? []).filter((row) => row.variant === "shadow").length,
+      ...labShadow,
+      maxDrawdownSol: drawdown(labShadow.recentTrades),
+    },
+    {
+      id: "lab_legion",
+      name: "Lab Legion",
+      subtitle: "New lab wallets · 50% profit lock",
+      version: "wallet_lab_legion_v1_2026_07_21",
+      state: labStateMap.get("legion") ?? { enabled: false },
+      bankrollSol: Number(labStateMap.get("legion")?.bankroll_sol ?? 10),
+      startingBankrollSol: Number(labStateMap.get("legion")?.starting_bankroll_sol ?? 10),
+      lastScanAt: newest(labStateMap.get("legion")?.updated_at, latestLabSignal, labLegion.recentTrades[0]?.happenedAt),
+      positions: (labPositions.data ?? []).filter((row) => row.variant === "legion"),
+      openPositions: (labPositions.data ?? []).filter((row) => row.variant === "legion").length,
+      ...labLegion,
+      maxDrawdownSol: drawdown(labLegion.recentTrades),
     },
   ].map((bot) => ({
     ...bot,
@@ -232,11 +246,7 @@ export async function GET(request: NextRequest) {
 
   const allRecent = bots
     .flatMap((bot) =>
-      bot.recentTrades.map((trade: any) => ({
-        ...trade,
-        botId: bot.id,
-        botName: bot.name,
-      }))
+      bot.recentTrades.map((trade: any) => ({ ...trade, botId: bot.id, botName: bot.name }))
     )
     .sort((a, b) => Date.parse(b.happenedAt ?? 0) - Date.parse(a.happenedAt ?? 0));
   const profit = allRecent
@@ -273,7 +283,12 @@ export async function GET(request: NextRequest) {
       readiness: readiness.data,
       adaptive: adaptive.data,
       usage: usage.data,
-      discoveryRuns: discoveryRuns.data ?? [],
+      walletLab: {
+        candidates: labCandidates.data ?? [],
+        runs: labRuns.data ?? [],
+        signals: labSignals.data ?? [],
+        activeTrials: (labCandidates.data ?? []).filter((row) => row.status === "trial"),
+      },
     },
     { headers: { "Cache-Control": "no-store, max-age=0" } }
   );
