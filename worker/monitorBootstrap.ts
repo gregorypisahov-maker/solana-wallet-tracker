@@ -1,10 +1,10 @@
 import "dotenv/config";
 import { startWalletIntelligenceScheduler } from "./walletIntelligence";
+import { startWalletLabScheduler } from "./walletLab";
 import { startShadowStrategyScheduler } from "./shadowStrategyScheduler";
+import { startLabStrategyScheduler } from "./labStrategyScheduler";
 import { startAdaptiveStrategyScheduler } from "../paper-trader/adaptiveStrategy";
 import { startPaperAutoResumeScheduler } from "./paperAutoResume";
-import { startMomentumScalperScheduler } from "../paper-trader/momentumScalper";
-import { startScalperShadowScheduler } from "../paper-trader/scalperShadow";
 import { startTieredEntryShadowScheduler } from "../paper-trader/tieredEntryShadow";
 import { startTieredRecentSignalPump } from "../paper-trader/tieredRecentSignalPump";
 import { startLiveReadinessScheduler } from "../paper-trader/liveReadiness";
@@ -26,12 +26,13 @@ async function bootstrap(): Promise<void> {
   const ownsWalletMonitor = shouldStartWalletManagement();
 
   if (ownsWalletMonitor) {
-    // Freeze automatic trial-wallet discovery while Helius credits are limited.
-    // Existing proven wallets continue to be scored and monitored normally.
+    // The legacy auto-promotion scanner remains paused. Wallet Lab observes a
+    // large public candidate pool cheaply and never promotes without owner action.
     console.log(
-      "[monitor-bootstrap] automatic wallet discovery paused; monitoring existing proven wallets only"
+      "[monitor-bootstrap] legacy auto-discovery paused; proven core wallets plus isolated Wallet Lab"
     );
     startWalletIntelligenceScheduler();
+    startWalletLabScheduler();
   } else {
     console.log(
       `[monitor-bootstrap] wallet management disabled in ${process.env.RAILWAY_SERVICE_NAME}; ` +
@@ -40,16 +41,17 @@ async function bootstrap(): Promise<void> {
   }
 
   if (shouldStartTradingStrategies()) {
-    console.log(
-      "[monitor-bootstrap] momentum strategy momentum_hardstop_blacklist_v6_2026_07_21"
-    );
     startAdaptiveStrategyScheduler();
     startShadowStrategyScheduler();
-    startMomentumScalperScheduler();
-    startScalperShadowScheduler();
+    startLabStrategyScheduler();
+    // The failed Momentum Scalper and its shadow scheduler are intentionally retired.
+    // Historical data stays in Supabase, but neither scheduler starts or consumes resources.
     startTieredEntryShadowScheduler();
     startTieredRecentSignalPump();
     startLiveReadinessScheduler();
+    console.log(
+      "[monitor-bootstrap] active paper strategies: Legion, Shadow, Lab Shadow, Lab Legion"
+    );
   } else {
     console.log(
       `[monitor-bootstrap] trading schedulers disabled in ${process.env.RAILWAY_SERVICE_NAME}; ` +
@@ -60,12 +62,12 @@ async function bootstrap(): Promise<void> {
   startPaperAutoResumeScheduler();
 
   if (ownsWalletMonitor) {
-    // worker/monitor.ts owns all Helius webhook/WebSocket and reconciliation work.
-    // Import it in exactly one Railway service to prevent duplicate credit usage.
+    // worker/monitor.ts owns all core-wallet Helius webhook/WebSocket and reconciliation work.
+    // Lab trial wallets use their own capped 60-second intake in Trading Engine.
     await import("./monitor");
   } else {
     console.log(
-      `[monitor-bootstrap] Helius wallet monitor not started in ${process.env.RAILWAY_SERVICE_NAME}; ` +
+      `[monitor-bootstrap] core Helius wallet monitor not started in ${process.env.RAILWAY_SERVICE_NAME}; ` +
         `owned by ${WALLET_DISCOVERY_SERVICE}`
     );
   }
