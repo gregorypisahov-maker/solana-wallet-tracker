@@ -7,16 +7,13 @@ export const config = {
     minScore: 10,
     maxScore: 65,
     minWalletCount: 3,
-    minAvgBuyPerWallet: 1.5,
-    // Historical paper results were profitable from trust 55 upward; the
-    // temporary 58 floor suppressed otherwise valid three-wallet signals.
+    // Match the profitable Shadow forward-test entry discipline.
+    minAvgBuyPerWallet: 0.75,
     minAvgTrustScore: 55,
-    eliteTwoWalletMinAvgBuySol: 1.5,
+    eliteTwoWalletMinAvgBuySol: 1.25,
     eliteTwoWalletMinAvgTrustScore: 60,
-    // The strongest historical band had at least 25% liquidity backing.
-    minLiquidityToMcapRatio: 0.25,
+    minLiquidityToMcapRatio: 0.15,
     minMarketCapUsd: 20_000,
-    // The 180k-200k band remained profitable; losses concentrated above 200k.
     maxMarketCapUsd: 200_000,
     minLiquidityUsd: 15_000,
     blockedConfidenceGrades: new Set(["D"]),
@@ -24,9 +21,10 @@ export const config = {
 
   position: {
     simulatedBankrollSol: 10,
-    sizePctPerTrade: 0.02,
+    // Match Shadow: 3% of available paper cash with at most three positions.
+    sizePctPerTrade: 0.03,
     provenTraderSizeMultiplier: 0.5,
-    maxConcurrentPositions: 2,
+    maxConcurrentPositions: 3,
   },
 
   execution: {
@@ -37,15 +35,17 @@ export const config = {
 
   exit: {
     takeProfitLadder: [
-      { atMultiple: 1.3, sellPct: 1.0 },
+      // Lock half the position near the level WHALE reached, then let the rest run.
+      { atMultiple: 1.09, sellPct: 0.5 },
+      // Close everything still open if the larger Shadow target is reached.
+      { atMultiple: 1.35, sellPct: 1.0 },
     ],
-    breakEvenActivationMultiple: 1.07,
-    trailingActivationMultiple: 1.15,
-    trailingStopPct: 0.08,
-    // The first 200+ trade sample showed hard stops consuming most gains.
-    // Tighten the forward-test loss cap while leaving entries and winners unchanged.
-    hardStopLossPct: 0.08,
-    maxHoldMinutes: 45,
+    // After the first profit level is reached, protect the remaining half at entry.
+    breakEvenActivationMultiple: 1.08,
+    trailingActivationMultiple: 1.18,
+    trailingStopPct: 0.10,
+    hardStopLossPct: 0.12,
+    maxHoldMinutes: 60,
   },
 
   risk: {
