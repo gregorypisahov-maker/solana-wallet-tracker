@@ -1,5 +1,4 @@
 import "dotenv/config";
-import { startAuditedWalletDiscoveryScheduler } from "./walletDiscoveryAudit";
 import { startWalletIntelligenceScheduler } from "./walletIntelligence";
 import { startShadowStrategyScheduler } from "./shadowStrategyScheduler";
 import { startAdaptiveStrategyScheduler } from "../paper-trader/adaptiveStrategy";
@@ -24,15 +23,26 @@ function shouldStartTradingStrategies(): boolean {
 }
 
 async function bootstrap(): Promise<void> {
-  if (shouldStartWalletManagement()) {
-    startAuditedWalletDiscoveryScheduler();
+  const ownsWalletMonitor = shouldStartWalletManagement();
+
+  if (ownsWalletMonitor) {
+    // Freeze automatic trial-wallet discovery while Helius credits are limited.
+    // Existing proven wallets continue to be scored and monitored normally.
+    console.log(
+      "[monitor-bootstrap] automatic wallet discovery paused; monitoring existing proven wallets only"
+    );
     startWalletIntelligenceScheduler();
   } else {
-    console.log(`[monitor-bootstrap] wallet management disabled in ${process.env.RAILWAY_SERVICE_NAME}; owned by ${WALLET_DISCOVERY_SERVICE}`);
+    console.log(
+      `[monitor-bootstrap] wallet management disabled in ${process.env.RAILWAY_SERVICE_NAME}; ` +
+        `owned by ${WALLET_DISCOVERY_SERVICE}`
+    );
   }
 
   if (shouldStartTradingStrategies()) {
-    console.log("[monitor-bootstrap] momentum strategy momentum_hardstop_blacklist_v6_2026_07_21");
+    console.log(
+      "[monitor-bootstrap] momentum strategy momentum_hardstop_blacklist_v6_2026_07_21"
+    );
     startAdaptiveStrategyScheduler();
     startShadowStrategyScheduler();
     startMomentumScalperScheduler();
@@ -41,11 +51,24 @@ async function bootstrap(): Promise<void> {
     startTieredRecentSignalPump();
     startLiveReadinessScheduler();
   } else {
-    console.log(`[monitor-bootstrap] trading schedulers disabled in ${process.env.RAILWAY_SERVICE_NAME}; owned by ${TRADING_ENGINE_SERVICE}`);
+    console.log(
+      `[monitor-bootstrap] trading schedulers disabled in ${process.env.RAILWAY_SERVICE_NAME}; ` +
+        `owned by ${TRADING_ENGINE_SERVICE}`
+    );
   }
 
   startPaperAutoResumeScheduler();
-  await import("./monitor");
+
+  if (ownsWalletMonitor) {
+    // worker/monitor.ts owns all Helius webhook/WebSocket and reconciliation work.
+    // Import it in exactly one Railway service to prevent duplicate credit usage.
+    await import("./monitor");
+  } else {
+    console.log(
+      `[monitor-bootstrap] Helius wallet monitor not started in ${process.env.RAILWAY_SERVICE_NAME}; ` +
+        `owned by ${WALLET_DISCOVERY_SERVICE}`
+    );
+  }
 }
 
 bootstrap().catch((error) => {
