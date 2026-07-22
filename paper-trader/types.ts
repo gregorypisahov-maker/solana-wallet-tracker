@@ -19,6 +19,9 @@ export interface AlertInput {
   leaderWallet?: string;
   leaderProfile?: ProvenTraderSignalProfile;
   strategyVersion?: string;
+  // Shadow-only experiment metadata. Other strategies ignore these fields.
+  shadowSizeMultiplier?: number;
+  shadowStudyDecision?: Record<string, unknown>;
 }
 export interface OpenPosition {
   mint: string;
