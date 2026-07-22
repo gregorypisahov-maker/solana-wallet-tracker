@@ -1,6 +1,6 @@
 import { getSupabaseAdmin } from "../lib/supabase";
 import { BINANCE_FUTURES_PAPER_CONFIG } from "./binanceFuturesPaper";
-import { startBinanceFuturesRestPaperBot } from "./binanceFuturesPaperRest";
+import { startBinanceFuturesBidirectionalRestPaperBot } from "./binanceFuturesBidirectionalRest";
 
 const RESET_INTERVAL_MS = 60_000;
 let started = false;
@@ -50,5 +50,5 @@ export function startBinanceFuturesPaperBot(): void {
 
   void resetDailyStateIfNeeded();
   setInterval(() => void resetDailyStateIfNeeded(), RESET_INTERVAL_MS);
-  startBinanceFuturesRestPaperBot();
+  startBinanceFuturesBidirectionalRestPaperBot();
 }
