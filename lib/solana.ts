@@ -3,10 +3,21 @@ import { Connection, PublicKey, ParsedTransactionWithMeta, ConfirmedSignatureInf
 const WSOL_MINT = "So11111111111111111111111111111111111111112";
 
 export function getConnection() {
-  const url = process.env.HELIUS_RPC_URL;
-  if (!url) throw new Error("Missing HELIUS_RPC_URL");
+  const url = process.env.SOLANA_RPC_URL?.trim() || process.env.ALCHEMY_RPC_URL?.trim() || process.env.HELIUS_RPC_URL?.trim();
+  if (!url) {
+    throw new Error(
+      "Missing Solana RPC URL. Set SOLANA_RPC_URL (preferred), ALCHEMY_RPC_URL, or HELIUS_RPC_URL."
+    );
+  }
+
+  const wsEndpoint =
+    process.env.SOLANA_WS_URL?.trim() ||
+    process.env.ALCHEMY_WS_URL?.trim() ||
+    undefined;
+
   return new Connection(url, {
     commitment: "confirmed",
+    ...(wsEndpoint ? { wsEndpoint } : {}),
     // @solana/web3.js otherwise retries 429 responses every 500ms internally,
     // which creates a retry storm. The monitor owns exponential backoff and
     // global request pacing instead.
