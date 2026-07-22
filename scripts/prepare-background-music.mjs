@@ -3,8 +3,9 @@ import { dirname, resolve } from "node:path";
 
 const parts = [
   resolve("assets/audio/background-music-6s.part-00"),
-  resolve("assets/audio/background-music-6s.part-01"),
-  resolve("assets/audio/background-music-6s.part-02"),
+  ...Array.from({ length: 8 }, (_, index) =>
+    resolve(`assets/audio/background-music-6s.rest-${String(index + 1).padStart(2, "0")}`)
+  ),
 ];
 const output = resolve("public/audio/background-music.mp3");
 
