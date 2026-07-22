@@ -5,6 +5,8 @@ export interface PriceData {
   priceUsd: number;
   liquidityUsd: number | null;
   marketCapUsd: number | null;
+  pairAddress: string;
+  fetchedAt: string;
 }
 
 const PRICE_TIMEOUT_MS = Math.max(
@@ -56,6 +58,8 @@ export async function getPriceUsd(mint: string): Promise<PriceData> {
         pair.fdv == null && pair.marketCap == null
           ? null
           : Number(pair.fdv ?? pair.marketCap),
+      pairAddress: typeof pair.pairAddress === "string" ? pair.pairAddress : "",
+      fetchedAt: new Date().toISOString(),
     };
   } catch (error) {
     if (error instanceof Error && error.name === "AbortError") {
