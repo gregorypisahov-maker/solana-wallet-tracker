@@ -2,166 +2,82 @@
 
 import { useEffect, useRef, useState } from "react";
 
-type AudioContextConstructor = typeof AudioContext;
-type AudioWindow = Window & typeof globalThis & { webkitAudioContext?: AudioContextConstructor };
+const TRACK_PATH = "/audio/background-music.mp3";
+const BACKGROUND_VOLUME = 0.14;
 
 export default function Soundscape() {
   const [playing, setPlaying] = useState(false);
-  const contextRef = useRef<AudioContext | null>(null);
-  const pulseTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [failed, setFailed] = useState(false);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
 
-  const stop = async () => {
-    if (pulseTimerRef.current) {
-      clearInterval(pulseTimerRef.current);
-      pulseTimerRef.current = null;
+  const getAudio = () => {
+    if (audioRef.current) return audioRef.current;
+
+    const audio = new Audio(TRACK_PATH);
+    audio.loop = true;
+    audio.preload = "auto";
+    audio.volume = BACKGROUND_VOLUME;
+    audio.setAttribute("playsinline", "true");
+    audio.addEventListener("error", () => {
+      setPlaying(false);
+      setFailed(true);
+    });
+    audioRef.current = audio;
+    return audio;
+  };
+
+  const stop = () => {
+    const audio = audioRef.current;
+    if (audio) {
+      audio.pause();
+      audio.currentTime = 0;
     }
-    const context = contextRef.current;
-    contextRef.current = null;
     setPlaying(false);
-    if (context && context.state !== "closed") {
-      await context.close().catch(() => undefined);
-    }
   };
 
   const start = async () => {
-    if (contextRef.current) return;
-
-    const AudioContextClass =
-      window.AudioContext || (window as AudioWindow).webkitAudioContext;
-    if (!AudioContextClass) return;
-
-    const context = new AudioContextClass();
-    contextRef.current = context;
-    await context.resume();
-
-    const master = context.createGain();
-    master.gain.value = 0.065;
-
-    const compressor = context.createDynamicsCompressor();
-    compressor.threshold.value = -24;
-    compressor.knee.value = 18;
-    compressor.ratio.value = 5;
-    compressor.attack.value = 0.02;
-    compressor.release.value = 0.7;
-
-    const atmosphere = context.createBiquadFilter();
-    atmosphere.type = "lowpass";
-    atmosphere.frequency.value = 430;
-    atmosphere.Q.value = 0.8;
-
-    atmosphere.connect(compressor);
-    compressor.connect(master);
-    master.connect(context.destination);
-
-    const droneGain = context.createGain();
-    droneGain.gain.value = 0.09;
-    droneGain.connect(atmosphere);
-
-    [46.25, 69.3, 92.5].forEach((frequency, index) => {
-      const oscillator = context.createOscillator();
-      oscillator.type = index === 0 ? "sine" : "triangle";
-      oscillator.frequency.value = frequency;
-      oscillator.detune.value = index === 1 ? -7 : index === 2 ? 5 : 0;
-      oscillator.connect(droneGain);
-      oscillator.start();
-    });
-
-    const noiseBuffer = context.createBuffer(1, context.sampleRate * 2, context.sampleRate);
-    const noiseData = noiseBuffer.getChannelData(0);
-    for (let i = 0; i < noiseData.length; i += 1) {
-      noiseData[i] = (Math.random() * 2 - 1) * 0.18;
+    try {
+      const audio = getAudio();
+      audio.volume = BACKGROUND_VOLUME;
+      await audio.play();
+      setFailed(false);
+      setPlaying(true);
+    } catch (error) {
+      console.warn("[storefront] Background music could not start:", error);
+      setPlaying(false);
+      setFailed(true);
     }
-    const noise = context.createBufferSource();
-    noise.buffer = noiseBuffer;
-    noise.loop = true;
-    const noiseFilter = context.createBiquadFilter();
-    noiseFilter.type = "bandpass";
-    noiseFilter.frequency.value = 850;
-    noiseFilter.Q.value = 0.35;
-    const noiseGain = context.createGain();
-    noiseGain.gain.value = 0.018;
-    noise.connect(noiseFilter);
-    noiseFilter.connect(noiseGain);
-    noiseGain.connect(compressor);
-    noise.start();
-
-    const lfo = context.createOscillator();
-    lfo.type = "sine";
-    lfo.frequency.value = 0.09;
-    const lfoDepth = context.createGain();
-    lfoDepth.gain.value = 125;
-    lfo.connect(lfoDepth);
-    lfoDepth.connect(atmosphere.frequency);
-    lfo.start();
-
-    let step = 0;
-    const schedulePulse = () => {
-      if (context.state === "closed") return;
-      const now = context.currentTime;
-      const pulse = context.createOscillator();
-      const pulseGain = context.createGain();
-      const pulseFilter = context.createBiquadFilter();
-
-      pulse.type = "sine";
-      pulse.frequency.setValueAtTime(step % 4 === 3 ? 55 : 46.25, now);
-      pulse.frequency.exponentialRampToValueAtTime(34, now + 0.65);
-
-      pulseFilter.type = "lowpass";
-      pulseFilter.frequency.value = 180;
-      pulseGain.gain.setValueAtTime(0.0001, now);
-      pulseGain.gain.exponentialRampToValueAtTime(0.34, now + 0.025);
-      pulseGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.8);
-
-      pulse.connect(pulseFilter);
-      pulseFilter.connect(pulseGain);
-      pulseGain.connect(compressor);
-      pulse.start(now);
-      pulse.stop(now + 0.85);
-
-      if (step % 4 === 2) {
-        const accent = context.createOscillator();
-        const accentGain = context.createGain();
-        accent.type = "triangle";
-        accent.frequency.value = 277.18;
-        accentGain.gain.setValueAtTime(0.0001, now + 0.2);
-        accentGain.gain.exponentialRampToValueAtTime(0.045, now + 0.27);
-        accentGain.gain.exponentialRampToValueAtTime(0.0001, now + 1.25);
-        accent.connect(accentGain);
-        accentGain.connect(atmosphere);
-        accent.start(now + 0.2);
-        accent.stop(now + 1.3);
-      }
-
-      step += 1;
-    };
-
-    schedulePulse();
-    pulseTimerRef.current = setInterval(schedulePulse, 1850);
-    setPlaying(true);
   };
 
   const toggle = () => {
-    if (playing) void stop();
+    if (playing) stop();
     else void start();
   };
 
-  useEffect(() => () => {
-    if (pulseTimerRef.current) clearInterval(pulseTimerRef.current);
-    void contextRef.current?.close().catch(() => undefined);
+  useEffect(() => {
+    return () => {
+      const audio = audioRef.current;
+      if (audio) {
+        audio.pause();
+        audio.src = "";
+        audio.load();
+      }
+      audioRef.current = null;
+    };
   }, []);
 
   return (
     <>
       <button
         type="button"
-        className={`sfSoundToggle ${playing ? "isPlaying" : ""}`}
+        className={`sfSoundToggle ${playing ? "isPlaying" : ""} ${failed ? "hasError" : ""}`}
         onClick={toggle}
         aria-pressed={playing}
-        aria-label={playing ? "Turn ambient sound off" : "Turn ambient sound on"}
-        title="Original procedural soundscape"
+        aria-label={playing ? "Turn background music off" : "Turn background music on"}
+        title="Background music from the uploaded track"
       >
         <span className="sfSoundBars" aria-hidden="true"><i /><i /><i /></span>
-        <span>{playing ? "Sound on" : "Sound off"}</span>
+        <span>{failed ? "Tap to retry" : playing ? "Music on" : "Music off"}</span>
       </button>
       <style jsx>{`
         .sfSoundToggle {
@@ -189,6 +105,7 @@ export default function Soundscape() {
         }
         .sfSoundToggle:hover { transform: translateY(-1px); border-color: rgba(88, 240, 166, 0.42); }
         .sfSoundToggle.isPlaying { color: #dfffee; border-color: rgba(88, 240, 166, 0.48); }
+        .sfSoundToggle.hasError { color: #ffd3a8; border-color: rgba(255, 176, 92, 0.42); }
         .sfSoundBars { display: inline-flex; align-items: center; gap: 2px; height: 16px; }
         .sfSoundBars i { display: block; width: 2px; height: 5px; border-radius: 2px; background: currentColor; opacity: 0.8; }
         .isPlaying .sfSoundBars i { animation: sfSoundBar 780ms ease-in-out infinite alternate; }
