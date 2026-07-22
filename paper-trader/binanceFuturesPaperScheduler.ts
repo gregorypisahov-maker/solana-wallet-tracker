@@ -1,9 +1,6 @@
 import { getSupabaseAdmin } from "../lib/supabase";
-import { ensureNodeWebSocket } from "../lib/nodeWebSocket";
-import {
-  BINANCE_FUTURES_PAPER_CONFIG,
-  startBinanceFuturesPaperScheduler as startEngine,
-} from "./binanceFuturesPaper";
+import { BINANCE_FUTURES_PAPER_CONFIG } from "./binanceFuturesPaper";
+import { startBinanceFuturesRestPaperBot } from "./binanceFuturesPaperRest";
 
 const RESET_INTERVAL_MS = 60_000;
 let started = false;
@@ -51,8 +48,7 @@ export function startBinanceFuturesPaperBot(): void {
     return;
   }
 
-  ensureNodeWebSocket();
   void resetDailyStateIfNeeded();
   setInterval(() => void resetDailyStateIfNeeded(), RESET_INTERVAL_MS);
-  startEngine();
+  startBinanceFuturesRestPaperBot();
 }
