@@ -2,15 +2,17 @@ export const PROVEN_TRADER_RULES = {
   minClosedTrades: 8,
   minDistinctClosedTokens: 3,
   minWinRate: 0.55,
-  minProfitFactor: 1.4,
+  // Recent profitable wallets cluster around PF 1.3-1.5. Keep positive PnL,
+  // sample-depth and drawdown requirements so this does not admit noisy churners.
+  minProfitFactor: 1.3,
   minRealizedPnlSol: 0.1,
   maxDrawdownToGrossProfit: 0.75,
   // A lower hit rate can still have strong positive expectancy when winners
-  // are much larger than losses. This exception requires a deeper sample and
-  // substantially stronger profit evidence.
+  // are larger than losses. This exception requires a deeper sample and the
+  // same validated PF/PnL floor as the profitable-wallet cohort.
   asymmetricMinClosedTrades: 12,
-  asymmetricMinProfitFactor: 2,
-  asymmetricMinRealizedPnlSol: 0.25,
+  asymmetricMinProfitFactor: 1.3,
+  asymmetricMinRealizedPnlSol: 0.1,
 } as const;
 
 export interface ProvenTraderSignalProfile {
