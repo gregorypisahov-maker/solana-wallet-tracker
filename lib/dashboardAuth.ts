@@ -1,14 +1,19 @@
 import { NextRequest, NextResponse } from "next/server";
-import { timingSafeEqual } from "crypto";
+import { createHmac, randomBytes, timingSafeEqual } from "crypto";
 
 export const VIEWER_COOKIE = "swt_viewer";
+export const VIEWER_SESSION_TTL_SECONDS = 60 * 60 * 12;
+const SESSION_VERSION = "v1";
 
 export function getViewerSecret(): string | undefined {
   return (
     process.env.VIEWER_SHARE_TOKEN?.trim() ||
-    process.env.DASHBOARD_KEY?.trim() ||
-    process.env.DASHBOARD_ADMIN_PASSWORD?.trim()
+    process.env.DASHBOARD_KEY?.trim()
   );
+}
+
+function getSessionSecret(): string | undefined {
+  return process.env.DASHBOARD_SESSION_SECRET?.trim() || getViewerSecret();
 }
 
 function safeEqual(left: string | undefined, right: string | undefined): boolean {
@@ -18,18 +23,40 @@ function safeEqual(left: string | undefined, right: string | undefined): boolean
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
+function signViewerPayload(payload: string): string | undefined {
+  const secret = getSessionSecret();
+  if (!secret) return undefined;
+  return createHmac("sha256", secret).update(payload).digest("base64url");
+}
+
+export function createViewerSessionToken(nowMs = Date.now()): string | undefined {
+  const expiresAt = Math.floor(nowMs / 1000) + VIEWER_SESSION_TTL_SECONDS;
+  const nonce = randomBytes(16).toString("hex");
+  const payload = `${SESSION_VERSION}.${expiresAt}.${nonce}`;
+  const signature = signViewerPayload(payload);
+  return signature ? `${payload}.${signature}` : undefined;
+}
+
+export function verifyViewerSessionToken(token: string | undefined, nowMs = Date.now()): boolean {
+  if (!token) return false;
+  const parts = token.split(".");
+  if (parts.length !== 4 || parts[0] !== SESSION_VERSION) return false;
+
+  const expiresAt = Number(parts[1]);
+  const nowSeconds = Math.floor(nowMs / 1000);
+  if (!Number.isFinite(expiresAt) || expiresAt <= nowSeconds) return false;
+  if (expiresAt > nowSeconds + VIEWER_SESSION_TTL_SECONDS + 60) return false;
+
+  const payload = parts.slice(0, 3).join(".");
+  return safeEqual(parts[3], signViewerPayload(payload));
+}
+
 export function hasViewerAccess(request: NextRequest): boolean {
-  return safeEqual(request.cookies.get(VIEWER_COOKIE)?.value, getViewerSecret());
+  return verifyViewerSessionToken(request.cookies.get(VIEWER_COOKIE)?.value);
 }
 
 export function hasAdminAccess(request: NextRequest): boolean {
-  // Prefer a dedicated owner password when configured. If the deployment only
-  // has the normal dashboard key/share token, allow that same key to control
-  // the paper bots so the Resume/Pause buttons do not fail unexpectedly.
-  const expected =
-    process.env.DASHBOARD_ADMIN_PASSWORD?.trim() ||
-    process.env.DASHBOARD_KEY?.trim() ||
-    process.env.VIEWER_SHARE_TOKEN?.trim();
+  const expected = process.env.DASHBOARD_ADMIN_PASSWORD?.trim();
   const authorization = request.headers.get("authorization");
   if (!expected || !authorization?.startsWith("Basic ")) return false;
 
