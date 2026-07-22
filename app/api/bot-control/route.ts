@@ -6,7 +6,7 @@ export const dynamic = "force-dynamic";
 export const revalidate = 0;
 export const fetchCache = "force-no-store";
 
-type BotId = "legion" | "shadow" | "lab_shadow" | "lab_legion";
+type BotId = "legion" | "shadow";
 type Action = "resume" | "pause";
 
 export async function POST(request: NextRequest) {
@@ -16,10 +16,7 @@ export async function POST(request: NextRequest) {
   const body = await request.json().catch(() => ({}));
   const bot = body.bot as BotId;
   const action = body.action as Action;
-  if (
-    !["legion", "shadow", "lab_shadow", "lab_legion"].includes(bot) ||
-    !["resume", "pause"].includes(action)
-  ) {
+  if (!['legion', 'shadow'].includes(bot) || !['resume', 'pause'].includes(action)) {
     return NextResponse.json({ error: "Invalid bot control request" }, { status: 400 });
   }
 
@@ -42,21 +39,11 @@ export async function POST(request: NextRequest) {
       .single();
     data = result.data;
     error = result.error;
-  } else if (bot === "shadow") {
+  } else {
     const result = await supabase
       .from("shadow_strategy_state")
       .update({ enabled: action === "resume", updated_at: now })
       .eq("id", 1)
-      .select("*")
-      .single();
-    data = result.data;
-    error = result.error;
-  } else {
-    const variant = bot === "lab_shadow" ? "shadow" : "legion";
-    const result = await supabase
-      .from("lab_strategy_state")
-      .update({ enabled: action === "resume", updated_at: now })
-      .eq("variant", variant)
       .select("*")
       .single();
     data = result.data;
