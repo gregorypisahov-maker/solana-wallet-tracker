@@ -4,10 +4,14 @@ import { discoverTrialWallets } from "./walletDiscovery";
 
 const supabase = getSupabaseAdmin();
 
-const INTERVAL_HOURS = 24;
-const ENDPOINT =
-  process.env.GMGN_WALLET_DISCOVERY_URL ??
-  "https://gmgn.ai/defi/quotation/v1/rank/sol/wallets/7d?orderby=realized_profit_7d&direction=desc";
+const configuredIntervalHours = Number(
+  process.env.WALLET_DISCOVERY_INTERVAL_HOURS ?? 6
+);
+const INTERVAL_HOURS = Number.isFinite(configuredIntervalHours)
+  ? Math.max(1, Math.min(24, configuredIntervalHours))
+  : 6;
+const DISCOVERY_SOURCE = "helius_seed_token_cotrader";
+const ENDPOINT = "helius://seed-token-cotrader";
 
 let running = false;
 
@@ -19,7 +23,7 @@ async function recordRun(input: {
   errorMessage?: string;
 }): Promise<void> {
   const { error } = await supabase.from("wallet_discovery_runs").insert({
-    source: "gmgn_smart_money_7d",
+    source: DISCOVERY_SOURCE,
     status: input.status,
     fetched_count: input.fetched ?? 0,
     eligible_count: input.eligible ?? 0,
@@ -56,7 +60,8 @@ async function runOnce(): Promise<void> {
     });
 
     console.log(
-      `[wallet-discovery-audit] ${status}; eligible=${result.eligible}; added=${result.added.length}`
+      `[wallet-discovery-audit] ${status}; fetched=${result.fetched}; ` +
+        `eligible=${result.eligible}; added=${result.added.length}`
     );
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
