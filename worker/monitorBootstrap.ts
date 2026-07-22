@@ -1,7 +1,7 @@
 import "dotenv/config";
 import { startWalletIntelligenceScheduler } from "./walletIntelligence";
 import { startAuditedWalletDiscoveryScheduler } from "./walletDiscoveryAudit";
-import { startShadowStrategyScheduler } from "./shadowStrategyScheduler";
+import { startShadowStrategyScheduler } from "./shadowStudyScheduler";
 import { startAdaptiveStrategyScheduler } from "../paper-trader/adaptiveStrategy";
 import { startPaperAutoResumeScheduler } from "./paperAutoResume";
 import { startTieredEntryShadowScheduler } from "../paper-trader/tieredEntryShadow";
@@ -48,7 +48,7 @@ async function bootstrap(): Promise<void> {
     startTieredRecentSignalPump();
     startLiveReadinessScheduler();
     console.log(
-      "[monitor-bootstrap] active paper strategies: Legion, Shadow, Tiered; scalpers exit-only"
+      "[monitor-bootstrap] active paper strategies: Legion, manipulation-resistant Shadow, Tiered; scalpers exit-only"
     );
   } else {
     console.log(
