@@ -73,9 +73,7 @@ async function loadState(): Promise<ShadowState> {
 }
 
 async function loadPositions(): Promise<ShadowPosition[]> {
-  const { data, error } = await supabase
-    .from("shadow_positions")
-    .select("mint,token_symbol,entry_price,entry_time,size_sol,remaining_pct,peak_multiple,entry_alert,position_id,realized_pnl_sol");
+  const { data, error } = await supabase.from("shadow_positions").select("mint,token_symbol,entry_price,entry_time,size_sol,remaining_pct,peak_multiple,entry_alert,position_id,realized_pnl_sol");
   if (error) throw new Error(`shadow positions load failed: ${error.message}`);
   return (data ?? []) as ShadowPosition[];
 }
