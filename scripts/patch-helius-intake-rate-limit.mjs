@@ -11,7 +11,7 @@ function patchManager() {
 process.env.HELIUS_EVENT_MODE = "websocket";
 console.log("[helius-webhook] registration disabled; using WebSocket + polling ingestion");`;
   const after = `// Auto mode first reuses the filtered Helius webhook. WebSocket fallback is
-// separately opt-in so a rejected socket cannot enter a rapid reconnect loop.`;
+// separately opt-in so a rejected Helius socket cannot enter a rapid reconnect loop.`;
 
   if (source.includes(before)) {
     source = source.replace(before, after);
@@ -33,11 +33,45 @@ function patchMonitor() {
   process.env.HELIUS_EVENT_MODE ?? "auto"
 ).toLowerCase();`;
   const modeAfter = `${modeBefore}
-const HELIUS_WEBSOCKET_FALLBACK_ENABLED = ["1", "true", "yes", "on"].includes(
+const PROVIDER_NEUTRAL_RPC_ACTIVE = Boolean(
+  process.env.SOLANA_RPC_URL?.trim() || process.env.ALCHEMY_RPC_URL?.trim()
+);
+const HELIUS_WEBSOCKET_FALLBACK_ENABLED =
+  PROVIDER_NEUTRAL_RPC_ACTIVE ||
+  ["1", "true", "yes", "on"].includes(
+    (process.env.ENABLE_HELIUS_WEBSOCKET_FALLBACK ?? "false").trim().toLowerCase()
+  );`;
+
+  if (source.includes(modeBefore) && !source.includes("PROVIDER_NEUTRAL_RPC_ACTIVE")) {
+    source = source.replace(modeBefore, modeAfter);
+  } else if (
+    source.includes("ENABLE_HELIUS_WEBSOCKET_FALLBACK") &&
+    !source.includes("PROVIDER_NEUTRAL_RPC_ACTIVE")
+  ) {
+    const oldBlock = `const HELIUS_WEBSOCKET_FALLBACK_ENABLED = ["1", "true", "yes", "on"].includes(
   (process.env.ENABLE_HELIUS_WEBSOCKET_FALLBACK ?? "false").trim().toLowerCase()
 );`;
-  if (source.includes(modeBefore) && !source.includes("ENABLE_HELIUS_WEBSOCKET_FALLBACK")) {
-    source = source.replace(modeBefore, modeAfter);
+    const newBlock = `const PROVIDER_NEUTRAL_RPC_ACTIVE = Boolean(
+  process.env.SOLANA_RPC_URL?.trim() || process.env.ALCHEMY_RPC_URL?.trim()
+);
+const HELIUS_WEBSOCKET_FALLBACK_ENABLED =
+  PROVIDER_NEUTRAL_RPC_ACTIVE ||
+  ["1", "true", "yes", "on"].includes(
+    (process.env.ENABLE_HELIUS_WEBSOCKET_FALLBACK ?? "false").trim().toLowerCase()
+  );`;
+    if (source.includes(oldBlock)) source = source.replace(oldBlock, newBlock);
+  }
+
+  const syncAnchor = `async function syncHeliusWebhook(addresses: string[]): Promise<boolean> {`;
+  const providerBypass = `${syncAnchor}
+  // Alchemy/provider-neutral RPC uses standard Solana WebSockets directly.
+  // Never call Helius webhook APIs when this path is active.
+  if (PROVIDER_NEUTRAL_RPC_ACTIVE) {
+    webhookMode = false;
+    return false;
+  }`;
+  if (source.includes(syncAnchor) && !source.includes("Never call Helius webhook APIs")) {
+    source = source.replace(syncAnchor, providerBypass);
   }
 
   const explicitWsBefore = `  if (HELIUS_EVENT_MODE === "websocket") {
@@ -91,6 +125,8 @@ const HELIUS_WEBSOCKET_FALLBACK_ENABLED = ["1", "true", "yes", "on"].includes(
   }
 
   const requiredMarkers = [
+    "PROVIDER_NEUTRAL_RPC_ACTIVE",
+    "Never call Helius webhook APIs",
     "ENABLE_HELIUS_WEBSOCKET_FALLBACK",
     "filtered webhook unavailable; WebSocket fallback disabled",
     `HELIUS_EVENT_MODE === "polling"`,
@@ -102,7 +138,11 @@ const HELIUS_WEBSOCKET_FALLBACK_ENABLED = ["1", "true", "yes", "on"].includes(
   }
 
   fs.writeFileSync(monitorFile, source);
-  console.log("[build] Added Helius WebSocket rate-limit circuit breaker.");
+  console.log(
+    PROVIDER_NEUTRAL_RPC_ACTIVE
+      ? "[build] Provider-neutral WebSocket intake preserved; Helius APIs bypassed."
+      : "[build] Added Helius WebSocket rate-limit circuit breaker."
+  );
 }
 
 patchManager();
