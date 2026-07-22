@@ -73,7 +73,9 @@ async function loadState(): Promise<ShadowState> {
 }
 
 async function loadPositions(): Promise<ShadowPosition[]> {
-  const { data, error } = await supabase.from("shadow_positions").select("*");
+  const { data, error } = await supabase
+    .from("shadow_positions")
+    .select("mint,token_symbol,entry_price,entry_time,size_sol,remaining_pct,peak_multiple,entry_alert,position_id,realized_pnl_sol");
   if (error) throw new Error(`shadow positions load failed: ${error.message}`);
   return (data ?? []) as ShadowPosition[];
 }
@@ -106,6 +108,14 @@ function entryRejection(alert: AlertInput): string | null {
   if (alert.confidenceGrade && RULES.blockedConfidenceGrades.has(alert.confidenceGrade)) {
     return `confidence ${alert.confidenceGrade} blocked`;
   }
+  if (
+    alert.shadowSizeMultiplier !== undefined &&
+    (!Number.isFinite(alert.shadowSizeMultiplier) ||
+      alert.shadowSizeMultiplier <= 0 ||
+      alert.shadowSizeMultiplier > 1)
+  ) {
+    return `invalid shadow size multiplier ${alert.shadowSizeMultiplier}`;
+  }
   return null;
 }
 
@@ -128,8 +138,16 @@ export async function onShadowAlert(alert: AlertInput): Promise<void> {
     }
 
     const bankroll = Number(state.bankroll_sol);
-    const sizeSol = bankroll * RULES.sizePct;
+    const sizeMultiplier = alert.shadowSizeMultiplier ?? 1;
+    const normalSizeSol = bankroll * RULES.sizePct;
+    const sizeSol = normalSizeSol * sizeMultiplier;
     if (!Number.isFinite(sizeSol) || sizeSol <= 0 || sizeSol > bankroll) return;
+
+    if (alert.shadowStudyDecision && typeof alert.shadowStudyDecision === "object") {
+      alert.shadowStudyDecision.signal_multiplier = sizeMultiplier;
+      alert.shadowStudyDecision.normal_shadow_size_sol = normalSizeSol;
+      alert.shadowStudyDecision.final_shadow_size_sol = sizeSol;
+    }
 
     const price = (await getPriceUsd(alert.mint)).priceUsd;
     if (!Number.isFinite(price) || price <= 0) return;
@@ -159,7 +177,7 @@ export async function onShadowAlert(alert: AlertInput): Promise<void> {
 
     console.log(
       `[SHADOW ENTER] ${alert.tokenSymbol} @ $${price} | size ${sizeSol.toFixed(3)} SOL | ` +
-        `score ${alert.score}`
+        `multiplier ${sizeMultiplier.toFixed(3)} | score ${alert.score}`
     );
   });
 }
