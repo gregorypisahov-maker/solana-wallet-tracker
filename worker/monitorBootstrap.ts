@@ -9,6 +9,7 @@ import { startTieredRecentSignalPump } from "../paper-trader/tieredRecentSignalP
 import { startLiveReadinessScheduler } from "../paper-trader/liveReadiness";
 import { startMomentumScalperScheduler } from "../paper-trader/momentumScalper";
 import { startScalperShadowScheduler } from "../paper-trader/scalperShadow";
+import { startBinanceFuturesPaperBot } from "../paper-trader/binanceFuturesPaperScheduler";
 
 const WALLET_DISCOVERY_SERVICE = "Wallet Discovery & Monitor";
 const TRADING_ENGINE_SERVICE = "Trading Engine";
@@ -47,8 +48,9 @@ async function bootstrap(): Promise<void> {
     startTieredEntryShadowScheduler();
     startTieredRecentSignalPump();
     startLiveReadinessScheduler();
+    startBinanceFuturesPaperBot();
     console.log(
-      "[monitor-bootstrap] active paper strategies: Legion, manipulation-resistant Shadow, Tiered; scalpers exit-only"
+      "[monitor-bootstrap] active paper strategies: Legion, manipulation-resistant Shadow, Tiered, Binance BTC pump-fade; scalpers exit-only"
     );
   } else {
     console.log(
