@@ -1,29 +1,13 @@
 import fs from "node:fs";
 
-const managerFile = "worker/heliusWebhookManager.ts";
 const monitorFile = "worker/monitor.ts";
 
-function patchManager() {
-  let source = fs.readFileSync(managerFile, "utf8");
-  const before = `// Cost guard: the monitor must not create, update, or reactivate Helius
-// webhooks. It will use its existing WebSocket intake and polling
-// reconciliation paths instead.
-process.env.HELIUS_EVENT_MODE = "websocket";
-console.log("[helius-webhook] registration disabled; using WebSocket + polling ingestion");`;
-  const after = `// Auto mode first reuses the filtered Helius webhook. WebSocket fallback is
-// separately opt-in so a rejected Helius socket cannot enter a rapid reconnect loop.`;
-
-  if (source.includes(before)) {
-    source = source.replace(before, after);
-    fs.writeFileSync(managerFile, source);
-    console.log("[build] Restored filtered-webhook-first Helius intake.");
-    return;
+function replaceOnce(source, before, after, label) {
+  if (source.includes(after)) return source;
+  if (!source.includes(before)) {
+    throw new Error(`${label} patch target not found`);
   }
-
-  if (!source.includes(after)) {
-    throw new Error("Helius webhook-mode patch target not found");
-  }
-  console.log("[build] Helius webhook-first intake already patched.");
+  return source.replace(before, after);
 }
 
 function patchMonitor() {
@@ -33,120 +17,112 @@ function patchMonitor() {
   process.env.HELIUS_EVENT_MODE ?? "auto"
 ).toLowerCase();`;
   const modeAfter = `${modeBefore}
-const PROVIDER_NEUTRAL_RPC_ACTIVE = Boolean(
-  process.env.SOLANA_RPC_URL?.trim() || process.env.ALCHEMY_RPC_URL?.trim()
-);
-const HELIUS_WEBSOCKET_FALLBACK_ENABLED =
-  PROVIDER_NEUTRAL_RPC_ACTIVE ||
+const PROVIDER_HTTP_POLLING_ACTIVE =
+  Boolean(process.env.SOLANA_RPC_URL?.trim() || process.env.ALCHEMY_RPC_URL?.trim()) &&
   ["1", "true", "yes", "on"].includes(
-    (process.env.ENABLE_HELIUS_WEBSOCKET_FALLBACK ?? "false").trim().toLowerCase()
+    (process.env.ENABLE_PROVIDER_HTTP_POLLING ?? "true").trim().toLowerCase()
   );`;
+  source = replaceOnce(
+    source,
+    modeBefore,
+    modeAfter,
+    "provider HTTP polling mode"
+  );
 
-  if (source.includes(modeBefore) && !source.includes("PROVIDER_NEUTRAL_RPC_ACTIVE")) {
-    source = source.replace(modeBefore, modeAfter);
-  } else if (
-    source.includes("ENABLE_HELIUS_WEBSOCKET_FALLBACK") &&
-    !source.includes("PROVIDER_NEUTRAL_RPC_ACTIVE")
-  ) {
-    const oldBlock = `const HELIUS_WEBSOCKET_FALLBACK_ENABLED = ["1", "true", "yes", "on"].includes(
-  (process.env.ENABLE_HELIUS_WEBSOCKET_FALLBACK ?? "false").trim().toLowerCase()
-);`;
-    const newBlock = `const PROVIDER_NEUTRAL_RPC_ACTIVE = Boolean(
-  process.env.SOLANA_RPC_URL?.trim() || process.env.ALCHEMY_RPC_URL?.trim()
-);
-const HELIUS_WEBSOCKET_FALLBACK_ENABLED =
-  PROVIDER_NEUTRAL_RPC_ACTIVE ||
-  ["1", "true", "yes", "on"].includes(
-    (process.env.ENABLE_HELIUS_WEBSOCKET_FALLBACK ?? "false").trim().toLowerCase()
-  );`;
-    if (source.includes(oldBlock)) source = source.replace(oldBlock, newBlock);
-  }
-
-  const syncAnchor = `async function syncHeliusWebhook(addresses: string[]): Promise<boolean> {`;
-  const providerBypass = `${syncAnchor}
-  // Alchemy/provider-neutral RPC uses standard Solana WebSockets directly.
-  // Never call Helius webhook APIs when this path is active.
-  if (PROVIDER_NEUTRAL_RPC_ACTIVE) {
+  const webhookAnchor = `async function syncHeliusWebhook(addresses: string[]): Promise<boolean> {`;
+  const webhookAfter = `${webhookAnchor}
+  // Provider polling is HTTP-only. Never touch Helius management APIs or
+  // attempt a Solana logsSubscribe fallback on this path.
+  if (PROVIDER_HTTP_POLLING_ACTIVE || HELIUS_EVENT_MODE === "polling") {
     webhookMode = false;
     return false;
   }`;
-  if (source.includes(syncAnchor) && !source.includes("Never call Helius webhook APIs")) {
-    source = source.replace(syncAnchor, providerBypass);
-  }
+  source = replaceOnce(
+    source,
+    webhookAnchor,
+    webhookAfter,
+    "Helius webhook bypass"
+  );
 
-  const explicitWsBefore = `  if (HELIUS_EVENT_MODE === "websocket") {
+  const subscriptionBefore = `async function syncWalletSubscriptions(): Promise<void> {
+  const { data: wallets, error } = await supabase`;
+  const subscriptionAfter = `async function syncWalletSubscriptions(): Promise<void> {
+  if (PROVIDER_HTTP_POLLING_ACTIVE) {
     webhookMode = false;
-    return false;
-  }`;
-  const explicitWsAfter = `  if (HELIUS_EVENT_MODE === "polling") {
-    webhookMode = false;
-    return false;
-  }
-  if (HELIUS_EVENT_MODE === "websocket" && HELIUS_WEBSOCKET_FALLBACK_ENABLED) {
-    webhookMode = false;
-    return false;
-  }`;
-  if (source.includes(explicitWsBefore)) {
-    source = source.replace(explicitWsBefore, explicitWsAfter);
-  }
-
-  const fallbackAnchor = `    console.log("[helius-webhook] WebSocket fallback is idle");
-    return;
-  }
-
-  for (const [address, subscriptionId] of walletSubscriptions) {`;
-  const fallbackReplacement = `    console.log("[helius-webhook] WebSocket fallback is idle");
-    return;
-  }
-
-  if (!HELIUS_WEBSOCKET_FALLBACK_ENABLED) {
     for (const [address, subscriptionId] of walletSubscriptions) {
       try {
         await connection.removeOnLogsListener(subscriptionId);
       } catch (error) {
         console.warn(
-          \`[websocket] Failed to close rate-limited subscription \${address.slice(0, 6)}…:\`,
+          \`[provider-polling] failed to close old subscription \${address.slice(0, 6)}…:\`,
           error
         );
       } finally {
         walletSubscriptions.delete(address);
       }
     }
-    console.warn(
-      "[helius-intake] filtered webhook unavailable; WebSocket fallback disabled; " +
-        "using paced reconciliation only"
+    console.log(
+      "[provider-polling] HTTP reconciliation active; WebSockets and Helius intake are disabled"
     );
     return;
   }
 
-  for (const [address, subscriptionId] of walletSubscriptions) {`;
-  if (source.includes(fallbackAnchor)) {
-    source = source.replace(fallbackAnchor, fallbackReplacement);
-  }
+  const { data: wallets, error } = await supabase`;
+  source = replaceOnce(
+    source,
+    subscriptionBefore,
+    subscriptionAfter,
+    "WebSocket subscription bypass"
+  );
+
+  const usageBefore = `async function persistHeliusUsageInner(): Promise<void> {
+  const snapshot = usage.snapshot();`;
+  const usageAfter = `async function persistHeliusUsageInner(): Promise<void> {
+  // Provider HTTP requests belong to Alchemy/the configured neutral RPC and
+  // must never be reported as Helius credit consumption.
+  if (PROVIDER_HTTP_POLLING_ACTIVE) return;
+
+  const snapshot = usage.snapshot();`;
+  source = replaceOnce(
+    source,
+    usageBefore,
+    usageAfter,
+    "Helius usage reporting bypass"
+  );
+
+  const startupBefore = `      \`✅ Solana wallet tracker started in credit-saving \${
+        webhookMode ? "filtered webhook" : "WebSocket fallback"
+      } mode. Telegram alerts are working.\``;
+  const startupAfter = `      \`✅ Solana wallet tracker started in \${
+        PROVIDER_HTTP_POLLING_ACTIVE
+          ? "Alchemy HTTP polling (Helius disabled)"
+          : webhookMode
+            ? "filtered webhook"
+            : "WebSocket fallback"
+      } mode. Telegram alerts are working.\``;
+  source = replaceOnce(
+    source,
+    startupBefore,
+    startupAfter,
+    "startup status message"
+  );
 
   const requiredMarkers = [
-    "PROVIDER_NEUTRAL_RPC_ACTIVE",
-    "Never call Helius webhook APIs",
-    "ENABLE_HELIUS_WEBSOCKET_FALLBACK",
-    "filtered webhook unavailable; WebSocket fallback disabled",
-    `HELIUS_EVENT_MODE === "polling"`,
+    "PROVIDER_HTTP_POLLING_ACTIVE",
+    "HTTP reconciliation active; WebSockets and Helius intake are disabled",
+    "must never be reported as Helius credit consumption",
+    "Alchemy HTTP polling (Helius disabled)",
   ];
   for (const marker of requiredMarkers) {
     if (!source.includes(marker)) {
-      throw new Error(`Helius intake patch incomplete: missing ${marker}`);
+      throw new Error(`Provider polling patch incomplete: missing ${marker}`);
     }
   }
 
   fs.writeFileSync(monitorFile, source);
-  const providerNeutralRpcActive = Boolean(
-    process.env.SOLANA_RPC_URL?.trim() || process.env.ALCHEMY_RPC_URL?.trim()
-  );
   console.log(
-    providerNeutralRpcActive
-      ? "[build] Provider-neutral WebSocket intake preserved; Helius APIs bypassed."
-      : "[build] Added Helius WebSocket rate-limit circuit breaker."
+    "[build] Enabled provider HTTP polling; Helius and logsSubscribe paths remain disabled."
   );
 }
 
-patchManager();
 patchMonitor();
