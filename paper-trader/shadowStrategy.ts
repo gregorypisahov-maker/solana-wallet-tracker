@@ -10,8 +10,6 @@ const RULES = {
   minWallets: 3,
   minAvgBuySol: 0.75,
   minAvgTrustScore: 55, // trust 60+ entries were strongly profitable, <55 net negative
-  eliteTwoWalletMinAvgBuySol: 1.25,
-  eliteTwoWalletMinAvgTrustScore: 60,
   minLiquidityUsd: 15_000,
   minLiqToMcapRatio: 0.15, // liq/mcap 30%+ was the most profitable band, <15% negative
   minMarketCapUsd: 20_000,
@@ -81,20 +79,10 @@ async function loadPositions(): Promise<ShadowPosition[]> {
 function entryRejection(alert: AlertInput): string | null {
   const avgBuy = alert.walletCount > 0 ? alert.totalBoughtSol / alert.walletCount : 0;
   const liqRatio = alert.marketCapUsd > 0 ? alert.liquidityUsd / alert.marketCapUsd : 0;
-  const isEliteTwoWalletSignal =
-    alert.walletCount === 2 &&
-    avgBuy >= RULES.eliteTwoWalletMinAvgBuySol &&
-    alert.averageTrustScore !== undefined &&
-    alert.averageTrustScore >= RULES.eliteTwoWalletMinAvgTrustScore;
 
   if (alert.score < RULES.minScore) return `score ${alert.score} < ${RULES.minScore}`;
   if (alert.score > RULES.maxScore) return `score ${alert.score} > ${RULES.maxScore} (late-entry guard)`;
-  if (alert.walletCount < RULES.minWallets && !isEliteTwoWalletSignal) {
-    if (alert.walletCount === 2) {
-      return `2-wallet signal needs avg buy >= ${RULES.eliteTwoWalletMinAvgBuySol} and avg trust >= ${RULES.eliteTwoWalletMinAvgTrustScore}`;
-    }
-    return `wallets ${alert.walletCount} < ${RULES.minWallets}`;
-  }
+  if (alert.walletCount < RULES.minWallets) return `wallets ${alert.walletCount} < ${RULES.minWallets}`;
   if (avgBuy < RULES.minAvgBuySol) return `avg buy ${avgBuy.toFixed(2)} < ${RULES.minAvgBuySol}`;
   if (alert.averageTrustScore === undefined || alert.averageTrustScore < RULES.minAvgTrustScore) {
     return `avg trust ${alert.averageTrustScore ?? "n/a"} < ${RULES.minAvgTrustScore}`;
