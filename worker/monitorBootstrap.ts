@@ -21,9 +21,21 @@ function envFlag(name: string, fallback = false): boolean {
   return ["1", "true", "yes", "on"].includes(raw.trim().toLowerCase());
 }
 
-// Emergency cost guard: Helius intake stays off unless it is deliberately
-// re-enabled after credits reset and the account budget is reviewed.
+const providerRpcUrl =
+  process.env.SOLANA_RPC_URL?.trim() ||
+  process.env.ALCHEMY_RPC_URL?.trim() ||
+  process.env.HELIUS_RPC_URL?.trim() ||
+  "";
+const usingProviderNeutralRpc = Boolean(
+  process.env.SOLANA_RPC_URL?.trim() || process.env.ALCHEMY_RPC_URL?.trim()
+);
+
+// Helius intake remains opt-in because its credits can be exhausted. A configured
+// provider-neutral RPC (for example Alchemy) automatically enables the core
+// wallet WebSocket monitor and reconciliation without enabling Helius webhooks.
 const HELIUS_INTAKE_ENABLED = envFlag("ENABLE_HELIUS_INTAKE", false);
+const WALLET_RPC_INTAKE_ENABLED = Boolean(providerRpcUrl) &&
+  (usingProviderNeutralRpc || HELIUS_INTAKE_ENABLED);
 
 function shouldStartWalletManagement(): boolean {
   const serviceName = process.env.RAILWAY_SERVICE_NAME?.trim();
@@ -45,7 +57,7 @@ async function deactivateProjectHeliusWebhooks(): Promise<void> {
   const rpcUrl = process.env.HELIUS_RPC_URL?.trim();
   const apiKey = rpcUrl ? extractHeliusApiKey(rpcUrl) : null;
   if (!apiKey) {
-    console.warn("[helius-emergency-stop] no Helius API key available; worker intake remains disabled");
+    console.warn("[helius-emergency-stop] no Helius API key available; Helius webhook intake remains disabled");
     return;
   }
 
@@ -58,7 +70,7 @@ async function deactivateProjectHeliusWebhooks(): Promise<void> {
       signal: AbortSignal.timeout(10_000),
     });
     if (!response.ok) {
-      console.warn(`[helius-emergency-stop] webhook list failed (${response.status}); worker intake remains disabled`);
+      console.warn(`[helius-emergency-stop] webhook list failed (${response.status}); Helius webhook intake remains disabled`);
       return;
     }
 
@@ -109,7 +121,7 @@ async function deactivateProjectHeliusWebhooks(): Promise<void> {
     }
   } catch (error) {
     console.warn(
-      "[helius-emergency-stop] webhook deactivation failed; worker intake remains disabled:",
+      "[helius-emergency-stop] webhook deactivation failed; Helius webhook intake remains disabled:",
       error
     );
   }
@@ -117,12 +129,20 @@ async function deactivateProjectHeliusWebhooks(): Promise<void> {
 
 async function bootstrap(): Promise<void> {
   const ownsWalletMonitor = shouldStartWalletManagement();
-  const walletIntakeActive = ownsWalletMonitor && HELIUS_INTAKE_ENABLED;
+  const walletIntakeActive = ownsWalletMonitor && WALLET_RPC_INTAKE_ENABLED;
 
-  if (ownsWalletMonitor && !HELIUS_INTAKE_ENABLED) {
+  if (ownsWalletMonitor && usingProviderNeutralRpc) {
+    // Never let the legacy Helius webhook manager run against an Alchemy-backed
+    // monitor. The existing monitor will use standard Solana WebSockets instead.
+    process.env.HELIUS_EVENT_MODE = "websocket";
+    if (!HELIUS_INTAKE_ENABLED) {
+      await deactivateProjectHeliusWebhooks();
+    }
+    console.log("[monitor-bootstrap] provider-neutral Solana RPC intake active in WebSocket mode");
+  } else if (ownsWalletMonitor && !HELIUS_INTAKE_ENABLED) {
     await deactivateProjectHeliusWebhooks();
     console.warn(
-      "[monitor-bootstrap] HELIUS EMERGENCY STOP ACTIVE: wallet discovery, intelligence, webhook, WebSocket, and RPC reconciliation are disabled"
+      "[monitor-bootstrap] WALLET INTAKE PAUSED: add SOLANA_RPC_URL/ALCHEMY_RPC_URL, or deliberately re-enable Helius intake"
     );
   } else if (walletIntakeActive) {
     startAuditedWalletDiscoveryScheduler();
@@ -159,13 +179,14 @@ async function bootstrap(): Promise<void> {
   startPaperAutoResumeScheduler();
 
   if (walletIntakeActive) {
-    // worker/monitor.ts owns all core-wallet Helius webhook/WebSocket and reconciliation work.
+    // worker/monitor.ts uses standard Solana RPC/WebSockets. Helius-specific
+    // webhooks are forced off when a provider-neutral RPC is configured.
     await import("./monitor");
   } else if (ownsWalletMonitor) {
-    console.warn("[monitor-bootstrap] core Helius wallet monitor not started because emergency stop is active");
+    console.warn("[monitor-bootstrap] core wallet monitor not started because no usable RPC intake is configured");
   } else {
     console.log(
-      `[monitor-bootstrap] core Helius wallet monitor not started in ${process.env.RAILWAY_SERVICE_NAME}; ` +
+      `[monitor-bootstrap] core wallet monitor not started in ${process.env.RAILWAY_SERVICE_NAME}; ` +
         `owned by ${WALLET_DISCOVERY_SERVICE}`
     );
   }
