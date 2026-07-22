@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import SignalScanner from "./SignalScanner";
+import Soundscape from "./Soundscape";
 
 const mobileSignalFix = `
 .sfLivePacketLayer {
@@ -87,6 +88,7 @@ export default function StorefrontLayout({ children }: { children: ReactNode }) 
     <>
       <style dangerouslySetInnerHTML={{ __html: mobileSignalFix }} />
       <SignalScanner />
+      <Soundscape />
       {children}
     </>
   );
