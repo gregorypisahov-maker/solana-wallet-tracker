@@ -2,8 +2,9 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 
 const parts = [
-  resolve("assets/audio/background-loop.part-00"),
-  resolve("assets/audio/background-loop.part-01"),
+  resolve("assets/audio/background-music-6s.part-00"),
+  resolve("assets/audio/background-music-6s.part-01"),
+  resolve("assets/audio/background-music-6s.part-02"),
 ];
 const output = resolve("public/audio/background-music.mp3");
 
@@ -15,5 +16,6 @@ for (const part of parts) {
 }
 
 mkdirSync(dirname(output), { recursive: true });
-writeFileSync(output, Buffer.concat(parts.map((part) => readFileSync(part))));
-console.log(`[build] Prepared background music (${readFileSync(output).length} bytes).`);
+const audio = Buffer.concat(parts.map((part) => readFileSync(part)));
+writeFileSync(output, audio);
+console.log(`[build] Prepared background music (${audio.length} bytes).`);
