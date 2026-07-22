@@ -72,7 +72,8 @@ replaceExact(
   const technicalRetry =
     metrics.profile_pending_retry === true ||
     String(row.auto_disable_reason ?? "").startsWith("retroactive_profile_error:");
-  if (row.management_status === "disabled" && !technicalRetry) return true;
+  if (technicalRetry) return false;
+  if (row.management_status === "disabled") return true;
   return hasFreshCompletedProfile(row.discovery_metrics);
 }`,
   "technical retry skip policy"
