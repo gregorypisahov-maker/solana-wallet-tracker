@@ -27,11 +27,7 @@ replaceText(
   "status copy"
 );
 
-replaceText(
-  `<h1>BTC Pump-Fade Paper Trader</h1>`,
-  `<h1>BTC Two-Way Fade Paper Trader</h1>`,
-  "page heading"
-);
+replaceText(`<h1>BTC Pump-Fade Paper Trader</h1>`, `<h1>BTC Two-Way Fade Paper Trader</h1>`, "page heading");
 replaceText(
   `<p>Live movement, entry trigger and simulated short management</p>`,
   `<p>Fast pump shorts and fast drop rebound longs · paper only</p>`,
@@ -59,18 +55,18 @@ replaceText(
   "trigger display"
 );
 replaceText(
-  `<div className={\`${styles.level} ${styles.stop}\`}><span>Stop loss</span><strong>{usd(display?.stop)} · +{config.stopLossPct}%</strong></div>`,
-  `<div className={\`${styles.level} ${styles.stop}\`}><span>Stop loss</span><strong>{usd(display?.stop)} · {derived.signalSide === "LONG" ? "−" : "+"}{config.stopLossPct}%</strong></div>`,
+  `<span>Stop loss</span><strong>{usd(display?.stop)} · +{config.stopLossPct}%</strong>`,
+  `<span>Stop loss</span><strong>{usd(display?.stop)} · {derived.signalSide === "LONG" ? "−" : "+"}{config.stopLossPct}%</strong>`,
   "directional stop"
 );
 replaceText(
-  `<div className={\`${styles.level} ${styles.target}\`}><span>Take profit</span><strong>{usd(display?.target)} · −{config.takeProfitPct}%</strong></div>`,
-  `<div className={\`${styles.level} ${styles.target}\`}><span>Take profit</span><strong>{usd(display?.target)} · {derived.signalSide === "LONG" ? "+" : "−"}{config.takeProfitPct}%</strong></div>`,
+  `<span>Take profit</span><strong>{usd(display?.target)} · −{config.takeProfitPct}%</strong>`,
+  `<span>Take profit</span><strong>{usd(display?.target)} · {derived.signalSide === "LONG" ? "+" : "−"}{config.takeProfitPct}%</strong>`,
   "directional target"
 );
 replaceText(
-  `<article className={\`${styles.card} ${styles.kpi}\`}><span>Trigger movement</span><strong className={currentTone}>{pct(derived.currentMovePct)}</strong><small>Needs +{derived.triggerThresholdPct.toFixed(2)}%</small></article>`,
-  `<article className={\`${styles.card} ${styles.kpi}\`}><span>Trigger movement</span><strong className={currentTone}>{pct(derived.currentMovePct)}</strong><small>Needs ±{derived.triggerThresholdPct.toFixed(2)}%</small></article>`,
+  `<small>Needs +{derived.triggerThresholdPct.toFixed(2)}%</small>`,
+  `<small>Needs ±{derived.triggerThresholdPct.toFixed(2)}%</small>`,
   "trigger KPI"
 );
 replaceText(
