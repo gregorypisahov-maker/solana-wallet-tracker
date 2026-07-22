@@ -79,16 +79,8 @@ replaceExact(
 );
 
 replaceExact(
-  `&token-accounts=balanceChanged&gte-time=${'${cutoffSec}'};`,
-  `&token-accounts=balanceChanged&gte-time=${'${cutoffSec}'};`,
-  "noop guard"
-);
-
-replaceExact(
-  `?api-key=${'${encodeURIComponent(apiKey)}'}&type=SWAP&limit=${'${PROFILE_MAX_SWAPS}'}\` +
-    \`&token-accounts=balanceChanged&gte-time=${'${cutoffSec}'}`, 
-  `?api-key=${'${encodeURIComponent(apiKey)}'}&type=SWAP&limit=${'${PROVEN_PROFILE_MAX_SWAPS}'}\` +
-    \`&token-accounts=balanceChanged&gte-time=${'${cutoffSec}'}`,
+  '`?api-key=${encodeURIComponent(apiKey)}&type=SWAP&limit=${PROFILE_MAX_SWAPS}` +',
+  '`?api-key=${encodeURIComponent(apiKey)}&type=SWAP&limit=${PROVEN_PROFILE_MAX_SWAPS}` +',
   "deeper proven-trader sample"
 );
 
@@ -170,7 +162,7 @@ replaceExact(
     }`,
   `    } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      const retryable = /HTTP (429|5\\d\\d)|timed out/i.test(message);
+      const retryable = /HTTP (429|5\d\d)|timed out/i.test(message);
       await logDiscoveryRejection(
         candidate.address,
         "candidate",
