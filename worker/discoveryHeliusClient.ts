@@ -1,11 +1,13 @@
 const MIN_INTERVAL_MS = 200;
 const NON_429_RETRY_DELAYS_MS = [2_000, 4_000, 8_000];
+const MAX_429_ATTEMPTS = 6;
 const MAX_429_BACKOFF_MS = 60_000;
 
 export class HeliusHttpError extends Error {
   constructor(
     public readonly status: number | null,
-    message: string
+    message: string,
+    public readonly retryAfterMs: number | null = null
   ) {
     super(message);
     this.name = "HeliusHttpError";
@@ -24,9 +26,18 @@ let stats: Stats = {
 
 let queueTail: Promise<void> = Promise.resolve();
 let nextAllowedAt = 0;
+let globalRateLimitUntil = 0;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function retryAfterMs(value: string | null): number | null {
+  if (!value) return null;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1_000;
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? Math.max(0, timestamp - Date.now()) : null;
 }
 
 async function acquireSlot(): Promise<void> {
@@ -38,7 +49,11 @@ async function acquireSlot(): Promise<void> {
 
   await previous;
   try {
-    const waitMs = Math.max(0, nextAllowedAt - Date.now());
+    const waitMs = Math.max(
+      0,
+      nextAllowedAt - Date.now(),
+      globalRateLimitUntil - Date.now()
+    );
     if (waitMs > 0) await sleep(waitMs);
     nextAllowedAt = Date.now() + MIN_INTERVAL_MS;
   } finally {
@@ -61,7 +76,8 @@ async function fetchOnce(url: string, timeoutMs: number): Promise<unknown> {
       const body = (await response.text()).slice(0, 160).replace(/\s+/g, " ");
       throw new HeliusHttpError(
         response.status,
-        `HTTP ${response.status}${body ? `: ${body}` : ""}`
+        `HTTP ${response.status}${body ? `: ${body}` : ""}`,
+        retryAfterMs(response.headers.get("retry-after"))
       );
     }
     return await response.json();
@@ -89,11 +105,22 @@ export async function heliusFetchJson(
     } catch (error) {
       if (error instanceof HeliusHttpError && error.status === 429) {
         stats.rateLimitCount += 1;
-        const delayMs = Math.min(
+        if (rateLimitAttempt >= MAX_429_ATTEMPTS) throw error;
+
+        const exponentialMs = Math.min(
           MAX_429_BACKOFF_MS,
           2_000 * 2 ** rateLimitAttempt
         );
+        const delayMs = Math.min(
+          MAX_429_BACKOFF_MS,
+          Math.max(exponentialMs, error.retryAfterMs ?? 0) +
+            Math.floor(Math.random() * 500)
+        );
         rateLimitAttempt += 1;
+        globalRateLimitUntil = Math.max(
+          globalRateLimitUntil,
+          Date.now() + delayMs
+        );
         await sleep(delayMs);
         continue;
       }
