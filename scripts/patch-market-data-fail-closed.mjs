@@ -29,9 +29,11 @@ const after = `    const marketCap = Number(market?.marketCap);
       continue;
     }`;
 
-if (!source.includes(before)) {
-  throw new Error('market-data fail-closed patch target not found');
+if (source.includes(after)) {
+  console.log('[startup-patch] Consensus market data fail-closed logic already active.');
+} else if (source.includes(before)) {
+  writeFileSync(path, source.replace(before, after));
+  console.log('[startup-patch] Consensus market data now fails closed with an explicit skip reason.');
+} else {
+  console.warn('[startup-patch] Market-data fail-closed target not found; leaving source unchanged.');
 }
-
-writeFileSync(path, source.replace(before, after));
-console.log('[startup-patch] Consensus market data now fails closed with an explicit skip reason.');
