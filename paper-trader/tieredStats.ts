@@ -1,53 +1,70 @@
 import { getSupabaseAdmin } from "../lib/supabase";
 
+function n(value: unknown, fallback = 0): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
 function signedSol(value: number): string {
   return `${value >= 0 ? "+" : ""}${value.toFixed(3)} SOL`;
 }
 
 export async function handleTieredStats(): Promise<string> {
   const supabase = getSupabaseAdmin();
-  const dayStart = new Date();
-  dayStart.setUTCHours(0, 0, 0, 0);
+  const { data, error } = await supabase.rpc("tiered_ledger_snapshot");
+  if (error) throw new Error(`Tiered ledger lookup failed: ${error.message}`);
 
-  const [stateResult, positionsResult, tradesResult, entriesTodayResult] = await Promise.all([
-    supabase.from("tiered_state").select("*").eq("id", 1).single(),
-    supabase.from("tiered_positions").select("position_id"),
-    supabase.from("tiered_trades").select("position_id,pnl_sol,sold_pct"),
-    supabase.from("tiered_processed_signals").select("id", { count: "exact", head: true }).eq("entered", true).gte("seen_at", dayStart.toISOString()),
-  ]);
-
-  const error = stateResult.error ?? positionsResult.error ?? tradesResult.error ?? entriesTodayResult.error;
-  if (error) throw new Error(`Tiered stats lookup failed: ${error.message}`);
-
-  const grouped = new Map<string, { pnl: number; soldPct: number }>();
-  for (const row of tradesResult.data ?? []) {
-    const current = grouped.get(row.position_id) ?? { pnl: 0, soldPct: 0 };
-    current.pnl += Number(row.pnl_sol ?? 0);
-    current.soldPct += Number(row.sold_pct ?? 0);
-    grouped.set(row.position_id, current);
-  }
-  const completed = [...grouped.values()].filter((row) => row.soldPct >= 0.999);
-  const totalPnl = completed.reduce((sum, row) => sum + row.pnl, 0);
-  const wins = completed.filter((row) => row.pnl > 0).length;
-  const grossProfit = completed.filter((row) => row.pnl > 0).reduce((sum, row) => sum + row.pnl, 0);
-  const grossLoss = Math.abs(completed.filter((row) => row.pnl < 0).reduce((sum, row) => sum + row.pnl, 0));
-  const state = stateResult.data;
+  const snapshot = data ?? {};
+  const completed = n(snapshot.completed_positions);
+  const wins = n(snapshot.wins);
+  const winRate = completed > 0 ? (wins / completed) * 100 : 0;
+  const profitFactor = snapshot.profit_factor == null ? "N/A" : n(snapshot.profit_factor).toFixed(2);
+  const discrepancy = n(snapshot.accounting_discrepancy_sol);
+  const accountingLine = snapshot.accounting_ok
+    ? "✅ Accounting: ledger and state agree"
+    : `🔴 Accounting mismatch: ${signedSol(discrepancy)}`;
 
   return [
-    "🪜 <b>TIERED ENTRY SHADOW V1</b>",
+    "🪜 <b>TIERED ENTRY SHADOW V3</b>",
     "",
-    state.halted ? `🔴 HALTED — ${state.halt_reason ?? "unknown"}` : "🟢 Silent paper strategy: ACTIVE",
-    `Bankroll (cash): <b>${Number(state.bankroll_sol).toFixed(3)} SOL</b>`,
-    `Starting bankroll: ${Number(state.starting_bankroll_sol).toFixed(3)} SOL`,
-    `Total PnL: <b>${signedSol(totalPnl)}</b>`,
+    snapshot.halted
+      ? `🔴 HALTED — ${snapshot.halt_reason ?? "unknown"}`
+      : "🟢 Silent paper strategy: ACTIVE",
+    `Cash (ledger): <b>${n(snapshot.expected_cash_sol).toFixed(3)} SOL</b>`,
+    `State cash: ${n(snapshot.reported_cash_sol).toFixed(3)} SOL`,
+    `Open-position cost: ${n(snapshot.open_position_cost_sol).toFixed(3)} SOL`,
+    `Equity at cost: <b>${n(snapshot.equity_at_cost_sol).toFixed(3)} SOL</b>`,
+    accountingLine,
     "",
-    `Completed positions: ${completed.length}`,
-    `Win rate: ${completed.length ? ((wins / completed.length) * 100).toFixed(1) : "0.0"}%`,
-    `Profit factor: ${grossLoss > 0 ? (grossProfit / grossLoss).toFixed(2) : "N/A"}`,
-    `Open positions: ${(positionsResult.data ?? []).length}/3`,
-    `Entries today: ${entriesTodayResult.count ?? 0}`,
+    `Realized PnL: <b>${signedSol(n(snapshot.total_realized_pnl_sol))}</b>`,
+    `Today realized: ${signedSol(n(snapshot.daily_realized_pnl_sol))}`,
+    `Completed positions: ${completed}`,
+    `Win rate: ${winRate.toFixed(1)}% (${wins}W / ${n(snapshot.losses)}L)`,
+    `Profit factor: ${profitFactor}`,
+    `Open positions: ${n(snapshot.open_positions)}/3`,
     "",
-    "First-buy entries from proven wallets with trust 65+.",
+    `Recorded entries today: ${n(snapshot.entries_today)}`,
+    `Risk entry counter: ${n(snapshot.risk_entries_today)}/12`,
+    `Consecutive hard stops: ${n(snapshot.consecutive_hard_stops)}/3`,
+    "",
+    "Entry rules: proven wallet trust 65+, two-price confirmation, fresh same-pair liquidity.",
+    "Circuit breakers: 12 entries/day, -0.20 SOL daily risk loss, or 3 consecutive hard stops.",
     "No per-trade Telegram messages. Paper only.",
+  ].join("\n");
+}
+
+export async function handleResumeTiered(): Promise<string> {
+  const supabase = getSupabaseAdmin();
+  const { data, error } = await supabase.rpc("tiered_resume");
+  if (error) throw new Error(`Tiered resume failed: ${error.message}`);
+  if (!data?.resumed) throw new Error("Tiered resume did not complete");
+
+  return [
+    "▶️ <b>TIERED SHADOW RESUMED</b>",
+    "",
+    `Cash: ${n(data.bankroll_sol).toFixed(3)} SOL`,
+    "New entries: ENABLED",
+    "Entry counter and circuit-breaker counters: RESET",
+    "Trust floor: 65+",
   ].join("\n");
 }
