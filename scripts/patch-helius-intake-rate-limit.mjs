@@ -138,8 +138,11 @@ const HELIUS_WEBSOCKET_FALLBACK_ENABLED =
   }
 
   fs.writeFileSync(monitorFile, source);
+  const providerNeutralRpcActive = Boolean(
+    process.env.SOLANA_RPC_URL?.trim() || process.env.ALCHEMY_RPC_URL?.trim()
+  );
   console.log(
-    PROVIDER_NEUTRAL_RPC_ACTIVE
+    providerNeutralRpcActive
       ? "[build] Provider-neutral WebSocket intake preserved; Helius APIs bypassed."
       : "[build] Added Helius WebSocket rate-limit circuit breaker."
   );
