@@ -6,6 +6,8 @@ export const dynamic = "force-dynamic";
 export const revalidate = 0;
 export const fetchCache = "force-no-store";
 
+type Direction = "SHORT" | "LONG";
+
 const numberEnv = (name: string, fallback: number, minimum?: number): number => {
   const parsed = Number(process.env[name] ?? fallback);
   if (!Number.isFinite(parsed)) return fallback;
@@ -34,6 +36,11 @@ const CONFIG = {
   cooldownMinutes: numberEnv("BINANCE_FUTURES_COOLDOWN_MINUTES", 30, 0),
   maxDailyEntries: Math.round(numberEnv("BINANCE_FUTURES_MAX_DAILY_ENTRIES", 6, 1)),
 } as const;
+
+const direction = (value: unknown): Direction | null => {
+  const normalized = String(value ?? "").toUpperCase();
+  return normalized === "LONG" || normalized === "SHORT" ? normalized : null;
+};
 
 export async function GET(request: NextRequest) {
   if (!hasViewerAccess(request)) return unauthorized();
@@ -83,23 +90,38 @@ export async function GET(request: NextRequest) {
   const triggerThresholdPct =
     finite(latestScan?.trigger_threshold_pct) || CONFIG.pumpThresholdPct;
   const triggerProgressPct = clamp(
-    (Math.max(0, currentMovePct) / triggerThresholdPct) * 100,
+    (Math.abs(currentMovePct) / triggerThresholdPct) * 100,
     0,
     100
   );
-  const distanceToTriggerPct = Math.max(0, triggerThresholdPct - currentMovePct);
+  const distanceToTriggerPct = Math.max(0, triggerThresholdPct - Math.abs(currentMovePct));
+
+  const latestSnapshot = (latestScan?.snapshot ?? {}) as Record<string, unknown>;
+  const signalSide: Direction =
+    direction(position?.side) ??
+    direction(latestSnapshot.signal_side) ??
+    (currentMovePct < 0 ? "LONG" : "SHORT");
 
   const plannedEntryFillPrice =
     currentPrice > 0
-      ? currentPrice * (1 - CONFIG.slippagePctPerSide / 100)
+      ? currentPrice *
+        (signalSide === "LONG"
+          ? 1 + CONFIG.slippagePctPerSide / 100
+          : 1 - CONFIG.slippagePctPerSide / 100)
       : 0;
   const plannedStopLossPrice =
     plannedEntryFillPrice > 0
-      ? plannedEntryFillPrice * (1 + CONFIG.stopLossPct / 100)
+      ? plannedEntryFillPrice *
+        (signalSide === "LONG"
+          ? 1 - CONFIG.stopLossPct / 100
+          : 1 + CONFIG.stopLossPct / 100)
       : 0;
   const plannedTakeProfitPrice =
     plannedEntryFillPrice > 0
-      ? plannedEntryFillPrice * (1 - CONFIG.takeProfitPct / 100)
+      ? plannedEntryFillPrice *
+        (signalSide === "LONG"
+          ? 1 + CONFIG.takeProfitPct / 100
+          : 1 - CONFIG.takeProfitPct / 100)
       : 0;
 
   let status = "waiting";
@@ -119,34 +141,67 @@ export async function GET(request: NextRequest) {
   let holdMinutes = 0;
 
   if (position && currentPrice > 0) {
+    const side = direction(position.side) ?? "SHORT";
     const quantity = finite(position.quantity);
     const entryFillPrice = finite(position.entry_fill_price);
     const entryFeeUsdt = finite(position.entry_fee_usdt);
     const marginUsdt = finite(position.margin_usdt);
-    const exitFillPrice = currentPrice * (1 + CONFIG.slippagePctPerSide / 100);
+    const exitFillPrice =
+      currentPrice *
+      (side === "LONG"
+        ? 1 - CONFIG.slippagePctPerSide / 100
+        : 1 + CONFIG.slippagePctPerSide / 100);
     const exitFeeUsdt =
       quantity * exitFillPrice * (CONFIG.takerFeePctPerSide / 100);
-    liveGrossPnlUsdt = quantity * (entryFillPrice - exitFillPrice);
+    liveGrossPnlUsdt =
+      side === "LONG"
+        ? quantity * (exitFillPrice - entryFillPrice)
+        : quantity * (entryFillPrice - exitFillPrice);
     liveNetPnlUsdt = liveGrossPnlUsdt - entryFeeUsdt - exitFeeUsdt;
     liveMarginReturnPct = marginUsdt > 0 ? (liveNetPnlUsdt / marginUsdt) * 100 : 0;
     livePriceReturnPct =
-      entryFillPrice > 0 ? ((entryFillPrice - exitFillPrice) / entryFillPrice) * 100 : 0;
+      entryFillPrice > 0
+        ? side === "LONG"
+          ? ((exitFillPrice - entryFillPrice) / entryFillPrice) * 100
+          : ((entryFillPrice - exitFillPrice) / entryFillPrice) * 100
+        : 0;
 
     const stop = finite(position.stop_loss_price);
     const target = finite(position.take_profit_price);
-    const targetRange = entryFillPrice - target;
-    const stopRange = stop - entryFillPrice;
+    const targetRange = Math.abs(target - entryFillPrice);
+    const stopRange = Math.abs(stop - entryFillPrice);
     targetProgressPct =
       targetRange > 0
-        ? clamp(((entryFillPrice - currentPrice) / targetRange) * 100, 0, 100)
+        ? clamp(
+            ((side === "LONG" ? currentPrice - entryFillPrice : entryFillPrice - currentPrice) /
+              targetRange) *
+              100,
+            0,
+            100
+          )
         : 0;
     stopRiskPct =
       stopRange > 0
-        ? clamp(((currentPrice - entryFillPrice) / stopRange) * 100, 0, 100)
+        ? clamp(
+            ((side === "LONG" ? entryFillPrice - currentPrice : currentPrice - entryFillPrice) /
+              stopRange) *
+              100,
+            0,
+            100
+          )
         : 0;
-    stopBufferPct = stop > 0 ? ((stop - currentPrice) / currentPrice) * 100 : null;
+    stopBufferPct =
+      stop > 0
+        ? side === "LONG"
+          ? ((currentPrice - stop) / currentPrice) * 100
+          : ((stop - currentPrice) / currentPrice) * 100
+        : null;
     targetDistancePct =
-      target > 0 ? ((currentPrice - target) / currentPrice) * 100 : null;
+      target > 0
+        ? side === "LONG"
+          ? ((target - currentPrice) / currentPrice) * 100
+          : ((currentPrice - target) / currentPrice) * 100
+        : null;
     holdMinutes = Math.max(0, (now - Date.parse(position.opened_at)) / 60_000);
   }
 
@@ -166,6 +221,7 @@ export async function GET(request: NextRequest) {
       trades: tradesResult.data ?? [],
       derived: {
         status,
+        signalSide,
         currentPrice,
         currentMovePct,
         triggerThresholdPct,
