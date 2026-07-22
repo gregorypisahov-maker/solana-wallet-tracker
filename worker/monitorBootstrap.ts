@@ -1,6 +1,7 @@
 import "dotenv/config";
 import { startWalletIntelligenceScheduler } from "./walletIntelligence";
 import { startWalletLabScheduler } from "./walletLab";
+import { startAuditedWalletDiscoveryScheduler } from "./walletDiscoveryAudit";
 import { startShadowStrategyScheduler } from "./shadowStrategyScheduler";
 import { startLabStrategyScheduler } from "./labStrategyScheduler";
 import { startAdaptiveStrategyScheduler } from "../paper-trader/adaptiveStrategy";
@@ -28,13 +29,14 @@ async function bootstrap(): Promise<void> {
   const ownsWalletMonitor = shouldStartWalletManagement();
 
   if (ownsWalletMonitor) {
-    // The legacy auto-promotion scanner remains paused. Wallet Lab observes a
-    // large public candidate pool cheaply and never promotes without owner action.
-    console.log(
-      "[monitor-bootstrap] legacy auto-discovery paused; proven core wallets plus isolated Wallet Lab"
-    );
+    // Audited discovery owns automatic trial-wallet intake. Wallet Lab remains an
+    // isolated observer and never promotes wallets by itself.
+    startAuditedWalletDiscoveryScheduler();
     startWalletIntelligenceScheduler();
     startWalletLabScheduler();
+    console.log(
+      "[monitor-bootstrap] automatic Helius wallet discovery active; Wallet Lab remains isolated"
+    );
   } else {
     console.log(
       `[monitor-bootstrap] wallet management disabled in ${process.env.RAILWAY_SERVICE_NAME}; ` +
