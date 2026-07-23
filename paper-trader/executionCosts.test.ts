@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { before } from "node:test";
 
-process.env.PAPER_COST_MODEL_ENABLED = "true";
+let costs: typeof import("./executionCosts");
 
-const costs = await import("./executionCosts");
+before(async () => {
+  process.env.PAPER_COST_MODEL_ENABLED = "true";
+  costs = await import("./executionCosts");
+});
 
 test("0.2 SOL in a $20k pool uses liquidity-scaled slippage", () => {
   const result = costs.calculateEntryExecutionCosts(0.2, 20_000);
