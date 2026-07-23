@@ -17,12 +17,8 @@ function summarize(rows: Row[], pnlKey: string, timeKey: string) {
   }));
   const wins = trades.filter((row) => row.pnl > 0).length;
   const losses = trades.filter((row) => row.pnl < 0).length;
-  const grossProfit = trades
-    .filter((row) => row.pnl > 0)
-    .reduce((sum, row) => sum + row.pnl, 0);
-  const grossLoss = Math.abs(
-    trades.filter((row) => row.pnl < 0).reduce((sum, row) => sum + row.pnl, 0)
-  );
+  const grossProfit = trades.filter((row) => row.pnl > 0).reduce((sum, row) => sum + row.pnl, 0);
+  const grossLoss = Math.abs(trades.filter((row) => row.pnl < 0).reduce((sum, row) => sum + row.pnl, 0));
   return {
     completedTrades: trades.length,
     wins,
@@ -41,9 +37,7 @@ function summarizeLogical(rows: Row[]) {
     const current = grouped.get(key) ?? { pnl: 0, soldPct: 0, row };
     current.pnl += Number(row.pnl_sol ?? 0);
     current.soldPct += Number(row.sold_pct ?? 0);
-    if (Date.parse(row.happened_at ?? 0) >= Date.parse(current.row.happened_at ?? 0)) {
-      current.row = row;
-    }
+    if (Date.parse(row.happened_at ?? 0) >= Date.parse(current.row.happened_at ?? 0)) current.row = row;
     grouped.set(key, current);
   }
   const completed = [...grouped.values()]
@@ -53,16 +47,12 @@ function summarizeLogical(rows: Row[]) {
 }
 
 function newest(...values: Array<string | null | undefined>): string | null {
-  const valid = values.filter(
-    (value): value is string => Boolean(value) && Number.isFinite(Date.parse(value as string))
-  );
+  const valid = values.filter((value): value is string => Boolean(value) && Number.isFinite(Date.parse(value as string)));
   return valid.length ? valid.sort((a, b) => Date.parse(b) - Date.parse(a))[0] : null;
 }
 
 function drawdown(trades: Row[]) {
-  let equity = 0;
-  let peak = 0;
-  let maxDd = 0;
+  let equity = 0, peak = 0, maxDd = 0;
   for (const trade of [...trades].reverse()) {
     equity += Number(trade.pnl ?? trade.pnl_sol ?? 0);
     peak = Math.max(peak, equity);
@@ -76,10 +66,7 @@ function windowStats(trades: Row[], fromMs: number, toMs = Date.now()) {
     const time = Date.parse(trade.happenedAt ?? trade.closed_at ?? trade.happened_at ?? 0);
     return time >= fromMs && time < toMs;
   });
-  const pnlSol = filtered.reduce(
-    (sum, trade) => sum + Number(trade.pnl ?? trade.pnl_sol ?? 0),
-    0
-  );
+  const pnlSol = filtered.reduce((sum, trade) => sum + Number(trade.pnl ?? trade.pnl_sol ?? 0), 0);
   return {
     trades: filtered.length,
     wins: filtered.filter((trade) => Number(trade.pnl ?? trade.pnl_sol) > 0).length,
@@ -92,18 +79,10 @@ export async function GET(request: NextRequest) {
   if (!hasViewerAccess(request)) return unauthorized();
   const supabase = getSupabaseAdmin({ noStore: true });
   const [
-    paperState,
-    paperPositions,
-    paperTrades,
-    shadowState,
-    shadowPositions,
-    shadowTrades,
-    wallets,
-    walletPerformance,
-    tokenScores,
-    readiness,
-    adaptive,
-    usage,
+    paperState, paperPositions, paperTrades,
+    shadowState, shadowPositions, shadowTrades,
+    scalpState, scalpPositions, scalpTrades, scalpScans,
+    wallets, walletPerformance, tokenScores, readiness, adaptive, usage,
   ] = await Promise.all([
     supabase.from("paper_state").select("*").eq("id", 1).maybeSingle(),
     supabase.from("paper_positions").select("*").order("entry_time", { ascending: false }),
@@ -111,50 +90,32 @@ export async function GET(request: NextRequest) {
     supabase.from("shadow_strategy_state").select("*").eq("id", 1).maybeSingle(),
     supabase.from("shadow_positions").select("*").order("entry_time", { ascending: false }),
     supabase.from("shadow_trades").select("*").order("happened_at", { ascending: false }).limit(500),
-    supabase
-      .from("wallets")
-      .select("address,label,active,management_status,discovery_source,last_signature,management_updated_at")
-      .order("management_updated_at", { ascending: false })
-      .limit(100),
+    supabase.from("scalp_state").select("*").eq("id", 1).maybeSingle(),
+    supabase.from("scalp_positions").select("*").order("entry_time", { ascending: false }),
+    supabase.from("scalp_trades").select("*").order("closed_at", { ascending: false }).limit(500),
+    supabase.from("scalp_scan_runs").select("*").order("started_at", { ascending: false }).limit(20),
+    supabase.from("wallets").select("address,label,active,management_status,discovery_source,last_signature,management_updated_at").order("management_updated_at", { ascending: false }).limit(100),
     supabase.from("wallet_performance").select("*").order("trust_score", { ascending: false }).limit(25),
-    supabase
-      .from("token_scores")
-      .select("token_symbol,token_mint,score,wallets_count,total_sol_bought,market_cap,liquidity_usd,updated_at")
-      .order("updated_at", { ascending: false })
-      .limit(50),
+    supabase.from("token_scores").select("token_symbol,token_mint,score,wallets_count,total_sol_bought,market_cap,liquidity_usd,updated_at").order("updated_at", { ascending: false }).limit(50),
     supabase.from("live_readiness_state").select("*").eq("id", 1).maybeSingle(),
     supabase.from("adaptive_strategy_state").select("*").eq("id", 1).maybeSingle(),
     supabase.from("monitor_usage_samples").select("*").order("recorded_at", { ascending: false }).limit(1).maybeSingle(),
   ]);
 
-  const results = {
-    paperState,
-    paperPositions,
-    paperTrades,
-    shadowState,
-    shadowPositions,
-    shadowTrades,
-    wallets,
-    walletPerformance,
-    tokenScores,
-    readiness,
-    adaptive,
-    usage,
-  };
+  const results = { paperState, paperPositions, paperTrades, shadowState, shadowPositions, shadowTrades, scalpState, scalpPositions, scalpTrades, scalpScans, wallets, walletPerformance, tokenScores, readiness, adaptive, usage };
   const failed = Object.entries(results).find(([, result]) => result.error);
   if (failed) {
     console.error(`[compact-dashboard] ${failed[0]} query failed`, failed[1].error);
-    return NextResponse.json(
-      { error: "Dashboard data is temporarily unavailable" },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: "Dashboard data is temporarily unavailable" }, { status: 500 });
   }
 
   const legion = summarizeLogical(paperTrades.data ?? []);
   const shadow = summarize(shadowTrades.data ?? [], "pnl_sol", "happened_at");
+  const scalper = summarize(scalpTrades.data ?? [], "pnl_sol", "closed_at");
   const now = Date.now();
   const h24 = 86_400_000;
   const h48 = 2 * h24;
+  const latestScalpScan = scalpScans.data?.[0] ?? null;
 
   const bots = [
     {
@@ -170,6 +131,26 @@ export async function GET(request: NextRequest) {
       openPositions: (paperPositions.data ?? []).length,
       ...legion,
       maxDrawdownSol: drawdown(legion.recentTrades),
+    },
+    {
+      id: "scalper",
+      name: "Trend Scalper",
+      subtitle: "Trending pools · pullback-confirmed entries",
+      version: "momentum_hardstop_blacklist_v6_2026_07_21",
+      state: {
+        ...(scalpState.data ?? {}),
+        lastScanMessage: latestScalpScan?.message ?? null,
+        scannedCount: latestScalpScan?.scanned_count ?? 0,
+        qualifiedCount: latestScalpScan?.qualified_count ?? 0,
+        topSymbol: latestScalpScan?.top_symbol ?? null,
+      },
+      bankrollSol: Number(scalpState.data?.bankroll_sol ?? 0),
+      startingBankrollSol: Number(scalpState.data?.starting_bankroll_sol ?? 1),
+      lastScanAt: newest(scalpState.data?.last_scan_at, latestScalpScan?.started_at, scalper.recentTrades[0]?.happenedAt),
+      positions: scalpPositions.data ?? [],
+      openPositions: (scalpPositions.data ?? []).length,
+      ...scalper,
+      maxDrawdownSol: drawdown(scalper.recentTrades),
     },
     {
       id: "shadow",
@@ -193,18 +174,11 @@ export async function GET(request: NextRequest) {
   }));
 
   const allRecent = bots
-    .flatMap((bot) =>
-      bot.recentTrades.map((trade: any) => ({ ...trade, botId: bot.id, botName: bot.name }))
-    )
+    .flatMap((bot) => bot.recentTrades.map((trade: any) => ({ ...trade, botId: bot.id, botName: bot.name })))
     .sort((a, b) => Date.parse(b.happenedAt ?? 0) - Date.parse(a.happenedAt ?? 0));
-  const profit = allRecent
-    .filter((trade) => Number(trade.pnl) > 0)
-    .reduce((sum, trade) => sum + Number(trade.pnl), 0);
-  const loss = Math.abs(
-    allRecent
-      .filter((trade) => Number(trade.pnl) < 0)
-      .reduce((sum, trade) => sum + Number(trade.pnl), 0)
-  );
+
+  const profit = allRecent.filter((trade) => Number(trade.pnl) > 0).reduce((sum, trade) => sum + Number(trade.pnl), 0);
+  const loss = Math.abs(allRecent.filter((trade) => Number(trade.pnl) < 0).reduce((sum, trade) => sum + Number(trade.pnl), 0));
   const overview = {
     strategyCount: bots.length,
     totalPnlSol: bots.reduce((sum, bot) => sum + bot.totalPnlSol, 0),
@@ -219,19 +193,27 @@ export async function GET(request: NextRequest) {
     previous48hPnlSol: bots.reduce((sum, bot) => sum + bot.previous48h.pnlSol, 0),
   };
 
-  return NextResponse.json(
-    {
-      generatedAt: new Date().toISOString(),
-      bots,
-      overview,
-      recentActivity: allRecent.slice(0, 50),
-      wallets: wallets.data ?? [],
-      walletPerformance: walletPerformance.data ?? [],
-      tokenScores: tokenScores.data ?? [],
-      readiness: readiness.data,
-      adaptive: adaptive.data,
-      usage: usage.data,
+  return NextResponse.json({
+    generatedAt: new Date().toISOString(),
+    bots,
+    overview,
+    recentActivity: allRecent.slice(0, 50),
+    wallets: wallets.data ?? [],
+    walletPerformance: walletPerformance.data ?? [],
+    tokenScores: tokenScores.data ?? [],
+    scalpIntelligence: {
+      latestScan: latestScalpScan,
+      recentScans: scalpScans.data ?? [],
+      rules: {
+        paperOnly: true,
+        source: "GeckoTerminal + DexScreener",
+        entryStyle: "trend discovery + completed 1m pullback + recovery hold",
+        fixedSizeSol: 0.2,
+        maxConcurrentPositions: 1,
+      },
     },
-    { headers: { "Cache-Control": "no-store, max-age=0" } }
-  );
+    readiness: readiness.data,
+    adaptive: adaptive.data,
+    usage: usage.data,
+  }, { headers: { "Cache-Control": "no-store, max-age=0" } });
 }
