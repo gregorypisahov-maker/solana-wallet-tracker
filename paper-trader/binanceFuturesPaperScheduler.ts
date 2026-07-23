@@ -1,6 +1,6 @@
 import { getSupabaseAdmin } from "../lib/supabase";
 import { BINANCE_FUTURES_PAPER_CONFIG } from "./binanceFuturesPaper";
-import { startBinanceFuturesBidirectionalRestPaperBot } from "./binanceFuturesBidirectionalRest";
+import { startBinanceFuturesDualRestPaperBot } from "./binanceFuturesDualRest";
 
 const RESET_INTERVAL_MS = 60_000;
 let started = false;
@@ -29,6 +29,9 @@ async function resetDailyStateIfNeeded(): Promise<void> {
       consecutive_losses: 0,
       halted: false,
       halt_reason: null,
+      short_cooldown_until: null,
+      long_cooldown_until: null,
+      cooldown_until: null,
       updated_at: new Date().toISOString(),
     })
     .eq("id", 1);
@@ -50,5 +53,5 @@ export function startBinanceFuturesPaperBot(): void {
 
   void resetDailyStateIfNeeded();
   setInterval(() => void resetDailyStateIfNeeded(), RESET_INTERVAL_MS);
-  startBinanceFuturesBidirectionalRestPaperBot();
+  startBinanceFuturesDualRestPaperBot();
 }
