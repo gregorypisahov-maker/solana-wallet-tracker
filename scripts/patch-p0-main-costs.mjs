@@ -133,13 +133,6 @@ import {
 
   updated = replaceRequired(
     updated,
-    `    let currentPrice: number;`,
-    `    let currentPrice: number;`,
-    "exit price declaration"
-  );
-
-  updated = replaceRequired(
-    updated,
     `      currentPrice = applyExitFriction(
         priceData.priceUsd,
         config.execution.exitFrictionPct
@@ -152,7 +145,9 @@ import {
         currentPrice /= 1 - config.execution.exitFrictionPct;
       }
       (position as OpenPosition & { currentLiquidityUsd?: number }).currentLiquidityUsd =
-        priceData.liquidityUsd ?? position.entryLiquidityUsd;`,
+        priceData.liquidityUsd ??
+        position.entryLiquidityUsd ??
+        position.entryAlert.liquidityUsd;`,
     "raw exit price and liquidity"
   );
 
@@ -169,10 +164,11 @@ import {
   const grossPnlSol = grossProceedsSol - soldSizeSol;
   const exitLiquidityUsd =
     (position as OpenPosition & { currentLiquidityUsd?: number }).currentLiquidityUsd ??
-    position.entryLiquidityUsd;
+    position.entryLiquidityUsd ??
+    position.entryAlert.liquidityUsd;
   const exitCosts = calculateExitExecutionCosts(grossProceedsSol, exitLiquidityUsd);
-  const allocatedEntryFeeSol = position.entryFeeSol * soldPct;
-  const allocatedEntrySlippageSol = position.entrySlippageSol * soldPct;
+  const allocatedEntryFeeSol = (position.entryFeeSol ?? 0) * soldPct;
+  const allocatedEntrySlippageSol = (position.entrySlippageSol ?? 0) * soldPct;
   const exitFeeSol = exitCosts.networkFeeSol + exitCosts.swapFeeSol;
   const slippageSol = allocatedEntrySlippageSol + exitCosts.slippageSol;
   const proceedsSol = grossProceedsSol - exitCosts.totalSol;
