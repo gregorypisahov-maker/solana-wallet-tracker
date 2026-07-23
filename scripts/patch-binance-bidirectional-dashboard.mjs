@@ -1,7 +1,9 @@
 import fs from "node:fs";
 
 const file = "app/platform/binance/page.tsx";
+const cssFile = "app/platform/binance/binance-live.module.css";
 let source = fs.readFileSync(file, "utf8");
+let cssSource = fs.readFileSync(cssFile, "utf8");
 
 function replaceText(before, after, label) {
   if (source.includes(after)) return;
@@ -79,6 +81,27 @@ replaceText(
   `No completed Binance paper trades yet. The engine is waiting for its first valid ±{config.pumpThresholdPct}% move.`,
   "empty trade copy"
 );
+replacePattern(
+  /<div className=\{`\$\{styles\.tradeRow\} \$\{styles\.head\}`\}><span>Closed<\/span><span>Reason<\/span><span>Entry<\/span><span>Exit<\/span><strong>Net PnL<\/strong><\/div>/,
+  `<div className={\`\${styles.tradeRow} \${styles.head}\`}><span>Closed</span><span>Side</span><span>Reason</span><span>Entry</span><span>Exit</span><strong>Net PnL</strong></div>`,
+  "<span>Side</span><span>Reason</span>",
+  "completed trade side header"
+);
+replaceText(
+  `                      <span>{israelTime(trade.closed_at)}</span>\n                      <span>{String(trade.exit_reason).replaceAll("_", " ")}</span>`,
+  `                      <span>{israelTime(trade.closed_at)}</span>\n                      <span>{String(trade.side ?? "—")}</span>\n                      <span>{String(trade.exit_reason).replaceAll("_", " ")}</span>`,
+  "completed trade side value"
+);
+
+const oldTradeGrid = ".tradeRow{min-width:580px;display:grid;grid-template-columns:90px 80px 1fr 1fr 95px;";
+const newTradeGrid = ".tradeRow{min-width:640px;display:grid;grid-template-columns:90px 55px 80px 1fr 1fr 95px;";
+if (!cssSource.includes(newTradeGrid)) {
+  if (!cssSource.includes(oldTradeGrid)) {
+    throw new Error("Binance bidirectional dashboard patch target missing: completed trade grid");
+  }
+  cssSource = cssSource.replace(oldTradeGrid, newTradeGrid);
+}
 
 fs.writeFileSync(file, source);
-console.log("[build] Binance dashboard patched for LONG and SHORT paper trades.");
+fs.writeFileSync(cssFile, cssSource);
+console.log("[build] Binance dashboard patched for LONG and SHORT paper trades, including trade direction history.");
