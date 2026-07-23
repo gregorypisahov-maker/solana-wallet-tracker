@@ -8,8 +8,6 @@ import { startPaperAutoResumeScheduler } from "./paperAutoResume";
 import { startTieredEntryShadowScheduler } from "../paper-trader/tieredEntryShadow";
 import { startTieredRecentSignalPump } from "../paper-trader/tieredRecentSignalPump";
 import { startLiveReadinessScheduler } from "../paper-trader/liveReadiness";
-import { startMomentumScalperScheduler } from "../paper-trader/momentumScalper";
-import { startScalperShadowScheduler } from "../paper-trader/scalperShadow";
 import { startBinanceFuturesPaperBot } from "../paper-trader/binanceFuturesPaperScheduler";
 
 const WALLET_DISCOVERY_SERVICE = "Wallet Discovery & Monitor";
@@ -200,16 +198,12 @@ async function bootstrap(): Promise<void> {
   if (shouldStartTradingStrategies()) {
     startAdaptiveStrategyScheduler();
     startShadowStrategyScheduler();
-    // Losing scalper entry scans are disabled by their per-module flags.
-    // Exit managers stay active so any existing paper positions can close normally.
-    startMomentumScalperScheduler();
-    startScalperShadowScheduler();
     startTieredEntryShadowScheduler();
     startTieredRecentSignalPump();
     startLiveReadinessScheduler();
     startBinanceFuturesPaperBot();
     console.log(
-      "[monitor-bootstrap] active paper strategies: Legion, manipulation-resistant Shadow, Tiered, Binance BTC pump-fade; scalpers exit-only"
+      "[monitor-bootstrap] active paper strategies: Legion, restored filtered Shadow, Tiered, Binance BTC dual-position; scalpers retired"
     );
   } else {
     console.log(
