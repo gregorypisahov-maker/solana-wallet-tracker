@@ -1,6 +1,6 @@
 # P0 paper execution-cost calibration — 2026-07-23
 
-Cost model version: `p0_jupiter_pumpswap_2026_07_23_v1`
+Cost model version: `p0_jupiter_pumpswap_jito_2026_07_23_v2`
 
 This document records the inputs used to replace the old implicit price haircut with explicit, auditable execution costs. It is a paper-trading model, not a claim that every future transaction will receive these exact fills.
 
@@ -28,7 +28,7 @@ slippage_sol = trade_notional_sol × slippage_pct
 
 The coefficient and liquidity are applied separately on entry and exit. Missing or non-positive liquidity fails closed.
 
-### Network fee
+### Network fee, priority fee and Jito tip
 
 A Jupiter swap-build request for a 0.2 SOL PumpSwap route returned these priority-fee estimates:
 
@@ -38,13 +38,17 @@ A Jupiter swap-build request for a 0.2 SOL PumpSwap route returned these priorit
 | high | 225,430 lamports |
 | very high | 2,053,053 lamports |
 
-The model uses the `high` estimate plus the 5,000-lamport Solana base fee:
+The model uses the `high` priority estimate. Jito's live tip-floor endpoint at `2026-07-23 12:40:34 UTC` reported a 99th-percentile landed tip of `99,800` lamports. Jito also recommends allocating roughly 70% of the total send budget to priority fee and 30% to tip; applying that split to the selected priority fee independently produces nearly the same tip.
 
 ```text
-network_cost_per_transaction = 230,430 lamports = 0.00023043 SOL
+Solana base fee       5,000 lamports
+Jupiter priority    225,430 lamports
+Jito tip             99,800 lamports
+------------------------------------
+network total       330,230 lamports = 0.00033023 SOL per transaction
 ```
 
-This is configurable because congestion changes.
+Each component and the total override are configurable because congestion and tip auctions change.
 
 ### Swap fee
 
@@ -54,14 +58,17 @@ The model uses `1.25%` per side, the conservative PumpSwap canonical-pool tier a
 
 The initial failed-entry rate is `5%`.
 
-This is an explicit scenario assumption, not measured production telemetry: the project has not executed real-money swaps and therefore has no honest failure-rate sample. A failed entry pays one network fee, writes a `paper_failed_entries` row, and opens no position. The value must be recalibrated from actual execution telemetry before any real-money readiness claim.
+This is an explicit scenario assumption, not measured production telemetry: the project has not executed real-money swaps and therefore has no honest failure-rate sample. A failed entry pays one full network cost, writes a `paper_failed_entries` row, and opens no position. The value must be recalibrated from actual execution telemetry before any real-money readiness claim.
 
 ## Runtime configuration
 
 | Environment variable | Default |
 |---|---:|
 | `PAPER_COST_MODEL_ENABLED` | `true` |
-| `PAPER_NETWORK_COST_SOL_PER_TX` | `0.00023043` |
+| `PAPER_BASE_FEE_SOL_PER_TX` | `0.000005` |
+| `PAPER_PRIORITY_FEE_SOL_PER_TX` | `0.00022543` |
+| `PAPER_JITO_TIP_SOL_PER_TX` | `0.0000998` |
+| `PAPER_NETWORK_COST_SOL_PER_TX` | component sum: `0.00033023` |
 | `PAPER_SWAP_FEE_PCT_PER_SIDE` | `0.0125` |
 | `PAPER_SLIPPAGE_LIQUIDITY_COEFFICIENT` | `2.0` |
 | `PAPER_COST_SOL_USD_REFERENCE` | `76.6981212318335` |
@@ -71,14 +78,14 @@ The cost model defaults on after the successful P0 backtest, so new paper trades
 
 ## Historical backfill result
 
-Results are grouped by logical position, so ladder partial sells are not counted as separate trades. The `before` columns below are the values the simulator reported before P0; `after` is net of network fees, swap fees, liquidity-scaled slippage, and the expected 5% failed-entry network cost.
+Results are grouped by logical position, so ladder partial sells are not counted as separate trades. The `before` columns below are the values the simulator reported before P0; `after` is net of base/priority/tip network costs, swap fees, liquidity-scaled slippage, and the expected 5% failed-entry network cost.
 
 | Strategy | Logical positions | P&L before P0 | Net P&L after costs | Net per position | PF before | PF after | Common-size break-even |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| MAIN | 194 | +0.421500 SOL | **−0.643512 SOL** | −0.003317 SOL | 1.115 | **0.850** | none |
-| SHADOW | 52 | +0.688747 SOL | **+0.172379 SOL** | +0.003315 SOL | 1.552 | **1.109** | 0.0354 SOL minimum; model turns negative above ~0.8506 SOL |
-| TIERED | 97 | −0.019400 SOL | **−0.803757 SOL** | −0.008286 SOL | 0.993 | **0.733** | none |
-| SCALP* | 63 | −0.191554 SOL | **−0.383618 SOL** | −0.006089 SOL | 0.586 | **0.341** | none |
+| MAIN | 194 | +0.421500 SOL | **−0.686547 SOL** | −0.003539 SOL | 1.115 | **0.841** | none |
+| SHADOW | 52 | +0.688747 SOL | **+0.161522 SOL** | +0.003106 SOL | 1.552 | **1.102** | 0.0517 SOL minimum; model turns negative above ~0.8343 SOL |
+| TIERED | 97 | −0.019400 SOL | **−0.826921 SOL** | −0.008525 SOL | 0.993 | **0.726** | none |
+| SCALP* | 63 | −0.191554 SOL | **−0.396524 SOL** | −0.006294 SOL | 0.586 | **0.329** | none |
 
 `*` SCALP is a modeled report-only result in this P0 ticket. Its storage/runtime was not changed because the requested schema scope was MAIN, SHADOW, and TIERED.
 
@@ -88,6 +95,6 @@ The `gross_pnl_sol` backfill removes MAIN/TIERED's old hidden 0.6%-per-side pric
 
 - MAIN does not clear realistic modeled costs.
 - TIERED and SCALP remain negative.
-- SHADOW remains positive, but its profit factor falls to 1.109, below the existing 1.4 live-readiness requirement.
+- SHADOW remains positive, but its profit factor falls to 1.102, below the existing 1.4 live-readiness requirement.
 - P1–P5 must remain disabled until separately backtested against this net-of-cost model.
 - No real-money readiness claim is supported by these results.
