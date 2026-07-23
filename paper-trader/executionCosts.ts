@@ -30,7 +30,9 @@ const boundedEnv = (
  *   remains overrideable by environment variable.
  */
 export const PAPER_COST_MODEL = {
-  enabled: process.env.PAPER_COST_MODEL_ENABLED === "true",
+  // Backtested P0 accounting is on by default for paper. Set the flag to the
+  // literal string "false" for an emergency rollback to legacy price friction.
+  enabled: process.env.PAPER_COST_MODEL_ENABLED !== "false",
   version: "p0_jupiter_pumpswap_2026_07_23_v1",
   calibrationDate: "2026-07-23",
   networkCostSolPerTransaction: finiteEnv(
