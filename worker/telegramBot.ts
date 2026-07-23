@@ -11,7 +11,6 @@ import {
   handleResume,
   handleScalpStats,
 } from "../paper-trader/telegramCommands";
-import { handleResumeTiered, handleTieredStats } from "../paper-trader/tieredStats";
 import { handleBinanceFuturesStats } from "../paper-trader/binanceFuturesStats";
 import { handleWalletScan } from "./walletScanCommand";
 import {
@@ -56,7 +55,7 @@ const AUTHORIZED_CHAT_IDS = new Set([TELEGRAM_CHAT_ID, ...EXTRA_CHAT_IDS].filter
 const POLL_TIMEOUT_SECONDS = 30;
 const CONFLICT_BACKOFF_MIN_MS = 65_000;
 const CONFLICT_BACKOFF_JITTER_MS = 30_000;
-const TELEGRAM_WORKER_VERSION = "2026-07-22-binance-futures-paper-v1";
+const TELEGRAM_WORKER_VERSION = "2026-07-23-tiered-removed";
 
 if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
   console.error("[telegram-bot] TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID must be set. Exiting.");
@@ -166,7 +165,6 @@ async function handleHelp(): Promise<string> {
     "<b>📊 Status</b>",
     "/paperstats — Wallet-based paper trading performance",
     "/scalpstats — Parallel momentum scalper performance",
-    "/tieredstats — First-buy tiered shadow performance",
     "/binancestats — BTCUSDT futures paper bot",
     "/readiness — Bot readiness check",
     "/heliusstats — Helius credit usage", "",
@@ -183,7 +181,6 @@ async function handleHelp(): Promise<string> {
     "<b>🛠 Control</b>",
     resumeHint,
     "/resume_scalp — Resume the momentum scalp bot",
-    "/resume_tiered — Resume tiered shadow after a circuit breaker",
     "/help — Show this command menu", "",
     "<b>🌐 Command Center</b>",
     /^https:\/\//i.test(DASHBOARD_URL) ? `<a href="${DASHBOARD_URL}">Open the live dashboard</a>` : "Dashboard unavailable",
@@ -195,10 +192,8 @@ function helpKeyboard(): InlineKeyboard {
   if (/^https:\/\//i.test(DASHBOARD_URL)) rows.push([{ text: "🌐 Command Center", url: DASHBOARD_URL }]);
   rows.push(
     [{ text: "📊 Paper Stats", callback_data: "/paperstats" }, { text: "⚡ Scalp Stats", callback_data: "/scalpstats" }],
-    [{ text: "🪜 Tiered Stats", callback_data: "/tieredstats" }, { text: "📉 Binance Paper", callback_data: "/binancestats" }],
-    [{ text: "✅ Readiness", callback_data: "/readiness" }],
+    [{ text: "📉 Binance Paper", callback_data: "/binancestats" }, { text: "✅ Readiness", callback_data: "/readiness" }],
     [{ text: "▶️ Resume Paper", callback_data: "/resume" }, { text: "⚡ Resume Scalp", callback_data: "/resume_scalp" }],
-    [{ text: "🪜 Resume Tiered", callback_data: "/resume_tiered" }],
     [{ text: "🧠 Auto Wallets", callback_data: "/auto_wallets" }, { text: "🔄 Wallet Scan", callback_data: "/walletscan" }],
   );
   return { inline_keyboard: rows };
@@ -212,8 +207,6 @@ const COMMAND_HANDLERS: Record<string, () => Promise<string>> = {
   "/scalpstats": handleScalpStats,
   "/scalp_stats": handleScalpStats,
   "/scalper": handleScalpStats,
-  "/tieredstats": handleTieredStats,
-  "/tiered_stats": handleTieredStats,
   "/binancestats": handleBinanceFuturesStats,
   "/binance_stats": handleBinanceFuturesStats,
   "/futuresstats": handleBinanceFuturesStats,
@@ -228,8 +221,6 @@ const COMMAND_HANDLERS: Record<string, () => Promise<string>> = {
   "/resume_scalp": handleResumeScalper,
   "/resumescalp": handleResumeScalper,
   "/resume_scalper": handleResumeScalper,
-  "/resume_tiered": handleResumeTiered,
-  "/resumetiered": handleResumeTiered,
   "/walletscan": handleWalletScan,
   "/scanwallets": handleWalletScan,
   "/auto_wallets": handleAutoWallets,
@@ -299,7 +290,7 @@ async function sleep(ms: number): Promise<void> {
 
 async function pollLoop(): Promise<void> {
   console.log(`[telegram-bot] Starting inbound command listener (${TELEGRAM_WORKER_VERSION})...`);
-  console.log("[telegram-bot] Commands ready: /paperstats /scalpstats /tieredstats /binancestats /walletstats /exitstats /scorestats /heliusstats /readiness /resume /resume_scalp /resume_tiered");
+  console.log("[telegram-bot] Commands ready: /paperstats /scalpstats /binancestats /walletstats /exitstats /scorestats /heliusstats /readiness /resume /resume_scalp");
   await validateToken();
   while (true) {
     try {
