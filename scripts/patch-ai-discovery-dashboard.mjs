@@ -94,10 +94,10 @@ patch("app/api/compact-dashboard/route.ts", [
 patch("app/page.tsx", [
   [`type BotId = "legion" | "scalper" | "shadow";`, `type BotId = "legion" | "scalper" | "ai-discovery" | "shadow";`],
   [
-`  return <div className={\`v2Icon ${id}\`}>{id === "legion" ? "L" : id === "scalper" ? "ϟ" : "◆"}</div>;`,
-`  return <div className={\`v2Icon ${id}\`}>{id === "legion" ? "L" : id === "scalper" ? "ϟ" : id === "ai-discovery" ? "AI" : "◆"}</div>;`
+'  return <div className={`v2Icon ${id}`}>{id === "legion" ? "L" : id === "scalper" ? "ϟ" : "◆"}</div>;',
+'  return <div className={`v2Icon ${id}`}>{id === "legion" ? "L" : id === "scalper" ? "ϟ" : id === "ai-discovery" ? "AI" : "◆"}</div>;'
   ],
-  [`sub="Across 3 paper strategies"`, `sub={\`Across ${data.bots.length} paper strategies\`}`],
+  [`sub="Across 3 paper strategies"`, 'sub={`Across ${data.bots.length} paper strategies`}'],
   [`sub="The three paper strategies currently measured"`, `sub="All paper strategies currently measured"`],
   [`<p>Performance and live position status for every paper bot.</p>`, `<p>Performance, live positions and independent market-discovery status for every paper bot.</p>`],
   [`<p>Completed positions across all three strategies, with bot and trade time.</p>`, `<p>Completed positions across all strategies, with bot and trade time.</p>`],
@@ -124,10 +124,6 @@ patch("app/api/bot-control/route.ts", [
   } else {
     const result = await supabase
       .from("shadow_strategy_state")`
-  ],
-  [
-`    (bot === "legion" ? data?.halted === false : data?.enabled === true);`,
-`    (bot === "legion" ? data?.halted === false : data?.enabled === true);`
   ],
 ]);
 
