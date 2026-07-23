@@ -28,10 +28,25 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
           cache: npm
-      - run: npm ci
+      - run: npm ci --silent
       - name: P0 unit and runtime-patch tests
-        run: npx tsx --test paper-trader/executionCosts.test.ts paper-trader/p0RuntimePatches.test.ts
+        id: p0_tests
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          npx tsx --test paper-trader/executionCosts.test.ts paper-trader/p0RuntimePatches.test.ts > p0-test.log 2>&1
+      - name: Upload P0 test output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: p0-test-output
+          path: p0-test.log
+          if-no-files-found: error
+      - name: Fail on P0 test error
+        if: steps.p0_tests.outcome == 'failure'
+        run: exit 1
       - name: TypeScript check
         run: npm run typecheck
