@@ -17,7 +17,7 @@ replace(route,
 );
 replace(route,
   'supabase.from("shadow_trades").select("*").order("happened_at", { ascending: false }).limit(500)',
-  'supabase.from("shadow_trades").select("id,position_id,token_symbol,mint,type,reason,entry_price,exit_price,multiple,sold_pct,sold_size_sol,proceeds_sol,pnl_sol,hold_minutes,happened_at").order("happened_at", { ascending: false }).limit(200)'
+  'supabase.from("shadow_trades").select("*").order("happened_at", { ascending: false }).limit(100)'
 );
 replace(route,
   'supabase.from("scalp_trades").select("*").order("closed_at", { ascending: false }).limit(500)',
