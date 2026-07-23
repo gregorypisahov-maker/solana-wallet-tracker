@@ -1,0 +1,37 @@
+name: P0 cost model
+
+on:
+  pull_request:
+    paths:
+      - "paper-trader/**"
+      - "scripts/patch-p0-*.mjs"
+      - "supabase/migrations/2026072315*.sql"
+      - "package.json"
+      - ".github/workflows/p0-cost-model.yml"
+  push:
+    branches: [main]
+    paths:
+      - "paper-trader/**"
+      - "scripts/patch-p0-*.mjs"
+      - "supabase/migrations/2026072315*.sql"
+      - "package.json"
+      - ".github/workflows/p0-cost-model.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - name: P0 unit and runtime-patch tests
+        run: npx tsx --test paper-trader/executionCosts.test.ts paper-trader/p0RuntimePatches.test.ts
+      - name: TypeScript check
+        run: npm run typecheck
