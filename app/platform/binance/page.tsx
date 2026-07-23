@@ -1,9 +1,35 @@
 "use client";
 
-import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { ChangeEvent, FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import styles from "./binance-live.module.css";
 
+type Direction = "LONG" | "SHORT";
 type Tick = { at: number; price: number };
+type SideData = {
+  side: Direction;
+  status: string;
+  position: any | null;
+  moveMagnitudePct: number;
+  currentMovePct: number;
+  triggerThresholdPct: number;
+  triggerProgressPct: number;
+  distanceToTriggerPct: number;
+  plannedEntryFillPrice: number;
+  plannedStopLossPrice: number;
+  plannedTakeProfitPrice: number;
+  plannedNotionalUsdt: number;
+  cooldownUntil: string | null;
+  liveGrossPnlUsdt: number;
+  liveNetPnlUsdt: number;
+  liveMarginReturnPct: number;
+  livePriceReturnPct: number;
+  targetProgressPct: number;
+  stopRiskPct: number;
+  stopBufferPct: number | null;
+  targetDistancePct: number | null;
+  holdMinutes: number;
+};
+
 type LiveData = {
   generatedAt: string;
   config: {
@@ -19,31 +45,22 @@ type LiveData = {
     maxHoldMinutes: number;
     cooldownMinutes: number;
     maxDailyEntries: number;
+    maxOpenPositions: number;
   };
   state: any;
-  position: any | null;
+  positions: any[];
   scans: any[];
   trades: any[];
   derived: {
-    status: string;
+    overallStatus: string;
     currentPrice: number;
-    currentMovePct: number;
+    pumpMovePct: number;
+    dumpMovePct: number;
     triggerThresholdPct: number;
-    triggerProgressPct: number;
-    distanceToTriggerPct: number;
-    plannedEntryFillPrice: number;
-    plannedStopLossPrice: number;
-    plannedTakeProfitPrice: number;
     plannedNotionalUsdt: number;
-    liveGrossPnlUsdt: number;
-    liveNetPnlUsdt: number;
-    liveMarginReturnPct: number;
-    livePriceReturnPct: number;
-    targetProgressPct: number;
-    stopRiskPct: number;
-    stopBufferPct: number | null;
-    targetDistancePct: number | null;
-    holdMinutes: number;
+    openSides: Direction[];
+    pendingSides: Direction[];
+    sides: Record<Direction, SideData>;
     heartbeatAt: string | null;
     heartbeatAgeSeconds: number | null;
     feedHealthy: boolean;
@@ -51,6 +68,13 @@ type LiveData = {
   };
 };
 
+type ChartLevel = {
+  value: number;
+  label: string;
+  className: string;
+};
+
+const SIDES: Direction[] = ["LONG", "SHORT"];
 const n = (value: unknown) => {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : 0;
@@ -79,12 +103,22 @@ const age = (value: string | null | undefined, now: number) => {
   return `${Math.floor(seconds / 60)}m ${seconds % 60}s ago`;
 };
 
-function statusText(status: string, threshold: number) {
-  if (status === "position_open") return "SHORT POSITION OPEN";
+function overallStatusText(status: string) {
+  if (status === "both_positions_open") return "LONG + SHORT POSITIONS OPEN";
+  if (status === "one_position_open") return "ONE POSITION OPEN · OTHER SLOT READY";
   if (status === "signal_pending") return "SIGNAL HIT · FILL PENDING";
   if (status === "halted") return "RISK HALTED";
   if (status === "disabled") return "BOT DISABLED";
-  return `WAITING FOR +${threshold.toFixed(2)}% PUMP`;
+  return "WAITING FOR LONG OR SHORT SIGNAL";
+}
+
+function sideStatusText(side: Direction, status: string) {
+  if (status === "position_open") return `${side} OPEN`;
+  if (status === "signal_pending") return `${side} FILL PENDING`;
+  if (status === "cooldown") return `${side} COOLDOWN`;
+  if (status === "halted") return "RISK HALTED";
+  if (status === "disabled") return "BOT DISABLED";
+  return `${side} SLOT READY`;
 }
 
 function statusTone(status: string) {
@@ -94,35 +128,23 @@ function statusTone(status: string) {
   return styles.waiting;
 }
 
-function PriceChart({
-  ticks,
-  entry,
-  stop,
-  target,
-}: {
-  ticks: Tick[];
-  entry: number;
-  stop: number;
-  target: number;
-}) {
+function PriceChart({ ticks, levels }: { ticks: Tick[]; levels: ChartLevel[] }) {
   const width = 1000;
   const height = 360;
   const padX = 18;
   const padY = 24;
   const visible = ticks.filter((tick) => tick.price > 0).slice(-180);
-  const fallback = entry > 0 ? entry : 1;
+  const levelValues = levels.map((level) => level.value).filter((value) => value > 0);
+  const fallback = levelValues[0] ?? 1;
   const points = visible.length
     ? visible
     : [
         { at: Date.now() - 1_000, price: fallback },
         { at: Date.now(), price: fallback },
       ];
-  const values = [
-    ...points.map((point) => point.price),
-    entry,
-    stop,
-    target,
-  ].filter((value) => Number.isFinite(value) && value > 0);
+  const values = [...points.map((point) => point.price), ...levelValues].filter(
+    (value) => Number.isFinite(value) && value > 0
+  );
   const rawMin = Math.min(...values);
   const rawMax = Math.max(...values);
   const rangePad = Math.max((rawMax - rawMin) * 0.18, rawMax * 0.0007);
@@ -138,11 +160,6 @@ function PriceChart({
     .join(" ");
   const areaPath = `${path} L${x(points.length - 1)},${height - padY} L${x(0)},${height - padY} Z`;
   const latest = points[points.length - 1];
-  const levels = [
-    { value: stop, label: `STOP ${usd(stop)}`, className: styles.stopLine },
-    { value: entry, label: `ENTRY ${usd(entry)}`, className: styles.entryLine },
-    { value: target, label: `TARGET ${usd(target)}`, className: styles.targetLine },
-  ].filter((level) => level.value > 0);
 
   return (
     <svg className={styles.chart} viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none">
@@ -162,7 +179,7 @@ function PriceChart({
           y2={height * part}
         />
       ))}
-      {levels.map((level) => (
+      {levels.filter((level) => level.value > 0).map((level) => (
         <g key={level.label}>
           <line
             className={level.className}
@@ -180,6 +197,116 @@ function PriceChart({
       <path className={styles.priceLine} d={path} />
       <circle className={styles.latestDot} cx={x(points.length - 1)} cy={y(latest.price)} r="5" />
     </svg>
+  );
+}
+
+function StrategyCard({ side, sideData, config, source }: {
+  side: Direction;
+  sideData: SideData;
+  config: LiveData["config"];
+  source: string;
+}) {
+  const isLong = side === "LONG";
+  const position = sideData.position;
+  const entry = position ? n(position.entry_fill_price) : sideData.plannedEntryFillPrice;
+  const stop = position ? n(position.stop_loss_price) : sideData.plannedStopLossPrice;
+  const target = position ? n(position.take_profit_price) : sideData.plannedTakeProfitPrice;
+  const directionTone = isLong ? styles.positive : styles.negative;
+
+  return (
+    <article className={`${styles.card} ${styles.strategy}`}>
+      <div className={styles.heroHead}>
+        <div>
+          <span className={styles.eyebrow}>{side} entry plan · independent slot</span>
+          <h3 className={directionTone}>
+            {isLong ? "Long after a fast BTC drop" : "Short after a fast BTC pump"}
+          </h3>
+        </div>
+        <span className={`${styles.status} ${statusTone(sideData.status)}`}>
+          {sideStatusText(side, sideData.status)}
+        </span>
+      </div>
+      <p>
+        {isLong
+          ? `A ${config.pumpThresholdPct}% drop across ${config.lookbackCandles} completed one-minute candles can open the LONG slot.`
+          : `A ${config.pumpThresholdPct}% rise across ${config.lookbackCandles} completed one-minute candles can open the SHORT slot.`}
+      </p>
+      <div className={styles.levels}>
+        <div className={styles.level}>
+          <span>Trigger</span>
+          <strong>{isLong ? "−" : "+"}{config.pumpThresholdPct.toFixed(2)}% / {config.lookbackCandles}m</strong>
+        </div>
+        <div className={styles.level}>
+          <span>Current move</span>
+          <strong className={directionTone}>{pct(sideData.currentMovePct)}</strong>
+        </div>
+        <div className={styles.level}>
+          <span>{position ? "Entry fill" : "Planned entry"}</span>
+          <strong>{usd(entry)}</strong>
+        </div>
+        <div className={`${styles.level} ${styles.stop}`}>
+          <span>Stop loss</span>
+          <strong>{usd(stop)} · {isLong ? "−" : "+"}{config.stopLossPct}%</strong>
+        </div>
+        <div className={`${styles.level} ${styles.target}`}>
+          <span>Take profit</span>
+          <strong>{usd(target)} · {isLong ? "+" : "−"}{config.takeProfitPct}%</strong>
+        </div>
+        <div className={styles.level}>
+          <span>Slot size</span>
+          <strong>{usd(config.marginBudgetUsdt)} margin · {config.leverage}×</strong>
+        </div>
+      </div>
+      <div className={styles.progressBlock}>
+        <div className={styles.progressLabels}>
+          <strong>{sideData.triggerProgressPct.toFixed(0)}% of trigger</strong>
+          <span>{sideData.distanceToTriggerPct.toFixed(2)}% still needed</span>
+        </div>
+        <div className={styles.progressTrack}>
+          <div className={styles.progressFill} style={{ width: `${sideData.triggerProgressPct}%` }} />
+        </div>
+      </div>
+      <div className={styles.note}>
+        {source}. This slot is paper-only, database-backed, and includes simulated fees and slippage.
+      </div>
+    </article>
+  );
+}
+
+function PositionCard({ position, sideData }: { position: any; sideData: SideData }) {
+  const pnlTone = sideData.liveNetPnlUsdt >= 0 ? styles.positive : styles.negative;
+  return (
+    <article className={`${styles.card} ${styles.positionCard}`}>
+      <div className={styles.positionTop}>
+        <div>
+          <span className={styles.eyebrow}>Open independent {position.side} slot</span>
+          <h3>{position.side} {position.symbol} · {position.leverage}×</h3>
+          <p>Opened {israelTime(position.opened_at)} Israel · held {sideData.holdMinutes.toFixed(1)} minutes</p>
+        </div>
+        <div className={`${styles.pnl} ${pnlTone}`}>
+          {signedUsd(sideData.liveNetPnlUsdt)}
+          <p>{pct(sideData.liveMarginReturnPct)} on margin</p>
+        </div>
+      </div>
+      <div className={styles.positionGrid}>
+        <div className={styles.metric}><span>Side</span><strong>{position.side}</strong></div>
+        <div className={styles.metric}><span>Entry fill</span><strong>{usd(position.entry_fill_price)}</strong></div>
+        <div className={styles.metric}><span>Current price</span><strong>{usd(position.last_market_price)}</strong></div>
+        <div className={styles.metric}><span>Quantity</span><strong>{n(position.quantity).toFixed(6)} BTC</strong></div>
+        <div className={styles.metric}><span>Price return</span><strong className={pnlTone}>{pct(sideData.livePriceReturnPct)}</strong></div>
+        <div className={styles.metric}><span>Gross PnL</span><strong className={pnlTone}>{signedUsd(sideData.liveGrossPnlUsdt)}</strong></div>
+      </div>
+      <div className={styles.dualProgress}>
+        <div>
+          <div className={styles.miniLabel}><span>Progress toward target</span><strong>{sideData.targetProgressPct.toFixed(0)}%</strong></div>
+          <div className={styles.miniTrack}><div className={styles.miniFillGood} style={{ width: `${sideData.targetProgressPct}%` }} /></div>
+        </div>
+        <div>
+          <div className={styles.miniLabel}><span>Risk used toward stop</span><strong>{sideData.stopRiskPct.toFixed(0)}%</strong></div>
+          <div className={styles.miniTrack}><div className={styles.miniFillBad} style={{ width: `${sideData.stopRiskPct}%` }} /></div>
+        </div>
+      </div>
+    </article>
   );
 }
 
@@ -256,18 +383,20 @@ export default function BinanceLivePage() {
     await refresh();
   };
 
-  const display = useMemo(() => {
-    if (!data) return null;
-    const position = data.position;
-    return {
-      entry: position ? n(position.entry_fill_price) : data.derived.plannedEntryFillPrice,
-      stop: position ? n(position.stop_loss_price) : data.derived.plannedStopLossPrice,
-      target: position ? n(position.take_profit_price) : data.derived.plannedTakeProfitPrice,
-      source:
-        data.state?.data_source === "binance_spot_fallback"
-          ? "Binance Spot BTCUSDT reference"
-          : "Binance USD-M Futures reference",
-    };
+  const chartLevels = useMemo<ChartLevel[]>(() => {
+    if (!data) return [];
+    return SIDES.flatMap((side) => {
+      const sideData = data.derived.sides[side];
+      const position = sideData.position;
+      const entry = position ? n(position.entry_fill_price) : sideData.plannedEntryFillPrice;
+      const stop = position ? n(position.stop_loss_price) : sideData.plannedStopLossPrice;
+      const target = position ? n(position.take_profit_price) : sideData.plannedTakeProfitPrice;
+      return [
+        { value: stop, label: `${side} STOP ${usd(stop)}`, className: styles.stopLine },
+        { value: entry, label: `${side} ENTRY ${usd(entry)}`, className: styles.entryLine },
+        { value: target, label: `${side} TARGET ${usd(target)}`, className: styles.targetLine },
+      ];
+    });
   }, [data]);
 
   if (!data) {
@@ -276,12 +405,12 @@ export default function BinanceLivePage() {
         <main className={styles.login}>
           <form onSubmit={login}>
             <div className={styles.coin}>₿</div>
-            <h1>BTC Paper Trade Live</h1>
+            <h1>BTC Dual Position Live</h1>
             <p>Use the same password as the private strategy platform.</p>
             <input
               type="password"
               value={password}
-              onChange={(event) => setPassword(event.target.value)}
+              onChange={(event: ChangeEvent<HTMLInputElement>) => setPassword(event.target.value)}
               placeholder="Dashboard password"
               autoFocus
             />
@@ -296,18 +425,20 @@ export default function BinanceLivePage() {
         <div className={styles.loader}>
           <span className={styles.spinner} />
           <div>
-            <strong>BTC Paper Trade Live</strong>
-            <p>{error ?? "Synchronizing the Binance paper engine"}</p>
+            <strong>BTC Dual Position Live</strong>
+            <p>{error ?? "Synchronizing both Binance paper slots"}</p>
           </div>
         </div>
       </main>
     );
   }
 
-  const { config, derived, position, state } = data;
+  const { config, derived, state } = data;
+  const source =
+    state?.data_source === "binance_spot_fallback"
+      ? "Binance Spot BTCUSDT reference"
+      : "Binance USD-M Futures reference";
   const feedHealthy = derived.feedHealthy;
-  const currentTone = derived.currentMovePct >= 0 ? styles.positive : styles.negative;
-  const pnlTone = derived.liveNetPnlUsdt >= 0 ? styles.positive : styles.negative;
 
   return (
     <main className={styles.page}>
@@ -316,8 +447,8 @@ export default function BinanceLivePage() {
           <div className={styles.brand}>
             <div className={styles.coin}>₿</div>
             <div>
-              <h1>BTC Pump-Fade Paper Trader</h1>
-              <p>Live movement, entry trigger and simulated short management</p>
+              <h1>BTC Dual Position Paper Trader</h1>
+              <p>One independent LONG slot and one independent SHORT slot · paper only</p>
             </div>
           </div>
           <div className={styles.topActions}>
@@ -335,137 +466,106 @@ export default function BinanceLivePage() {
           <article className={`${styles.card} ${styles.hero}`}>
             <div className={styles.heroHead}>
               <div>
-                <span className={styles.eyebrow}>{config.symbol} · Paper only</span>
-                <h2>{statusText(derived.status, derived.triggerThresholdPct)}</h2>
+                <span className={styles.eyebrow}>{config.symbol} · 2 independent paper slots</span>
+                <h2>{overallStatusText(derived.overallStatus)}</h2>
                 <div className={styles.heroPrice}>{usd(derived.currentPrice)}</div>
               </div>
-              <span className={`${styles.status} ${statusTone(derived.status)}`}>
-                {derived.status.replaceAll("_", " ")}
+              <span className={`${styles.status} ${statusTone(data.positions.length ? "position_open" : derived.overallStatus)}`}>
+                {data.positions.length}/2 open
               </span>
             </div>
 
             <div className={styles.progressBlock}>
               <div className={styles.progressLabels}>
-                <strong className={currentTone}>Current 5m move {pct(derived.currentMovePct)}</strong>
-                <span>
-                  {derived.status === "position_open"
-                    ? `Entered at ${usd(position?.entry_fill_price)}`
-                    : `${derived.distanceToTriggerPct.toFixed(2)}% still needed`}
-                </span>
+                <strong className={styles.positive}>LONG drop trigger −{derived.sides.LONG.moveMagnitudePct.toFixed(2)}%</strong>
+                <span>{derived.sides.LONG.distanceToTriggerPct.toFixed(2)}% still needed</span>
               </div>
               <div className={styles.progressTrack}>
-                <div
-                  className={styles.progressFill}
-                  style={{ width: `${derived.triggerProgressPct}%` }}
-                />
+                <div className={styles.progressFill} style={{ width: `${derived.sides.LONG.triggerProgressPct}%` }} />
+              </div>
+            </div>
+            <div className={styles.progressBlock}>
+              <div className={styles.progressLabels}>
+                <strong className={styles.negative}>SHORT pump trigger +{derived.sides.SHORT.moveMagnitudePct.toFixed(2)}%</strong>
+                <span>{derived.sides.SHORT.distanceToTriggerPct.toFixed(2)}% still needed</span>
+              </div>
+              <div className={styles.progressTrack}>
+                <div className={styles.progressFill} style={{ width: `${derived.sides.SHORT.triggerProgressPct}%` }} />
               </div>
             </div>
 
             <div className={styles.chartWrap}>
-              <PriceChart
-                ticks={ticks}
-                entry={display?.entry ?? 0}
-                stop={display?.stop ?? 0}
-                target={display?.target ?? 0}
-              />
+              <PriceChart ticks={ticks} levels={chartLevels} />
             </div>
           </article>
 
           <aside className={styles.side}>
-            <article className={`${styles.card} ${styles.strategy}`}>
-              <span className={styles.eyebrow}>Entry plan</span>
-              <h3>Short after a fast BTC pump</h3>
-              <p>
-                The bot waits for BTC to rise at least {config.pumpThresholdPct}% from the rolling low
-                across {config.lookbackCandles} completed one-minute candles, then fills a simulated short.
-              </p>
-              <div className={styles.levels}>
-                <div className={styles.level}><span>Trigger</span><strong>+{config.pumpThresholdPct.toFixed(2)}% / {config.lookbackCandles}m</strong></div>
-                <div className={styles.level}><span>Planned entry</span><strong>{usd(display?.entry)}</strong></div>
-                <div className={`${styles.level} ${styles.stop}`}><span>Stop loss</span><strong>{usd(display?.stop)} · +{config.stopLossPct}%</strong></div>
-                <div className={`${styles.level} ${styles.target}`}><span>Take profit</span><strong>{usd(display?.target)} · −{config.takeProfitPct}%</strong></div>
-                <div className={styles.level}><span>Size</span><strong>{usd(config.marginBudgetUsdt)} margin · {config.leverage}×</strong></div>
-                <div className={styles.level}><span>Notional</span><strong>{usd(derived.plannedNotionalUsdt)}</strong></div>
-              </div>
-              <div className={styles.note}>
-                {display?.source}. This is a database-backed simulation with fees and slippage. It cannot send a real Binance order.
-              </div>
-            </article>
+            <StrategyCard side="LONG" sideData={derived.sides.LONG} config={config} source={source} />
+            <StrategyCard side="SHORT" sideData={derived.sides.SHORT} config={config} source={source} />
           </aside>
 
           <section className={styles.kpis}>
             <article className={`${styles.card} ${styles.kpi}`}><span>BTC price</span><strong>{usd(derived.currentPrice)}</strong><small>Updated {israelTime(derived.heartbeatAt)} Israel</small></article>
-            <article className={`${styles.card} ${styles.kpi}`}><span>Trigger movement</span><strong className={currentTone}>{pct(derived.currentMovePct)}</strong><small>Needs +{derived.triggerThresholdPct.toFixed(2)}%</small></article>
-            <article className={`${styles.card} ${styles.kpi}`}><span>Entry distance</span><strong className={styles.amber}>{derived.distanceToTriggerPct.toFixed(2)}%</strong><small>{derived.triggerProgressPct.toFixed(0)}% of trigger reached</small></article>
+            <article className={`${styles.card} ${styles.kpi}`}><span>LONG slot</span><strong className={styles.positive}>{sideStatusText("LONG", derived.sides.LONG.status)}</strong><small>Drop progress {derived.sides.LONG.triggerProgressPct.toFixed(0)}%</small></article>
+            <article className={`${styles.card} ${styles.kpi}`}><span>SHORT slot</span><strong className={styles.negative}>{sideStatusText("SHORT", derived.sides.SHORT.status)}</strong><small>Pump progress {derived.sides.SHORT.triggerProgressPct.toFixed(0)}%</small></article>
             <article className={`${styles.card} ${styles.kpi}`}><span>Paper bankroll</span><strong>{usd(state?.bankroll_usdt)}</strong><small>{state?.entries_today ?? 0}/{config.maxDailyEntries} entries today</small></article>
             <article className={`${styles.card} ${styles.kpi}`}><span>Market source</span><strong>{state?.data_source === "binance_spot_fallback" ? "Spot fallback" : "Futures"}</strong><small>{feedHealthy ? "Receiving prices" : "Heartbeat delayed"}</small></article>
           </section>
 
-          {position && (
+          {data.positions.length === 0 ? (
             <article className={`${styles.card} ${styles.positionCard}`}>
-              <div className={styles.positionTop}>
-                <div>
-                  <span className={styles.eyebrow}>Open simulated trade</span>
-                  <h3>SHORT {position.symbol} · {position.leverage}×</h3>
-                  <p>Opened {israelTime(position.opened_at)} Israel · held {derived.holdMinutes.toFixed(1)} minutes</p>
-                </div>
-                <div className={`${styles.pnl} ${pnlTone}`}>
-                  {signedUsd(derived.liveNetPnlUsdt)}
-                  <p>{pct(derived.liveMarginReturnPct)} on margin</p>
-                </div>
-              </div>
-              <div className={styles.positionGrid}>
-                <div className={styles.metric}><span>Entry fill</span><strong>{usd(position.entry_fill_price)}</strong></div>
-                <div className={styles.metric}><span>Current price</span><strong>{usd(derived.currentPrice)}</strong></div>
-                <div className={styles.metric}><span>Quantity</span><strong>{n(position.quantity).toFixed(6)} BTC</strong></div>
-                <div className={styles.metric}><span>Notional</span><strong>{usd(position.notional_usdt)}</strong></div>
-                <div className={styles.metric}><span>Price return</span><strong className={pnlTone}>{pct(derived.livePriceReturnPct)}</strong></div>
-                <div className={styles.metric}><span>Gross PnL</span><strong className={pnlTone}>{signedUsd(derived.liveGrossPnlUsdt)}</strong></div>
-              </div>
-              <div className={styles.dualProgress}>
-                <div>
-                  <div className={styles.miniLabel}><span>Progress toward target</span><strong>{derived.targetProgressPct.toFixed(0)}%</strong></div>
-                  <div className={styles.miniTrack}><div className={styles.miniFillGood} style={{ width: `${derived.targetProgressPct}%` }} /></div>
-                </div>
-                <div>
-                  <div className={styles.miniLabel}><span>Risk used toward stop</span><strong>{derived.stopRiskPct.toFixed(0)}%</strong></div>
-                  <div className={styles.miniTrack}><div className={styles.miniFillBad} style={{ width: `${derived.stopRiskPct}%` }} /></div>
-                </div>
-              </div>
+              <span className={styles.eyebrow}>Open simulated positions</span>
+              <h3>No positions open · LONG and SHORT slots are available</h3>
+              <p>The bot can hold one LONG and one SHORT at the same time when each side receives its own valid signal.</p>
             </article>
+          ) : (
+            data.positions.map((position) => (
+              <PositionCard
+                key={position.position_id}
+                position={position}
+                sideData={derived.sides[String(position.side).toUpperCase() as Direction]}
+              />
+            ))
           )}
 
           <section className={styles.bottom}>
             <article className={`${styles.card} ${styles.events}`}>
               <h3>Decision feed</h3>
-              <p>Every completed one-minute candle and the reason the bot entered or stayed out.</p>
+              <p>Each candle shows whether the LONG slot, SHORT slot, or both were considered.</p>
               <div className={styles.eventList}>
-                {[...data.scans].reverse().slice(0, 14).map((scan) => (
-                  <div className={styles.event} key={`${scan.symbol}-${scan.candle_close_time}`}>
-                    <time>{israelTime(scan.candle_close_time)}</time>
-                    <div>
-                      <b>{String(scan.action).replaceAll("_", " ")}</b>
-                      <div className={n(scan.rolling_change_pct) >= 0 ? styles.positive : styles.negative}>
-                        {pct(scan.rolling_change_pct)} movement · {usd(scan.close_price)}
+                {[...data.scans].reverse().slice(0, 14).map((scan) => {
+                  const snapshot = scan.snapshot ?? {};
+                  const sides = Array.isArray(snapshot.triggered_sides)
+                    ? snapshot.triggered_sides.join(" + ")
+                    : snapshot.signal_side ?? "NO SIDE";
+                  return (
+                    <div className={styles.event} key={`${scan.symbol}-${scan.candle_close_time}`}>
+                      <time>{israelTime(scan.candle_close_time)}</time>
+                      <div>
+                        <b>{String(scan.action).replaceAll("_", " ")} · {sides}</b>
+                        <div className={n(scan.rolling_change_pct) >= 0 ? styles.positive : styles.negative}>
+                          {pct(scan.rolling_change_pct)} recorded move · {usd(scan.close_price)}
+                        </div>
                       </div>
+                      <em>{String(scan.reason ?? "").replaceAll("_", " ")}</em>
                     </div>
-                    <em>{String(scan.reason ?? "").replaceAll("_", " ")}</em>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </article>
 
             <article className={`${styles.card} ${styles.trades}`}>
               <h3>Completed paper trades</h3>
-              <p>Entry, exit and net result after simulated fees and slippage.</p>
+              <p>Every result is labeled LONG or SHORT after simulated fees and slippage.</p>
               {data.trades.length === 0 ? (
-                <div className={styles.empty}>No completed Binance paper trades yet. The engine is waiting for its first valid +{config.pumpThresholdPct}% pump.</div>
+                <div className={styles.empty}>No completed Binance paper trades yet. Both independent slots are now waiting for valid ±{config.pumpThresholdPct}% moves.</div>
               ) : (
                 <div className={styles.tradeTable}>
-                  <div className={`${styles.tradeRow} ${styles.head}`}><span>Closed</span><span>Reason</span><span>Entry</span><span>Exit</span><strong>Net PnL</strong></div>
+                  <div className={`${styles.tradeRow} ${styles.head}`}><span>Closed</span><span>Side</span><span>Reason</span><span>Entry</span><span>Exit</span><strong>Net PnL</strong></div>
                   {data.trades.map((trade) => (
                     <div className={styles.tradeRow} key={trade.position_id}>
                       <span>{israelTime(trade.closed_at)}</span>
+                      <span>{String(trade.side ?? "—")}</span>
                       <span>{String(trade.exit_reason).replaceAll("_", " ")}</span>
                       <span>{usd(trade.entry_fill_price)}</span>
                       <span>{usd(trade.exit_fill_price)}</span>
