@@ -8,12 +8,10 @@ import {
 } from "../paper-trader/shadowStrategy";
 import { computeWeightedWalletScore } from "../paper-trader/trustScore";
 import { getTrustScoresForWallets } from "../paper-trader/walletPerformance";
-import { evaluateShadowCopierWalletQuality } from "../paper-trader/shadowCopierWalletQuality";
-import { loadShadowCoinQuality } from "../paper-trader/shadowCoinQuality";
 import type { AlertInput } from "../paper-trader/types";
 
 const supabase = getSupabaseAdmin();
-const STRATEGY_VERSION = "shadow_copier_quality_v2_2026_07_22";
+const STRATEGY_VERSION = "shadow_filtered_profitable_v1_restored_2026_07_23";
 
 function boundedInterval(raw: string | undefined, fallback: number, min: number, max: number): number {
   const parsed = Number(raw);
@@ -24,6 +22,8 @@ const ALERT_POLL_MS = boundedInterval(process.env.SHADOW_ALERT_POLL_MS, 10_000, 
 const POSITION_CHECK_MS = boundedInterval(process.env.SHADOW_POSITION_CHECK_MS, 6_000, 3_000, 60_000);
 const SUMMARY_INTERVAL_MS = 30 * 60_000;
 
+// Restored to the pre-copier filtered profile that produced the strongest live sample.
+// Do not add copier t-stat, decay, bundle, sniper, or coin-quality gates here.
 const SHADOW_FILTERS = {
   minScore: 10,
   maxScore: 65,
@@ -189,16 +189,13 @@ async function processNewAlerts(): Promise<void> {
       .from("shadow_processed_alerts")
       .select("alert_id")
       .in("alert_id", alertIds);
-    if (processedError) {
-      throw new Error(`shadow processed-alert lookup failed: ${processedError.message}`);
-    }
+    if (processedError) throw new Error(`shadow processed-alert lookup failed: ${processedError.message}`);
     const processedIds = new Set((processed ?? []).map((row: any) => row.alert_id));
 
     for (const alert of alerts as any[]) {
       if (processedIds.has(alert.id)) continue;
       let entered = false;
       let skipReasons: string[] = [];
-      let signalMultiplier: number | null = null;
       let snapshot: DecisionSnapshot = {
         strategy_version: STRATEGY_VERSION,
         score: null,
@@ -244,50 +241,7 @@ async function processNewAlerts(): Promise<void> {
           skipReasons.push(...basic.skipReasons);
         }
 
-        if (skipReasons.length === 0) {
-          try {
-            const copierQuality = await evaluateShadowCopierWalletQuality(participants);
-            snapshot.wallet_quality = copierQuality.snapshot;
-            signalMultiplier = copierQuality.signalMultiplier;
-            if (!copierQuality.pass) skipReasons.push(...copierQuality.reasons);
-            if (copierQuality.pass && signalMultiplier == null) {
-              skipReasons.push("copier_signal_multiplier_unresolved");
-            }
-          } catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
-            snapshot.wallet_quality = {
-              data_source: "tiered_copier_returns",
-              status: "unresolved",
-              error: message,
-            };
-            skipReasons.push("copier_wallet_quality_unresolved");
-          }
-        } else {
-          snapshot.wallet_quality = { status: "not_evaluated_due_to_basic_filter_rejection" };
-        }
-
-        if (skipReasons.length === 0) {
-          const coinQuality = await loadShadowCoinQuality(alert.token_mint);
-          snapshot.coin_quality = {
-            resolved: coinQuality.resolved,
-            pass: coinQuality.pass,
-            creator_wallet: coinQuality.creatorWallet,
-            creation_block: coinQuality.creationBlock,
-            same_block_buyer_count: coinQuality.sameBlockBuyerCount,
-            first_five_block_buyer_count: coinQuality.firstFiveBlockBuyerCount,
-            bundle_detected: coinQuality.bundleDetected,
-            sniper_detected: coinQuality.sniperDetected,
-            reasons: coinQuality.reasons,
-            fetched_at: coinQuality.fetchedAt,
-            error: coinQuality.error,
-          };
-          if (!coinQuality.resolved) skipReasons.push("coin_quality_unresolved");
-          else if (!coinQuality.pass) skipReasons.push(...coinQuality.reasons);
-        } else {
-          snapshot.coin_quality = { status: "not_evaluated_due_to_prior_rejection" };
-        }
-
-        if (skipReasons.length === 0 && score && signalMultiplier != null) {
+        if (skipReasons.length === 0 && score) {
           const alertInput: AlertInput = {
             tokenSymbol: score.token_symbol ?? "UNKNOWN",
             mint: alert.token_mint,
@@ -298,7 +252,6 @@ async function processNewAlerts(): Promise<void> {
             liquidityUsd: Number(snapshot.liquidityUsd),
             averageTrustScore: Number(snapshot.averageTrustScore),
             strategyVersion: STRATEGY_VERSION,
-            shadowSizeMultiplier: signalMultiplier,
             shadowStudyDecision: snapshot,
           };
 
@@ -308,9 +261,7 @@ async function processNewAlerts(): Promise<void> {
             .select("mint")
             .eq("mint", alert.token_mint)
             .maybeSingle();
-          if (positionError) {
-            throw new Error(`shadow position verification failed: ${positionError.message}`);
-          }
+          if (positionError) throw new Error(`shadow position verification failed: ${positionError.message}`);
           entered = Boolean(openedPosition);
           if (!entered) skipReasons.push("strategy_did_not_open_position");
         }
@@ -363,8 +314,7 @@ async function logSummary(): Promise<void> {
 
 export function startShadowStrategyScheduler(): void {
   console.log(
-    `[shadow-study] ${STRATEGY_VERSION} active; copier t<0 and decay rejected, ` +
-      `confidence-weighted sizing with 0.15x probes, same-block bundle rejection; ` +
+    `[shadow-study] ${STRATEGY_VERSION} active; restored fixed 3% sizing and pre-copier filters; ` +
       `alerts ${ALERT_POLL_MS / 1000}s, positions ${POSITION_CHECK_MS / 1000}s`
   );
   void processNewAlerts().catch((error) =>
