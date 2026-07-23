@@ -32,10 +32,12 @@ export interface OpenPosition {
   entryAlert: AlertInput;
   positionId: string;
   realizedPnlSol: number;
-  entryFeeSol: number;
-  entrySlippageSol: number;
-  entryLiquidityUsd: number;
-  costModelVersion: string | null;
+  // Optional so source remains buildable before the idempotent Railway startup
+  // patch is applied. Every new cost-enabled position writes all four fields.
+  entryFeeSol?: number;
+  entrySlippageSol?: number;
+  entryLiquidityUsd?: number;
+  costModelVersion?: string | null;
 }
 
 export interface TradeRecord {
@@ -49,12 +51,12 @@ export interface TradeRecord {
   soldPct: number;
   soldSizeSol: number;
   proceedsSol: number;
-  grossPnlSol: number;
-  entryFeeSol: number;
-  exitFeeSol: number;
-  slippageSol: number;
+  grossPnlSol?: number;
+  entryFeeSol?: number;
+  exitFeeSol?: number;
+  slippageSol?: number;
   pnlSol: number;
-  costModelVersion: string | null;
+  costModelVersion?: string | null;
   holdMinutes: number;
   timestamp: string;
   entryAlert: AlertInput;
