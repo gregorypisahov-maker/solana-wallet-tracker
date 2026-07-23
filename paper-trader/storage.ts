@@ -2,17 +2,13 @@
 // Persists to Supabase instead of local JSON — Railway's filesystem is
 // ephemeral and wipes on every redeploy, so local files would silently
 // lose all trade history. Run the migrations in sql/ before using this.
-//
-// CHANGE FROM PREVIOUS VERSION: position_id is now read/written on
-// paper_positions and paper_trades. Everything else is unchanged.
 
 import { getSupabaseAdmin } from '../lib/supabase';
 import { config } from './config';
 import { OpenPosition, PaperState, TradeRecord } from './types';
 
 const supabase = getSupabaseAdmin();
-
-const STATE_ROW_ID = 1; // single-row table, always id=1
+const STATE_ROW_ID = 1;
 
 function assertSuccess(label: string, error: { message: string } | null): void {
   if (error) throw new Error(`${label}: ${error.message}`);
@@ -122,7 +118,12 @@ export async function appendTrade(trade: TradeRecord): Promise<void> {
     sold_pct: trade.soldPct,
     sold_size_sol: trade.soldSizeSol,
     proceeds_sol: trade.proceedsSol,
+    gross_pnl_sol: trade.grossPnlSol,
+    entry_fee_sol: trade.entryFeeSol,
+    exit_fee_sol: trade.exitFeeSol,
+    slippage_sol: trade.slippageSol,
     pnl_sol: trade.pnlSol,
+    cost_model_version: trade.costModelVersion,
     hold_minutes: trade.holdMinutes,
     happened_at: trade.timestamp,
     entry_alert: trade.entryAlert,
@@ -133,9 +134,7 @@ export async function appendTrade(trade: TradeRecord): Promise<void> {
 
 export async function loadTrades(sinceIso?: string): Promise<TradeRecord[]> {
   let query = supabase.from('paper_trades').select('*').order('happened_at', { ascending: true });
-  if (sinceIso) {
-    query = query.gte('happened_at', sinceIso);
-  }
+  if (sinceIso) query = query.gte('happened_at', sinceIso);
   const { data, error } = await query;
   assertSuccess('Failed to load paper trades', error);
   return (data ?? []).map((r: any) => ({
@@ -149,7 +148,12 @@ export async function loadTrades(sinceIso?: string): Promise<TradeRecord[]> {
     soldPct: Number(r.sold_pct),
     soldSizeSol: Number(r.sold_size_sol),
     proceedsSol: Number(r.proceeds_sol),
+    grossPnlSol: Number(r.gross_pnl_sol ?? r.pnl_sol ?? 0),
+    entryFeeSol: Number(r.entry_fee_sol ?? 0),
+    exitFeeSol: Number(r.exit_fee_sol ?? 0),
+    slippageSol: Number(r.slippage_sol ?? 0),
     pnlSol: Number(r.pnl_sol),
+    costModelVersion: r.cost_model_version ?? null,
     holdMinutes: Number(r.hold_minutes),
     timestamp: r.happened_at,
     entryAlert: r.entry_alert,
@@ -174,6 +178,10 @@ export async function loadOpenPositions(): Promise<Map<string, OpenPosition>> {
       entryAlert: r.entry_alert,
       positionId: r.position_id,
       realizedPnlSol: Number(r.realized_pnl_sol ?? 0),
+      entryFeeSol: Number(r.entry_fee_sol ?? 0),
+      entrySlippageSol: Number(r.entry_slippage_sol ?? 0),
+      entryLiquidityUsd: Number(r.entry_liquidity_usd ?? r.entry_alert?.liquidityUsd ?? 0),
+      costModelVersion: r.cost_model_version ?? null,
     });
   }
   return map;
@@ -193,6 +201,10 @@ export async function saveOpenPosition(pos: OpenPosition): Promise<void> {
       entry_alert: pos.entryAlert,
       position_id: pos.positionId,
       realized_pnl_sol: pos.realizedPnlSol,
+      entry_fee_sol: pos.entryFeeSol,
+      entry_slippage_sol: pos.entrySlippageSol,
+      entry_liquidity_usd: pos.entryLiquidityUsd,
+      cost_model_version: pos.costModelVersion,
     },
     { onConflict: 'mint' }
   );
@@ -204,18 +216,11 @@ export async function deleteOpenPosition(mint: string): Promise<void> {
   assertSuccess('Failed to delete open paper position', error);
 }
 
-// New helper for analytics.ts — reads every trade row, unfiltered, so
-// analytics can group by position without paginating manually.
-// (Kept separate from loadTrades so nothing existing changes shape.)
 export async function loadAllTradesRaw(): Promise<any[]> {
   const { data, error } = await supabase
     .from('paper_trades')
     .select('*')
     .order('happened_at', { ascending: true });
-
-  if (error) {
-    throw new Error(`Failed to load paper_trades: ${error.message}`);
-  }
-
+  if (error) throw new Error(`Failed to load paper_trades: ${error.message}`);
   return data ?? [];
 }
