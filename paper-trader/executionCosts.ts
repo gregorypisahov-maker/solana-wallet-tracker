@@ -14,6 +14,18 @@ const boundedEnv = (
   maximum: number
 ): number => Math.min(maximum, Math.max(minimum, finiteEnv(name, fallback, minimum)));
 
+const calibratedBaseFeeSol = finiteEnv("PAPER_BASE_FEE_SOL_PER_TX", 0.000005);
+const calibratedPriorityFeeSol = finiteEnv(
+  "PAPER_PRIORITY_FEE_SOL_PER_TX",
+  0.00022543
+);
+const calibratedJitoTipSol = finiteEnv(
+  "PAPER_JITO_TIP_SOL_PER_TX",
+  0.0000998
+);
+const calibratedNetworkCostSol =
+  calibratedBaseFeeSol + calibratedPriorityFeeSol + calibratedJitoTipSol;
+
 /**
  * P0 calibration, 2026-07-23 UTC.
  *
@@ -23,8 +35,11 @@ const boundedEnv = (
  *   trade-notional/pool-liquidity reproduces the centre of that sample.
  * - PumpSwap canonical-pool fees in this market-cap band are 1.10%-1.25% per
  *   side. The model uses the conservative 1.25% tier.
- * - Jupiter's live HIGH priority estimate was 225,430 lamports. Adding the
- *   5,000-lamport Solana base fee gives 230,430 lamports per transaction.
+ * - Jupiter's live HIGH priority estimate was 225,430 lamports.
+ * - Jito's live tip-floor feed at 2026-07-23 12:40:34 UTC reported a
+ *   99th-percentile landed tip of 99,800 lamports. This also closely matches
+ *   Jito's recommended 70/30 priority-fee/tip split for the chosen priority fee.
+ * - Adding the 5,000-lamport Solana base fee gives 330,230 lamports per tx.
  * - No real-money execution telemetry exists yet. The 5% failed-entry rate is
  *   therefore an explicit scenario input, not a measured production rate, and
  *   remains overrideable by environment variable.
@@ -33,11 +48,14 @@ export const PAPER_COST_MODEL = {
   // Backtested P0 accounting is on by default for paper. Set the flag to the
   // literal string "false" for an emergency rollback to legacy price friction.
   enabled: process.env.PAPER_COST_MODEL_ENABLED !== "false",
-  version: "p0_jupiter_pumpswap_2026_07_23_v1",
+  version: "p0_jupiter_pumpswap_jito_2026_07_23_v2",
   calibrationDate: "2026-07-23",
+  baseFeeSolPerTransaction: calibratedBaseFeeSol,
+  priorityFeeSolPerTransaction: calibratedPriorityFeeSol,
+  jitoTipSolPerTransaction: calibratedJitoTipSol,
   networkCostSolPerTransaction: finiteEnv(
     "PAPER_NETWORK_COST_SOL_PER_TX",
-    0.00023043
+    calibratedNetworkCostSol
   ),
   swapFeePctPerSide: boundedEnv("PAPER_SWAP_FEE_PCT_PER_SIDE", 0.0125, 0, 1),
   slippageLiquidityCoefficient: finiteEnv(
@@ -150,6 +168,10 @@ export async function appendFailedPaperEntry(input: {
     cost_snapshot: {
       failed_transaction_rate: PAPER_COST_MODEL.failedTransactionRate,
       calibration_date: PAPER_COST_MODEL.calibrationDate,
+      base_fee_sol_per_transaction: PAPER_COST_MODEL.baseFeeSolPerTransaction,
+      priority_fee_sol_per_transaction: PAPER_COST_MODEL.priorityFeeSolPerTransaction,
+      jito_tip_sol_per_transaction: PAPER_COST_MODEL.jitoTipSolPerTransaction,
+      network_cost_sol_per_transaction: PAPER_COST_MODEL.networkCostSolPerTransaction,
       ...input.snapshot,
     },
     happened_at: new Date().toISOString(),

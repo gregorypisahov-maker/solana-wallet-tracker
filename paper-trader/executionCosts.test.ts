@@ -8,14 +8,17 @@ before(async () => {
   costs = await import("./executionCosts");
 });
 
-test("0.2 SOL in a $20k pool uses liquidity-scaled slippage", () => {
+test("0.2 SOL in a $20k pool includes base fee, priority fee, Jito tip, swap fee and slippage", () => {
   const result = costs.calculateEntryExecutionCosts(0.2, 20_000);
 
-  assert.equal(result.networkFeeSol, 0.00023043);
+  assert.equal(costs.PAPER_COST_MODEL.baseFeeSolPerTransaction, 0.000005);
+  assert.equal(costs.PAPER_COST_MODEL.priorityFeeSolPerTransaction, 0.00022543);
+  assert.equal(costs.PAPER_COST_MODEL.jitoTipSolPerTransaction, 0.0000998);
+  assert.ok(Math.abs(result.networkFeeSol - 0.00033023) < 1e-12);
   assert.ok(Math.abs(result.swapFeeSol - 0.0025) < 1e-12);
   assert.ok(Math.abs(result.slippagePct - 0.00153396242463667) < 1e-12);
   assert.ok(Math.abs(result.slippageSol - 0.000306792484927334) < 1e-12);
-  assert.ok(Math.abs(result.totalSol - 0.003037222484927334) < 1e-12);
+  assert.ok(Math.abs(result.totalSol - 0.003137022484927334) < 1e-12);
 });
 
 test("slippage rises with size and falls with liquidity", () => {
