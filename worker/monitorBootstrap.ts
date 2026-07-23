@@ -5,8 +5,6 @@ import { startAuditedWalletDiscoveryScheduler } from "./walletDiscoveryAudit";
 import { startShadowStrategyScheduler } from "./shadowStudyScheduler";
 import { startAdaptiveStrategyScheduler } from "../paper-trader/adaptiveStrategy";
 import { startPaperAutoResumeScheduler } from "./paperAutoResume";
-import { startTieredEntryShadowScheduler } from "../paper-trader/tieredEntryShadow";
-import { startTieredRecentSignalPump } from "../paper-trader/tieredRecentSignalPump";
 import { startLiveReadinessScheduler } from "../paper-trader/liveReadiness";
 import { startMomentumScalperScheduler } from "../paper-trader/momentumScalper";
 import { startScalperShadowScheduler } from "../paper-trader/scalperShadow";
@@ -204,12 +202,10 @@ async function bootstrap(): Promise<void> {
     // Exit managers stay active so any existing paper positions can close normally.
     startMomentumScalperScheduler();
     startScalperShadowScheduler();
-    startTieredEntryShadowScheduler();
-    startTieredRecentSignalPump();
     startLiveReadinessScheduler();
     startBinanceFuturesPaperBot();
     console.log(
-      "[monitor-bootstrap] active paper strategies: Legion, manipulation-resistant Shadow, Tiered, Binance BTC pump-fade; scalpers exit-only"
+      "[monitor-bootstrap] active paper strategies: Legion, manipulation-resistant Shadow, Binance BTC pump-fade; scalpers exit-only"
     );
   } else {
     console.log(
