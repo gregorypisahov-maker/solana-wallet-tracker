@@ -58,54 +58,6 @@ function replaceRequired(path, source, pattern, replacement, marker) {
 }
 
 {
-  const path = "paper-trader/tieredRecentSignalPump.ts";
-  let source = read(path);
-  source = replaceRequired(
-    path,
-    source,
-    /import \{ applyEntryFriction \} from "\.\/executionFriction";\n/,
-    `import { applyEntryFriction } from "./executionFriction";\nimport {\n  isTieredSignalProcessed,\n  loadIncrementalTieredBuys,\n  markTieredSignalProcessed,\n} from "./tieredSignalCache";\n`,
-    "loadIncrementalTieredBuys"
-  );
-  source = replaceRequired(
-    path,
-    source,
-    /const RECENT_WINDOW_MS = 15 \* 60_000;\n/,
-    `const RECENT_WINDOW_MS = 15 * 60_000;\nconst TIERED_SIGNAL_POLL_MS = Math.max(5_000, Number(process.env.TIERED_SIGNAL_POLL_MS ?? 5_000));\n`,
-    "TIERED_SIGNAL_POLL_MS"
-  );
-  source = replaceRequired(
-    path,
-    source,
-    /async function alreadyProcessed\(wallet: string, mint: string\): Promise<boolean \| null> \{[\s\S]*?\n}\n\nfunction scheduleWork/,
-    `async function alreadyProcessed(wallet: string, mint: string): Promise<boolean | null> {\n  try {\n    return await isTieredSignalProcessed(wallet, mint);\n  } catch (error) {\n    console.error("[tiered-entry] processed cache failed; fail-closed:", error);\n    return null;\n  }\n}\n\nfunction scheduleWork`,
-    "processed cache failed; fail-closed"
-  );
-  source = replaceRequired(
-    path,
-    source,
-    /    if \(error && error\.code !== "23505"\) throw new Error\(`tiered signal log failed: \$\{error\.message}`\);\n/,
-    `    if (error && error.code !== "23505") throw new Error(\`tiered signal log failed: \${error.message}\`);\n    markTieredSignalProcessed(row.wallet_address, row.token_mint);\n`,
-    "markTieredSignalProcessed(row.wallet_address"
-  );
-  source = replaceRequired(
-    path,
-    source,
-    /    const \{ data, error \} = await supabase\s*\n\s*\.from\("wallet_transactions"\)\s*\n\s*\.select\("id,wallet_address,token_mint,sol_amount,tx_time"\)\s*\n\s*\.eq\("side", "buy"\)\s*\n\s*\.gte\("tx_time", new Date\(Date\.now\(\) - RECENT_WINDOW_MS\)\.toISOString\(\)\)\s*\n\s*\.order\("tx_time", \{ ascending: false \}\)\s*\n\s*\.limit\(200\);\s*\n\s*if \(error\) throw new Error\(error\.message\);\s*\n\s*for \(const row of \[\.\.\.\(data \?\? \[\]\)\]\.reverse\(\)\) \{/,
-    `    const data = await loadIncrementalTieredBuys(RECENT_WINDOW_MS);\n\n    for (const row of data) {`,
-    "const data = await loadIncrementalTieredBuys"
-  );
-  source = replaceRequired(
-    path,
-    source,
-    /  setInterval\(\(\) => void tick\(\), 2_000\);/,
-    `  setInterval(() => void tick(), TIERED_SIGNAL_POLL_MS);`,
-    "setInterval(() => void tick(), TIERED_SIGNAL_POLL_MS)"
-  );
-  write(path, source);
-}
-
-{
   const replacements = [
     {
       path: "paper-trader/storage.ts",
@@ -118,12 +70,6 @@ function replaceRequired(path, source, pattern, replacement, marker) {
       before: '.from("shadow_positions").select("*")',
       after: '.from("shadow_positions").select("mint,token_symbol,entry_price,entry_time,size_sol,remaining_pct,peak_multiple,entry_alert,position_id,realized_pnl_sol,entry_fee_sol,entry_slippage_sol,entry_liquidity_usd,cost_model_version")',
       markers: ["entry_fee_sol,entry_slippage_sol,entry_liquidity_usd,cost_model_version"],
-    },
-    {
-      path: "paper-trader/tieredEntryShadow.ts",
-      before: '.select("*")\n      .order("entry_time", { ascending: true });',
-      after: '.select("mint,token_symbol,entry_price,entry_time,size_sol,remaining_pct,peak_multiple,ladder_hits,position_id,realized_pnl_sol,entry_liquidity_usd,filter_snapshot")\n      .order("entry_time", { ascending: true });',
-      markers: ["entry_liquidity_usd,filter_snapshot"],
     },
     {
       path: "paper-trader/momentumScalper.ts",
