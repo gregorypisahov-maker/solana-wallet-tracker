@@ -4,6 +4,24 @@ const file = "app/storefront/page.tsx";
 let source = fs.readFileSync(file, "utf8");
 
 const replacements = [
+  ['  id: "legion" | "shadow" | "tiered";', '  id: "legion" | "shadow";'],
+  [`  tiered: {
+    title: "Tiered",
+    subtitle: "Confirmed first-buy tracking",
+    icon: "↗",
+    description:
+      "Follows the earliest qualifying buy from proven wallets, then demands a second price and liquidity read before entering.",
+    protections: ["Wallet trust 65+", "Eight-second market confirmation", "Atomic position accounting"],
+  },
+`, ""],
+  [
+    '    const [paperResult, shadowResult, tieredResult, walletCountResult, decisionCountResult, decisionResult, readinessResult] =',
+    '    const [paperResult, shadowResult, walletCountResult, decisionCountResult, decisionResult, readinessResult] ='
+  ],
+  ['        supabase.from("tiered_trades").select("id,position_id,pnl_sol,happened_at").limit(3000),\n', ''],
+  ['      aggregateStrategy("tiered", "Tiered", (tieredResult.data ?? []) as TradeRow[]),\n', ''],
+  ['        { id: "tiered", name: "Tiered", pnl: 0, positions: 0, winRate: 0, profitFactor: null },\n', ''],
+  ['    { value: "3", label: "Active strategy engines" },', '    { value: "2", label: "Active Solana strategy engines" },'],
   ['protections: ["Wallet trust 65+", "Eight-second market confirmation", "Atomic position accounting"],',
    'protections: ["Proven-wallet qualification", "Secondary market confirmation", "Atomic position accounting"],'],
   ['trust_below_55: "Trust below 55",', 'trust_below_55: "Wallet quality threshold failed",'],
@@ -33,4 +51,4 @@ for (const [before, after] of replacements) {
 }
 
 fs.writeFileSync(file, source);
-console.log("[build] Sanitized public strategy disclosures.");
+console.log("[build] Sanitized public strategy disclosures and removed Tiered presentation.");
