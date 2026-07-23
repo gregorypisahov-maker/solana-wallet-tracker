@@ -1,4 +1,11 @@
 import { getSupabaseAdmin } from "../lib/supabase";
+import {
+  PAPER_COST_MODEL,
+  appendFailedPaperEntry,
+  calculateEntryExecutionCosts,
+  calculateExitExecutionCosts,
+  shouldSimulateFailedEntry,
+} from "./executionCosts";
 import { getPriceUsd } from "./priceFeed";
 import { AlertInput } from "./types";
 
@@ -6,16 +13,16 @@ const supabase = getSupabaseAdmin();
 
 const RULES = {
   minScore: 10,
-  maxScore: 65, // late-entry guard: score 65-79 entries were net negative
+  maxScore: 65,
   minWallets: 3,
   minAvgBuySol: 0.75,
-  minAvgTrustScore: 55, // trust 60+ entries were strongly profitable, <55 net negative
+  minAvgTrustScore: 55,
   eliteTwoWalletMinAvgBuySol: 1.25,
   eliteTwoWalletMinAvgTrustScore: 60,
   minLiquidityUsd: 15_000,
-  minLiqToMcapRatio: 0.15, // liq/mcap 30%+ was the most profitable band, <15% negative
+  minLiqToMcapRatio: 0.15,
   minMarketCapUsd: 20_000,
-  maxMarketCapUsd: 200_000, // entries above ~200k mcap were net negative
+  maxMarketCapUsd: 200_000,
   blockedConfidenceGrades: new Set(["D"]),
   sizePct: 0.03,
   maxPositions: 3,
@@ -44,6 +51,10 @@ type ShadowPosition = {
   entry_alert: AlertInput;
   position_id: string;
   realized_pnl_sol: number | string;
+  entry_fee_sol: number | string;
+  entry_slippage_sol: number | string;
+  entry_liquidity_usd: number | string | null;
+  cost_model_version: string | null;
 };
 
 let operationTail: Promise<void> = Promise.resolve();
@@ -73,7 +84,11 @@ async function loadState(): Promise<ShadowState> {
 }
 
 async function loadPositions(): Promise<ShadowPosition[]> {
-  const { data, error } = await supabase.from("shadow_positions").select("mint,token_symbol,entry_price,entry_time,size_sol,remaining_pct,peak_multiple,entry_alert,position_id,realized_pnl_sol");
+  const { data, error } = await supabase
+    .from("shadow_positions")
+    .select(
+      "mint,token_symbol,entry_price,entry_time,size_sol,remaining_pct,peak_multiple,entry_alert,position_id,realized_pnl_sol,entry_fee_sol,entry_slippage_sol,entry_liquidity_usd,cost_model_version"
+    );
   if (error) throw new Error(`shadow positions load failed: ${error.message}`);
   return (data ?? []) as ShadowPosition[];
 }
@@ -147,8 +162,46 @@ export async function onShadowAlert(alert: AlertInput): Promise<void> {
       alert.shadowStudyDecision.final_shadow_size_sol = sizeSol;
     }
 
-    const price = (await getPriceUsd(alert.mint)).priceUsd;
+    const priceData = await getPriceUsd(alert.mint);
+    const price = priceData.priceUsd;
+    const entryLiquidityUsd = priceData.liquidityUsd ?? alert.liquidityUsd;
     if (!Number.isFinite(price) || price <= 0) return;
+
+    let entryCosts;
+    try {
+      entryCosts = calculateEntryExecutionCosts(sizeSol, entryLiquidityUsd);
+    } catch (error) {
+      console.error(`[SHADOW SKIP] ${alert.tokenSymbol}: cost model failed closed`, error);
+      return;
+    }
+
+    if (shouldSimulateFailedEntry()) {
+      const updatedBankroll = bankroll - entryCosts.networkFeeSol;
+      const { error: failedStateError } = await supabase
+        .from("shadow_strategy_state")
+        .update({ bankroll_sol: updatedBankroll, updated_at: new Date().toISOString() })
+        .eq("id", 1);
+      if (failedStateError) throw new Error(`shadow failed-entry debit failed: ${failedStateError.message}`);
+      await appendFailedPaperEntry({
+        strategy: "SHADOW",
+        mint: alert.mint,
+        tokenSymbol: alert.tokenSymbol,
+        attemptedSizeSol: sizeSol,
+        liquidityUsd: entryLiquidityUsd,
+        networkFeeSol: entryCosts.networkFeeSol,
+        snapshot: { score: alert.score, wallet_count: alert.walletCount },
+      });
+      console.log(
+        `[SHADOW FAILED ENTRY] ${alert.tokenSymbol}: charged ${entryCosts.networkFeeSol.toFixed(6)} SOL; no position`
+      );
+      return;
+    }
+
+    const totalEntryDebitSol = sizeSol + entryCosts.totalSol;
+    if (totalEntryDebitSol > bankroll) {
+      console.log(`[SHADOW SKIP] ${alert.tokenSymbol}: insufficient cash after costs`);
+      return;
+    }
 
     const now = Date.now();
     const positionId = `shadow_${alert.mint}_${now}`;
@@ -163,19 +216,23 @@ export async function onShadowAlert(alert: AlertInput): Promise<void> {
       entry_alert: alert,
       position_id: positionId,
       realized_pnl_sol: 0,
+      entry_fee_sol: entryCosts.networkFeeSol + entryCosts.swapFeeSol,
+      entry_slippage_sol: entryCosts.slippageSol,
+      entry_liquidity_usd: entryLiquidityUsd,
+      cost_model_version: PAPER_COST_MODEL.enabled ? PAPER_COST_MODEL.version : null,
       updated_at: new Date().toISOString(),
     });
     if (insertError) throw new Error(`shadow position insert failed: ${insertError.message}`);
 
     const { error: stateError } = await supabase
       .from("shadow_strategy_state")
-      .update({ bankroll_sol: bankroll - sizeSol, updated_at: new Date().toISOString() })
+      .update({ bankroll_sol: bankroll - totalEntryDebitSol, updated_at: new Date().toISOString() })
       .eq("id", 1);
     if (stateError) throw new Error(`shadow state update failed: ${stateError.message}`);
 
     console.log(
       `[SHADOW ENTER] ${alert.tokenSymbol} @ $${price} | size ${sizeSol.toFixed(3)} SOL | ` +
-        `multiplier ${sizeMultiplier.toFixed(3)} | score ${alert.score}`
+        `entry costs ${entryCosts.totalSol.toFixed(6)} SOL | multiplier ${sizeMultiplier.toFixed(3)} | score ${alert.score}`
     );
   });
 }
@@ -190,7 +247,8 @@ export async function checkShadowPositions(): Promise<void> {
 
     for (const position of positions) {
       try {
-        const currentPrice = (await getPriceUsd(position.mint)).priceUsd;
+        const priceData = await getPriceUsd(position.mint);
+        const currentPrice = priceData.priceUsd;
         const entryPrice = Number(position.entry_price);
         const currentMultiple = currentPrice / entryPrice;
         const peakMultiple = Math.max(Number(position.peak_multiple), currentMultiple);
@@ -225,9 +283,20 @@ export async function checkShadowPositions(): Promise<void> {
           continue;
         }
 
-        const sizeSol = Number(position.size_sol) * Number(position.remaining_pct);
-        const proceeds = sizeSol * currentMultiple;
-        const pnl = proceeds - sizeSol;
+        const soldPct = Number(position.remaining_pct);
+        const sizeSol = Number(position.size_sol) * soldPct;
+        const grossProceeds = sizeSol * currentMultiple;
+        const grossPnl = grossProceeds - sizeSol;
+        const exitLiquidityUsd =
+          priceData.liquidityUsd ??
+          Number(position.entry_liquidity_usd ?? position.entry_alert.liquidityUsd);
+        const exitCosts = calculateExitExecutionCosts(grossProceeds, exitLiquidityUsd);
+        const allocatedEntryFee = Number(position.entry_fee_sol ?? 0) * soldPct;
+        const allocatedEntrySlippage = Number(position.entry_slippage_sol ?? 0) * soldPct;
+        const exitFee = exitCosts.networkFeeSol + exitCosts.swapFeeSol;
+        const slippage = allocatedEntrySlippage + exitCosts.slippageSol;
+        const proceeds = grossProceeds - exitCosts.totalSol;
+        const pnl = grossPnl - allocatedEntryFee - exitFee - slippage;
         bankroll += proceeds;
 
         const { error: tradeError } = await supabase.from("shadow_trades").insert({
@@ -237,9 +306,16 @@ export async function checkShadowPositions(): Promise<void> {
           reason,
           entry_price: entryPrice,
           exit_price: currentPrice,
-          multiple: Number(currentMultiple.toFixed(4)),
-          sold_pct: Number(position.remaining_pct),
-          pnl_sol: Number(pnl.toFixed(6)),
+          multiple: Number(currentMultiple.toFixed(6)),
+          sold_pct: soldPct,
+          entry_fee_sol: allocatedEntryFee,
+          exit_fee_sol: exitFee,
+          slippage_sol: slippage,
+          gross_pnl_sol: grossPnl,
+          pnl_sol: pnl,
+          cost_model_version:
+            position.cost_model_version ??
+            (PAPER_COST_MODEL.enabled ? PAPER_COST_MODEL.version : null),
           happened_at: new Date().toISOString(),
           entry_alert: position.entry_alert,
         });
@@ -253,7 +329,8 @@ export async function checkShadowPositions(): Promise<void> {
 
         console.log(
           `[SHADOW EXIT] ${position.token_symbol} ${currentMultiple.toFixed(2)}x ` +
-            `(${reason}) | PnL ${pnl >= 0 ? "+" : ""}${pnl.toFixed(3)} SOL`
+            `(${reason}) | gross ${grossPnl >= 0 ? "+" : ""}${grossPnl.toFixed(3)} SOL | ` +
+            `net ${pnl >= 0 ? "+" : ""}${pnl.toFixed(3)} SOL`
         );
       } catch (error) {
         console.error(`[shadow-strategy] ${position.token_symbol} check failed:`, error);

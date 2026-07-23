@@ -9,9 +9,6 @@ export interface AlertInput {
   totalBoughtSol: number;
   marketCapUsd: number;
   liquidityUsd: number;
-  // Optional Phase 3 fields. Undefined for any caller that hasn't been
-  // updated to compute wallet-trust weighting yet, so this is fully
-  // backward compatible with the existing onAlert(alert) call sites.
   weightedWalletScore?: number;
   averageTrustScore?: number;
   confidenceGrade?: 'A' | 'B' | 'C' | 'D';
@@ -19,28 +16,30 @@ export interface AlertInput {
   leaderWallet?: string;
   leaderProfile?: ProvenTraderSignalProfile;
   strategyVersion?: string;
-  // Shadow-only experiment metadata. Other strategies ignore these fields.
   shadowSizeMultiplier?: number;
   shadowStudyDecision?: Record<string, unknown>;
 }
+
 export interface OpenPosition {
   mint: string;
   tokenSymbol: string;
   entryPrice: number;
-  entryTime: number; // ms epoch
+  entryTime: number;
   sizeSol: number;
   remainingPct: number;
   peakMultiple: number;
   ladderHits: number[];
   entryAlert: AlertInput;
-  // New: stable identifier for this position, generated once when the position opens
-  // time. Lets analytics correctly group every partial sell belonging
-  // to this position instead of double-counting them as separate trades.
   positionId: string;
-  // Accumulated across ladder sells. The loss streak is updated only
-  // when the complete logical position closes.
   realizedPnlSol: number;
+  // Optional so source remains buildable before the idempotent Railway startup
+  // patch is applied. Every new cost-enabled position writes all four fields.
+  entryFeeSol?: number;
+  entrySlippageSol?: number;
+  entryLiquidityUsd?: number;
+  costModelVersion?: string | null;
 }
+
 export interface TradeRecord {
   tokenSymbol: string;
   mint: string;
@@ -52,15 +51,18 @@ export interface TradeRecord {
   soldPct: number;
   soldSizeSol: number;
   proceedsSol: number;
+  grossPnlSol?: number;
+  entryFeeSol?: number;
+  exitFeeSol?: number;
+  slippageSol?: number;
   pnlSol: number;
+  costModelVersion?: string | null;
   holdMinutes: number;
   timestamp: string;
   entryAlert: AlertInput;
-  // New. Nullable because historical rows won't have this until
-  // scripts/backfillPositionIds.ts has been run against them. All new
-  // rows written by the updated engine.ts always populate it.
   positionId: string | null;
 }
+
 export interface PaperState {
   bankrollSol: number;
   dailyStartBankrollSol: number;

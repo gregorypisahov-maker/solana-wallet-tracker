@@ -1,5 +1,9 @@
 import { getSupabaseAdmin } from "../lib/supabase";
 import { config } from "./config";
+import {
+  PAPER_COST_MODEL,
+  calculateExitExecutionCosts,
+} from "./executionCosts";
 import { applyExitFriction } from "./executionFriction";
 import { getPriceUsd } from "./priceFeed";
 import { evaluateSharedPaperExit } from "./sharedPaperExit";
@@ -54,19 +58,24 @@ async function checkTieredPositions(): Promise<void> {
         const entryPrice = numberValue(position.entry_price);
         if (priceIsSuspect(position.position_id, entryPrice, rawPrice)) continue;
 
-        const exitPrice = applyExitFriction(rawPrice, config.execution.exitFrictionPct);
+        const exitPrice = PAPER_COST_MODEL.enabled
+          ? rawPrice
+          : applyExitFriction(rawPrice, config.execution.exitFrictionPct);
         if (!Number.isFinite(exitPrice) || exitPrice <= 0) continue;
 
         const ladderHits = Array.isArray(position.ladder_hits)
           ? position.ladder_hits.map(Number)
           : [];
-        const decision = evaluateSharedPaperExit({
-          entryPrice,
-          entryTime: Date.parse(position.entry_time),
-          remainingPct: numberValue(position.remaining_pct, 1),
-          peakMultiple: numberValue(position.peak_multiple, 1),
-          ladderHits,
-        }, exitPrice);
+        const decision = evaluateSharedPaperExit(
+          {
+            entryPrice,
+            entryTime: Date.parse(position.entry_time),
+            remainingPct: numberValue(position.remaining_pct, 1),
+            peakMultiple: numberValue(position.peak_multiple, 1),
+            ladderHits,
+          },
+          exitPrice
+        );
 
         if (decision.actions.length === 0) {
           const { error: peakError } = await supabase.rpc("tiered_record_peak", {
@@ -82,15 +91,39 @@ async function checkTieredPositions(): Promise<void> {
           const rung = /^ladder_(.+)x$/.exec(action.reason);
           if (rung) updatedHits.push(Number(rung[1]));
 
-          const { data: result, error: exitError } = await supabase.rpc("tiered_apply_exit", {
-            p_position_id: position.position_id,
-            p_exit_price: exitPrice,
-            p_requested_sold_pct: action.soldPct,
-            p_reason: action.reason,
-            p_action_terminal: action.terminal,
-            p_peak_multiple: decision.peakMultiple,
-            p_ladder_hits: updatedHits,
-          });
+          const soldSizeSol = numberValue(position.size_sol) * action.soldPct;
+          const grossMultiple = exitPrice / entryPrice;
+          const grossProceedsSol = soldSizeSol * grossMultiple;
+          const exitLiquidityUsd =
+            raw.liquidityUsd ??
+            numberValue(
+              position.entry_liquidity_usd ??
+                position.filter_snapshot?.price_snapshot?.liquidityUsd ??
+                position.filter_snapshot?.market?.liquidityUsd
+            );
+          const exitCosts = calculateExitExecutionCosts(
+            grossProceedsSol,
+            exitLiquidityUsd
+          );
+          const exitFeeSol = exitCosts.networkFeeSol + exitCosts.swapFeeSol;
+
+          const { data: result, error: exitError } = await supabase.rpc(
+            "tiered_apply_exit",
+            {
+              p_position_id: position.position_id,
+              p_exit_price: exitPrice,
+              p_requested_sold_pct: action.soldPct,
+              p_reason: action.reason,
+              p_action_terminal: action.terminal,
+              p_peak_multiple: decision.peakMultiple,
+              p_ladder_hits: updatedHits,
+              p_exit_fee_sol: exitFeeSol,
+              p_exit_slippage_sol: exitCosts.slippageSol,
+              p_cost_model_version: PAPER_COST_MODEL.enabled
+                ? PAPER_COST_MODEL.version
+                : null,
+            }
+          );
           if (exitError) throw new Error(`tiered atomic exit failed: ${exitError.message}`);
           if (!result?.applied) {
             if (result?.reason === "position_not_found") break;
@@ -99,7 +132,8 @@ async function checkTieredPositions(): Promise<void> {
 
           console.log(
             `[tiered-exit] ${position.token_symbol} ${action.reason} ` +
-            `${Number(result.pnl_sol) >= 0 ? "+" : ""}${Number(result.pnl_sol).toFixed(4)} SOL`
+              `gross ${Number(result.gross_pnl_sol) >= 0 ? "+" : ""}${Number(result.gross_pnl_sol).toFixed(4)} SOL | ` +
+              `net ${Number(result.pnl_sol) >= 0 ? "+" : ""}${Number(result.pnl_sol).toFixed(4)} SOL`
           );
           if (result.halted) {
             console.warn(`[tiered-exit] entries halted: ${result.halt_reason ?? "unknown"}`);
