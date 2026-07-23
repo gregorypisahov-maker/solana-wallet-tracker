@@ -107,26 +107,66 @@ function replaceRequired(path, source, pattern, replacement, marker) {
 
 {
   const replacements = [
-    ["paper-trader/storage.ts", ".from('paper_positions').select('*')", ".from('paper_positions').select('mint,token_symbol,entry_price,entry_time,size_sol,remaining_pct,peak_multiple,ladder_hits,entry_alert,position_id,realized_pnl_sol')"],
-    ["paper-trader/shadowStrategy.ts", '.from("shadow_positions").select("*")', '.from("shadow_positions").select("mint,token_symbol,entry_price,entry_time,size_sol,remaining_pct,peak_multiple,entry_alert,position_id,realized_pnl_sol")'],
-    ["paper-trader/tieredEntryShadow.ts", '.select("*")\n      .order("entry_time", { ascending: true });', '.select("mint,token_symbol,entry_price,entry_time,size_sol,remaining_pct,peak_multiple,ladder_hits,position_id,realized_pnl_sol")\n      .order("entry_time", { ascending: true });'],
-    ["paper-trader/momentumScalper.ts", '.from("scalp_positions").select("*").order("entry_time", { ascending: true })', '.from("scalp_positions").select("position_id,mint,token_symbol,pair_address,entry_price_usd,entry_time,size_sol,peak_price_usd").order("entry_time", { ascending: true })'],
-    ["paper-trader/scalperShadow.ts", 'const CHECK_MS = 5_000;', 'const CHECK_MS = Math.max(5_000, Number(process.env.SCALPER_SHADOW_POSITION_CHECK_MS ?? 6_000));'],
-    ["paper-trader/scalperShadow.ts", 'supabase.from("scalper_shadow_positions").select("*")', 'supabase.from("scalper_shadow_positions").select("mint")'],
-    ["paper-trader/scalperShadow.ts", 'supabase.from("scalper_shadow_positions").select("*");', 'supabase.from("scalper_shadow_positions").select("position_id,mint,token_symbol,pair_address,entry_price_usd,entry_time,size_sol,peak_price_usd,entry_snapshot");'],
-    ["paper-trader/momentumScalper.ts", 'boundedInterval(process.env.SCALP_POSITION_CHECK_MS, 3_000, 3_000, 60_000)', 'boundedInterval(process.env.SCALP_POSITION_CHECK_MS, 6_000, 5_000, 60_000)'],
+    {
+      path: "paper-trader/storage.ts",
+      before: ".from('paper_positions').select('*')",
+      after: ".from('paper_positions').select('mint,token_symbol,entry_price,entry_time,size_sol,remaining_pct,peak_multiple,ladder_hits,entry_alert,position_id,realized_pnl_sol,entry_fee_sol,entry_slippage_sol,entry_liquidity_usd,cost_model_version')",
+      markers: ["entry_fee_sol,entry_slippage_sol,entry_liquidity_usd,cost_model_version"],
+    },
+    {
+      path: "paper-trader/shadowStrategy.ts",
+      before: '.from("shadow_positions").select("*")',
+      after: '.from("shadow_positions").select("mint,token_symbol,entry_price,entry_time,size_sol,remaining_pct,peak_multiple,entry_alert,position_id,realized_pnl_sol,entry_fee_sol,entry_slippage_sol,entry_liquidity_usd,cost_model_version")',
+      markers: ["entry_fee_sol,entry_slippage_sol,entry_liquidity_usd,cost_model_version"],
+    },
+    {
+      path: "paper-trader/tieredEntryShadow.ts",
+      before: '.select("*")\n      .order("entry_time", { ascending: true });',
+      after: '.select("mint,token_symbol,entry_price,entry_time,size_sol,remaining_pct,peak_multiple,ladder_hits,position_id,realized_pnl_sol,entry_liquidity_usd,filter_snapshot")\n      .order("entry_time", { ascending: true });',
+      markers: ["entry_liquidity_usd,filter_snapshot"],
+    },
+    {
+      path: "paper-trader/momentumScalper.ts",
+      before: '.from("scalp_positions").select("*").order("entry_time", { ascending: true })',
+      after: '.from("scalp_positions").select("position_id,mint,token_symbol,pair_address,entry_price_usd,entry_time,size_sol,peak_price_usd").order("entry_time", { ascending: true })',
+      markers: [],
+    },
+    {
+      path: "paper-trader/scalperShadow.ts",
+      before: "const CHECK_MS = 5_000;",
+      after: "const CHECK_MS = Math.max(5_000, Number(process.env.SCALPER_SHADOW_POSITION_CHECK_MS ?? 6_000));",
+      markers: [],
+    },
+    {
+      path: "paper-trader/scalperShadow.ts",
+      before: 'supabase.from("scalper_shadow_positions").select("*")',
+      after: 'supabase.from("scalper_shadow_positions").select("mint")',
+      markers: [],
+    },
+    {
+      path: "paper-trader/scalperShadow.ts",
+      before: 'supabase.from("scalper_shadow_positions").select("*");',
+      after: 'supabase.from("scalper_shadow_positions").select("position_id,mint,token_symbol,pair_address,entry_price_usd,entry_time,size_sol,peak_price_usd,entry_snapshot");',
+      markers: [],
+    },
+    {
+      path: "paper-trader/momentumScalper.ts",
+      before: "boundedInterval(process.env.SCALP_POSITION_CHECK_MS, 3_000, 3_000, 60_000)",
+      after: "boundedInterval(process.env.SCALP_POSITION_CHECK_MS, 6_000, 5_000, 60_000)",
+      markers: [],
+    },
   ];
   const grouped = new Map();
-  for (const [path, before, after] of replacements) {
-    const list = grouped.get(path) ?? [];
-    list.push([before, after]);
-    grouped.set(path, list);
+  for (const replacement of replacements) {
+    const list = grouped.get(replacement.path) ?? [];
+    list.push(replacement);
+    grouped.set(replacement.path, list);
   }
   for (const [path, list] of grouped) {
     let source = read(path);
     let changed = false;
-    for (const [before, after] of list) {
-      if (source.includes(after)) continue;
+    for (const { before, after, markers } of list) {
+      if (source.includes(after) || markers.some((marker) => source.includes(marker))) continue;
       if (!source.includes(before)) throw new Error(`Could not patch ${path}; target not found: ${before}`);
       source = source.replace(before, after);
       changed = true;

@@ -48,5 +48,39 @@ jobs:
       - name: Fail on P0 test error
         if: steps.p0_tests.outcome == 'failure'
         run: exit 1
-      - name: TypeScript check
+      - name: TypeScript check before runtime patches
         run: npm run typecheck
+      - name: Reproduce Railway Trading Engine startup patch chain
+        id: worker_patch_chain
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          {
+            sed -i 's/const MIN_WALLETS_FOR_ALERT = 3;/const MIN_WALLETS_FOR_ALERT = 2;/' worker/monitor.ts
+            sed -i 's/const MIN_TOTAL_SOL = 1;/const MIN_TOTAL_SOL = 0.5;/' worker/monitor.ts
+            node scripts/patch-profit-protection.mjs
+            node scripts/patch-tiered-runtime.mjs
+            node scripts/patch-market-data-fail-closed.mjs
+            node scripts/patch-paper-entry-confirmation.mjs
+            node scripts/patch-momentum-scalper-exit-only.mjs
+            node scripts/patch-scalper-shadow-exit-only.mjs
+            node scripts/patch-wallet-discovery-pipeline.mjs
+            node scripts/patch-wallet-lab-profiler.mjs
+            node scripts/patch-supabase-egress.mjs
+            node scripts/patch-binance-futures-paper.mjs
+            node scripts/patch-helius-intake-rate-limit.mjs
+            node scripts/patch-p0-main-costs.mjs
+            node scripts/patch-p0-tiered-entry-costs.mjs
+            npm run typecheck
+          } > worker-startup-patch.log 2>&1
+      - name: Upload worker startup reproduction
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: worker-startup-patch-output
+          path: worker-startup-patch.log
+          if-no-files-found: error
+      - name: Fail on worker startup patch error
+        if: steps.worker_patch_chain.outcome == 'failure'
+        run: exit 1
