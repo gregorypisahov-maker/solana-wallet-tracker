@@ -60,14 +60,14 @@ This is an explicit scenario assumption, not measured production telemetry: the 
 
 | Environment variable | Default |
 |---|---:|
-| `PAPER_COST_MODEL_ENABLED` | `false` |
+| `PAPER_COST_MODEL_ENABLED` | `true` |
 | `PAPER_NETWORK_COST_SOL_PER_TX` | `0.00023043` |
 | `PAPER_SWAP_FEE_PCT_PER_SIDE` | `0.0125` |
 | `PAPER_SLIPPAGE_LIQUIDITY_COEFFICIENT` | `2.0` |
 | `PAPER_COST_SOL_USD_REFERENCE` | `76.6981212318335` |
 | `PAPER_FAILED_TRANSACTION_RATE` | `0.05` |
 
-When the flag is disabled, the existing legacy friction behavior remains available for rollback. When enabled, MAIN and TIERED stop applying the hidden 0.6%-per-side price haircut and instead write explicit gross and net accounting. SHADOW also uses the same explicit model.
+The cost model defaults on after the successful P0 backtest, so new paper trades cannot silently return to optimistic accounting. Setting `PAPER_COST_MODEL_ENABLED=false` restores the existing legacy friction behavior as an emergency rollback. With the model on, MAIN and TIERED stop applying the hidden 0.6%-per-side price haircut and instead write explicit gross and net accounting. SHADOW uses the same explicit model.
 
 ## Historical backfill result
 
