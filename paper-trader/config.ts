@@ -21,8 +21,9 @@ export const config = {
 
   position: {
     simulatedBankrollSol: 10,
-    // Match Shadow: 3% of available paper cash with at most three positions.
-    sizePctPerTrade: 0.03,
+    // Larger paper sizing: 5% of available cash with at most three positions.
+    // Entry and exit rules are unchanged; this only scales PnL and drawdown.
+    sizePctPerTrade: 0.05,
     provenTraderSizeMultiplier: 0.5,
     maxConcurrentPositions: 3,
   },
