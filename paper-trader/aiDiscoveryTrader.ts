@@ -3,12 +3,12 @@ import { getSupabaseAdmin } from "../lib/supabase";
 import { sendTelegramAlert } from "../lib/telegram";
 
 const supabase = getSupabaseAdmin();
-const VERSION = "ai_discovery_trader_v1_4_2026_07_24";
+const VERSION = "ai_discovery_trader_v1_5_2026_07_24";
 const SHADOW_MODEL_VERSION = "baseline_v1_2026_07_24";
 const DEX_URL = "https://api.dexscreener.com/tokens/v1/solana";
 const ENTRY_FRICTION_PCT = 0.6;
 const EXIT_FRICTION_PCT = 0.6;
-const FIXED_SIZE_SOL = 0.1;
+const FIXED_SIZE_SOL = 0.2;
 const MAX_CONSECUTIVE_LOSSES = 3;
 const DAILY_LOSS_LIMIT_SOL = 0.05;
 const MIN_SCORE = 82;
