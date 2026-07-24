@@ -3,12 +3,11 @@ import { getSupabaseAdmin } from "../lib/supabase";
 import { sendTelegramAlert } from "../lib/telegram";
 
 const supabase = getSupabaseAdmin();
-const VERSION = "ai_discovery_trader_v1_2_2026_07_24";
+const VERSION = "ai_discovery_trader_v1_3_2026_07_24";
 const DEX_URL = "https://api.dexscreener.com/tokens/v1/solana";
 const ENTRY_FRICTION_PCT = 0.6;
 const EXIT_FRICTION_PCT = 0.6;
 const FIXED_SIZE_SOL = 0.1;
-const MAX_DAILY_ENTRIES = 4;
 const MAX_CONSECUTIVE_LOSSES = 3;
 const DAILY_LOSS_LIMIT_SOL = 0.05;
 const MIN_SCORE = 82;
@@ -58,7 +57,7 @@ async function scanEntries(): Promise<void> {
     await supabase.from("ai_discovery_state").update({ last_scan_at: now, updated_at: now }).eq("id", 1);
     await maybeSummary().catch((error) => console.warn("[ai-discovery-trader] summary failed", error));
     if (!state.enabled || state.halted) return;
-    if (state.entries_today >= MAX_DAILY_ENTRIES || n(state.daily_realized_pnl_sol) <= -DAILY_LOSS_LIMIT_SOL || state.consecutive_losses >= MAX_CONSECUTIVE_LOSSES) { const reason = state.entries_today >= MAX_DAILY_ENTRIES ? "daily_entry_limit" : n(state.daily_realized_pnl_sol) <= -DAILY_LOSS_LIMIT_SOL ? "daily_loss_limit" : "consecutive_loss_limit"; await supabase.from("ai_discovery_state").update({ halted: true, halt_reason: reason, updated_at: now }).eq("id", 1); return; }
+    if (n(state.daily_realized_pnl_sol) <= -DAILY_LOSS_LIMIT_SOL || state.consecutive_losses >= MAX_CONSECUTIVE_LOSSES) { const reason = n(state.daily_realized_pnl_sol) <= -DAILY_LOSS_LIMIT_SOL ? "daily_loss_limit" : "consecutive_loss_limit"; await supabase.from("ai_discovery_state").update({ halted: true, halt_reason: reason, updated_at: now }).eq("id", 1); return; }
     if ((await loadPositions()).length > 0) return;
     const cutoff = new Date(Date.now() - MAX_OPPORTUNITY_AGE_MS).toISOString();
     const { data, error } = await supabase.from("market_opportunities").select("*").eq("status", "armed").gte("score", MIN_SCORE).gte("last_seen_at", cutoff).order("score", { ascending: false }).limit(10);
@@ -106,4 +105,4 @@ async function managePositions(): Promise<void> {
   } finally { positionRunning = false; }
 }
 
-export function startAiDiscoveryTrader(): void { if (!enabled()) { console.log("[ai-discovery-trader] disabled by ENABLE_AI_DISCOVERY_TRADER"); return; } console.log(`[ai-discovery-trader] ${VERSION} enabled; paper-only; size ${FIXED_SIZE_SOL.toFixed(2)} SOL; score ${MIN_SCORE}+`); void scanEntries().catch((error) => console.error("[ai-discovery-trader] initial scan failed", error)); void managePositions().catch((error) => console.error("[ai-discovery-trader] initial position check failed", error)); setInterval(() => void scanEntries().catch((error) => console.error("[ai-discovery-trader] scan failed", error)), 60_000); setInterval(() => void managePositions().catch((error) => console.error("[ai-discovery-trader] position check failed", error)), 10_000); }
+export function startAiDiscoveryTrader(): void { if (!enabled()) { console.log("[ai-discovery-trader] disabled by ENABLE_AI_DISCOVERY_TRADER"); return; } console.log(`[ai-discovery-trader] ${VERSION} enabled; paper-only; no daily entry pause; size ${FIXED_SIZE_SOL.toFixed(2)} SOL; score ${MIN_SCORE}+`); void scanEntries().catch((error) => console.error("[ai-discovery-trader] initial scan failed", error)); void managePositions().catch((error) => console.error("[ai-discovery-trader] initial position check failed", error)); setInterval(() => void scanEntries().catch((error) => console.error("[ai-discovery-trader] scan failed", error)), 60_000); setInterval(() => void managePositions().catch((error) => console.error("[ai-discovery-trader] position check failed", error)), 10_000); }
