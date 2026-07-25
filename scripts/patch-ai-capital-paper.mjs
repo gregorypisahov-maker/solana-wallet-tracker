@@ -38,7 +38,7 @@ patch("worker/telegramBot.ts", [
   {
     from: '    "/aistats — AI discovery paper trading performance",',
     to: '    "/aistats — AI discovery paper trading performance",\n    "/aicapital — 5× AI paper mirror performance",',
-    marker: '"/aicapital — 5× AI paper mirror performance"',
+    marker: '"/aicapital — 5× AI paper mirror performance"'
   },
   {
     from: '    [{ text: "🧠 AI Stats", callback_data: "/aistats" }, { text: "📉 Binance Paper", callback_data: "/binancestats" }],',
@@ -111,6 +111,64 @@ patch("app/page.tsx", [
     from: 'id === "ai-discovery" ? "AI" : "◆"',
     to: 'id === "ai-discovery" ? "AI" : id === "ai-capital" ? "5×" : "◆"',
     marker: 'id === "ai-capital" ? "5×"',
+  },
+  {
+    from: '  const selectedBot = data?.bots.find((bot) => bot.id === selected);',
+    to: `  const manualSell = async (bot: Bot) => {
+    if (!["ai-discovery", "ai-capital"].includes(bot.id) || bot.openPositions === 0) return;
+    const token = bot.positions[0] ? positionSymbol(bot.positions[0]) : "the open AI trade";
+    const confirmed = confirm(
+      \`Sell \${token} now at the live paper price? This closes both AI Discovery and AI Capital so their accounting stays aligned.\`
+    );
+    if (!confirmed) return;
+    const ownerPassword = prompt("Owner password required for manual paper sell");
+    if (!ownerPassword) return;
+
+    setNotice(\`Submitting manual paper sell for \${token}…\`);
+    const response = await fetch("/api/ai-manual-close", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: \`Basic \${btoa(\`owner:\${ownerPassword}\`)}\`,
+      },
+      body: JSON.stringify({ requestedFrom: bot.id }),
+    });
+    const result = await response.json().catch(() => ({}));
+    if (response.ok) {
+      const sourcePnl = Number(result.sourcePnlSol ?? 0);
+      const capitalText = result.capitalClosed
+        ? \` · AI Capital \${sol(Number(result.capitalPnlSol ?? 0))}\`
+        : "";
+      setNotice(\`Manual paper sell completed: AI Discovery \${sol(sourcePnl)}\${capitalText}\`);
+    } else {
+      setNotice(result.error ?? "Manual paper sell failed");
+    }
+    await refresh();
+  };
+
+  const selectedBot = data?.bots.find((bot) => bot.id === selected);`,
+    marker: '"/api/ai-manual-close"',
+  },
+  {
+    from: '    return <BotDetail bot={selectedBot} now={now} back={() => setSelected(null)} control={control} />;',
+    to: '    return <BotDetail bot={selectedBot} now={now} back={() => setSelected(null)} control={control} manualSell={manualSell} />;',
+    marker: 'manualSell={manualSell}',
+  },
+  {
+    from: 'function BotDetail({ bot, now, back, control }: { bot: Bot; now: number; back: () => void; control: (bot: Bot, action: "resume" | "pause") => void }) {',
+    to: 'function BotDetail({ bot, now, back, control, manualSell }: { bot: Bot; now: number; back: () => void; control: (bot: Bot, action: "resume" | "pause") => void; manualSell: (bot: Bot) => void }) {',
+    marker: 'control, manualSell }',
+  },
+  {
+    from: '      <div className="v2Actions"><button onClick={() => control(bot, "resume")}>Resume</button><button className="danger" onClick={() => control(bot, "pause")}>Pause</button></div>',
+    to: `      <div className="v2Actions">
+        {(bot.id === "ai-discovery" || bot.id === "ai-capital") && bot.openPositions > 0 && (
+          <button className="danger" onClick={() => manualSell(bot)}>Sell now (paper)</button>
+        )}
+        <button onClick={() => control(bot, "resume")}>Resume</button>
+        <button className="danger" onClick={() => control(bot, "pause")}>Pause</button>
+      </div>`,
+    marker: 'Sell now (paper)',
   },
 ]);
 
