@@ -11,6 +11,7 @@ import {
   handleResume,
   handleScalpStats,
 } from "../paper-trader/telegramCommands";
+import { handleAiStats } from "../paper-trader/aiDiscoveryStats";
 import { handleBinanceFuturesStats } from "../paper-trader/binanceFuturesStats";
 import { handleWalletScan } from "./walletScanCommand";
 import {
@@ -55,7 +56,7 @@ const AUTHORIZED_CHAT_IDS = new Set([TELEGRAM_CHAT_ID, ...EXTRA_CHAT_IDS].filter
 const POLL_TIMEOUT_SECONDS = 30;
 const CONFLICT_BACKOFF_MIN_MS = 65_000;
 const CONFLICT_BACKOFF_JITTER_MS = 30_000;
-const TELEGRAM_WORKER_VERSION = "2026-07-23-tiered-removed";
+const TELEGRAM_WORKER_VERSION = "2026-07-25-ai-stats";
 
 if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
   console.error("[telegram-bot] TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID must be set. Exiting.");
@@ -165,6 +166,7 @@ async function handleHelp(): Promise<string> {
     "<b>📊 Status</b>",
     "/paperstats — Wallet-based paper trading performance",
     "/scalpstats — Parallel momentum scalper performance",
+    "/aistats — AI discovery paper trading performance",
     "/binancestats — BTCUSDT futures paper bot",
     "/readiness — Bot readiness check",
     "/heliusstats — Helius credit usage", "",
@@ -192,7 +194,8 @@ function helpKeyboard(): InlineKeyboard {
   if (/^https:\/\//i.test(DASHBOARD_URL)) rows.push([{ text: "🌐 Command Center", url: DASHBOARD_URL }]);
   rows.push(
     [{ text: "📊 Paper Stats", callback_data: "/paperstats" }, { text: "⚡ Scalp Stats", callback_data: "/scalpstats" }],
-    [{ text: "📉 Binance Paper", callback_data: "/binancestats" }, { text: "✅ Readiness", callback_data: "/readiness" }],
+    [{ text: "🧠 AI Stats", callback_data: "/aistats" }, { text: "📉 Binance Paper", callback_data: "/binancestats" }],
+    [{ text: "✅ Readiness", callback_data: "/readiness" }],
     [{ text: "▶️ Resume Paper", callback_data: "/resume" }, { text: "⚡ Resume Scalp", callback_data: "/resume_scalp" }],
     [{ text: "🧠 Auto Wallets", callback_data: "/auto_wallets" }, { text: "🔄 Wallet Scan", callback_data: "/walletscan" }],
   );
@@ -207,6 +210,9 @@ const COMMAND_HANDLERS: Record<string, () => Promise<string>> = {
   "/scalpstats": handleScalpStats,
   "/scalp_stats": handleScalpStats,
   "/scalper": handleScalpStats,
+  "/aistats": handleAiStats,
+  "/ai_stats": handleAiStats,
+  "/aidiscovery": handleAiStats,
   "/binancestats": handleBinanceFuturesStats,
   "/binance_stats": handleBinanceFuturesStats,
   "/futuresstats": handleBinanceFuturesStats,
@@ -290,7 +296,7 @@ async function sleep(ms: number): Promise<void> {
 
 async function pollLoop(): Promise<void> {
   console.log(`[telegram-bot] Starting inbound command listener (${TELEGRAM_WORKER_VERSION})...`);
-  console.log("[telegram-bot] Commands ready: /paperstats /scalpstats /binancestats /walletstats /exitstats /scorestats /heliusstats /readiness /resume /resume_scalp");
+  console.log("[telegram-bot] Commands ready: /paperstats /scalpstats /aistats /binancestats /walletstats /exitstats /scorestats /heliusstats /readiness /resume /resume_scalp");
   await validateToken();
   while (true) {
     try {
