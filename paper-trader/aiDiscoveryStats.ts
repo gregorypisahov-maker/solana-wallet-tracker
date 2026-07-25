@@ -66,10 +66,15 @@ export async function handleAiStats(): Promise<string> {
     const size = n(position.size_sol);
     return sum + (entry > 0 ? size * (current / entry) : size);
   }, 0);
+  const reservedCapital = positions.reduce((sum, position) => sum + n(position.size_sol), 0);
+  const startingBankroll = n(state?.starting_bankroll_sol, 1);
   const cash = n(state?.bankroll_sol);
   const equity = cash + openValue;
+  const expectedCash = startingBankroll + pnl - reservedCapital;
+  const accountingDelta = cash - expectedCash;
+  const accountingHealthy = Math.abs(accountingDelta) < 0.00001;
   const winRate = completed ? (wins / completed) * 100 : 0;
-  const sampleReady = completed >= 100;
+  const sampleReady = completed >= 200;
   const edgeReady = profitFactor >= 1.3 && winRate >= 45;
   const drawdownReady = maxDrawdown <= Math.max(0.1, Math.abs(pnl) * 0.75);
   const sizeRecommendation = sampleReady && edgeReady && drawdownReady
@@ -85,9 +90,13 @@ export async function handleAiStats(): Promise<string> {
     "🧠⚡ <b>AI DISCOVERY PAPER STATS</b>",
     "",
     status,
+    `Starting bankroll: ${startingBankroll.toFixed(4)} SOL`,
     `Equity: <b>${equity.toFixed(4)} SOL</b>`,
     `Cash: ${cash.toFixed(4)} SOL`,
     `Total PnL: <b>${signedSol(pnl)}</b>`,
+    accountingHealthy
+      ? "Accounting check: ✅ balanced"
+      : `Accounting check: ⚠️ mismatch ${signedSol(accountingDelta, 5)}`,
     "",
     `Completed trades: <b>${completed}</b>`,
     `Wins / losses: <b>${wins}W / ${losses}L</b>${breakeven ? ` / ${breakeven} flat` : ""}`,
@@ -107,7 +116,7 @@ export async function handleAiStats(): Promise<string> {
     `Max hold: ${(exitCounts.max_hold ?? 0) + (exitCounts.max_hold_price_unavailable ?? 0)}`,
     "",
     "<b>Position-size check</b>",
-    `${sampleReady ? "✅" : "❌"} At least 100 completed trades (${completed}/100)`,
+    `${sampleReady ? "✅" : "❌"} At least 200 completed trades (${completed}/200)`,
     `${profitFactor >= 1.3 ? "✅" : "❌"} Profit factor at least 1.30`,
     `${winRate >= 45 ? "✅" : "❌"} Win rate at least 45%`,
     `${drawdownReady ? "✅" : "❌"} Drawdown within current safety threshold`,
