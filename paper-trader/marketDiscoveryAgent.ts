@@ -1,4 +1,5 @@
 import { getSupabaseAdmin } from "../lib/supabase";
+import { FetchPriority, fetchJsonQueued, logAndResetFetchQueueStats } from "./fetchQueue";
 
 const supabase = getSupabaseAdmin();
 const VERSION = "market_discovery_ai_v1_2026_07_24";
@@ -67,22 +68,14 @@ function enabled(): boolean {
 }
 
 async function fetchJson(url: string): Promise<any> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-  try {
-    const response = await fetch(url, {
-      cache: "no-store",
-      signal: controller.signal,
-      headers: {
-        Accept: "application/vnd.api+json;version=20230302",
-        "User-Agent": "solana-market-discovery-ai/1.0",
-      },
-    });
-    if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
-    return await response.json();
-  } finally {
-    clearTimeout(timeout);
-  }
+  return fetchJsonQueued(url, {
+    priority: FetchPriority.NORMAL,
+    timeoutMs: REQUEST_TIMEOUT_MS,
+    headers: {
+      Accept: "application/vnd.api+json;version=20230302",
+      "User-Agent": "solana-market-discovery-ai/1.0",
+    },
+  });
 }
 
 function parse(row: any): Candidate | null {
@@ -130,9 +123,7 @@ async function discover(): Promise<Candidate[]> {
       if (!existing || candidate.liquidityUsd > existing.liquidityUsd) byMint.set(candidate.mint, candidate);
     }
   }
-  if (byMint.size === 0 && results.every((result) => result.status === "rejected")) {
-    throw new Error("all discovery feeds failed");
-  }
+  if (results.every((result) => result.status === "rejected")) throw new Error("all discovery feeds failed");
   return [...byMint.values()];
 }
 
@@ -262,13 +253,9 @@ export async function runMarketDiscoveryScan(): Promise<void> {
     const now = new Date().toISOString();
     const message = error instanceof Error ? error.message : String(error);
     console.error("[market-discovery-ai] scan failed:", error);
-    await supabase.from("market_discovery_runs").insert({
-      started_at: startedAt,
-      finished_at: now,
-      status: "error",
-      message,
-      snapshot: { version: VERSION },
-    });
+    await supabase.from("market_discovery_runs").insert({ started_at: startedAt, finished_at: now, status: "error", message, snapshot: { version: VERSION } });
+  } finally {
+    logAndResetFetchQueueStats();
   }
 }
 
