@@ -58,7 +58,7 @@ if (compact.includes('aiState, aiPositions, aiTrades')) {
   patch(compactPath, [
     {
       from: '    aiState, aiPositions, aiTrades, marketOpportunities, marketRuns,\n    wallets, walletPerformance, tokenScores, readiness, adaptive, usage,',
-      to: '    aiState, aiPositions, aiTrades, marketOpportunities, marketRuns,\n    aiCapitalState, aiCapitalPositions, aiCapitalTrades,\n    wallets, walletPerformance, tokenScores, readiness, adaptive, usage,',
+      to: '    aiState, aiPositions, aiTrades,\n    aiCapitalState, aiCapitalPositions, aiCapitalTrades,\n    marketOpportunities, marketRuns,\n    wallets, walletPerformance, tokenScores, readiness, adaptive, usage,',
       marker: 'aiCapitalState, aiCapitalPositions, aiCapitalTrades',
     },
     {
@@ -68,8 +68,8 @@ if (compact.includes('aiState, aiPositions, aiTrades')) {
     },
     {
       from: 'scalpScans, aiState, aiPositions, aiTrades, marketOpportunities, marketRuns, wallets,',
-      to: 'scalpScans, aiState, aiPositions, aiTrades, marketOpportunities, marketRuns, aiCapitalState, aiCapitalPositions, aiCapitalTrades, wallets,',
-      marker: 'marketRuns, aiCapitalState, aiCapitalPositions, aiCapitalTrades, wallets',
+      to: 'scalpScans, aiState, aiPositions, aiTrades, aiCapitalState, aiCapitalPositions, aiCapitalTrades, marketOpportunities, marketRuns, wallets,',
+      marker: 'aiTrades, aiCapitalState, aiCapitalPositions, aiCapitalTrades, marketOpportunities',
     },
     {
       from: '  const aiDiscovery = summarize(aiTrades.data ?? [], "pnl_sol", "closed_at");',
