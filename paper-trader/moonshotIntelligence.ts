@@ -29,7 +29,8 @@ export function evaluateMoonshot(input: MoonshotInput): MoonshotDecision {
   const mode = moonshotMode();
   if (mode === "disabled") return { engaged: false, action: "normal_exit_logic", reason: "disabled" };
 
-  const triggerPct = Math.max(100, num("MOONSHOT_TRIGGER_GROSS_PCT", 100));
+  // Handoff begins around the normal take-profit level. Shadow mode only records decisions.
+  const triggerPct = Math.max(6, num("MOONSHOT_TRIGGER_GROSS_PCT", 10));
   const trailingDropPct = Math.max(10, num("MOONSHOT_TRAILING_DROP_PCT", 35));
   const maxHoldMs = Math.max(45 * 60_000, num("MOONSHOT_MAX_HOLD_MINUTES", 360) * 60_000);
   const minLiquidityUsd = Math.max(0, num("MOONSHOT_MIN_LIQUIDITY_USD", 25_000));
