@@ -2,7 +2,7 @@ import { Connection, Keypair, PublicKey, VersionedTransaction } from "@solana/we
 
 const JUPITER_QUOTE = "https://quote-api.jup.ag/v6/quote";
 const JUPITER_SWAP = "https://quote-api.jup.ag/v6/swap";
-const SOL_MINT = "So11111111111111111111111111111111111111112";
+export const SOL_MINT = "So11111111111111111111111111111111111111112";
 
 function decodeBase58(value: string): Uint8Array {
   const alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
@@ -51,6 +51,27 @@ export function getLiveSigner(): Keypair {
   return keypair;
 }
 
+export function getLiveConnection(): Connection {
+  const rpcUrl = getRpcUrl();
+  if (!rpcUrl) throw new Error("Solana RPC is not configured");
+  return new Connection(rpcUrl, "confirmed");
+}
+
+export async function getWalletSolLamports(): Promise<number> {
+  const signer = getLiveSigner();
+  return getLiveConnection().getBalance(signer.publicKey, "confirmed");
+}
+
+export async function getWalletTokenRawAmount(mint: string): Promise<bigint> {
+  const signer = getLiveSigner();
+  const connection = getLiveConnection();
+  const accounts = await connection.getParsedTokenAccountsByOwner(signer.publicKey, { mint: new PublicKey(mint) }, "confirmed");
+  return accounts.value.reduce((total, account) => {
+    const amount = account.account.data.parsed?.info?.tokenAmount?.amount;
+    return total + (typeof amount === "string" ? BigInt(amount) : 0n);
+  }, 0n);
+}
+
 export async function getLiveWalletHealth() {
   const rpcUrl = getRpcUrl();
   const publicKey = getConfiguredPublicKey();
@@ -70,33 +91,41 @@ export async function getLiveWalletHealth() {
   return { rpcConfigured: Boolean(rpcUrl), publicKey, signerConfigured, armed, enabled, balanceSol, error };
 }
 
-export async function executeJupiterBuy(input: {
+export async function executeJupiterSwap(input: {
+  inputMint: string;
   outputMint: string;
-  lamports: number;
+  rawAmount: string;
   slippageBps: number;
 }) {
   if (process.env.LIVE_TRADING_ENABLED !== "true" || process.env.LIVE_EXECUTION_ARMED !== "true") {
     throw new Error("Live execution is not enabled and armed");
   }
-  const rpcUrl = getRpcUrl();
-  if (!rpcUrl) throw new Error("Solana RPC is not configured");
-  if (!Number.isInteger(input.lamports) || input.lamports <= 0) throw new Error("Invalid lamport amount");
-  if (input.slippageBps < 10 || input.slippageBps > 500) throw new Error("Slippage must be 10-500 bps");
+  if (!/^\d+$/.test(input.rawAmount) || BigInt(input.rawAmount) <= 0n) throw new Error("Invalid raw swap amount");
+  if (input.slippageBps < 10 || input.slippageBps > 200) throw new Error("Slippage must be 10-200 bps");
+  new PublicKey(input.inputMint);
+  new PublicKey(input.outputMint);
 
   const signer = getLiveSigner();
   const quoteUrl = new URL(JUPITER_QUOTE);
-  quoteUrl.searchParams.set("inputMint", SOL_MINT);
+  quoteUrl.searchParams.set("inputMint", input.inputMint);
   quoteUrl.searchParams.set("outputMint", input.outputMint);
-  quoteUrl.searchParams.set("amount", String(input.lamports));
+  quoteUrl.searchParams.set("amount", input.rawAmount);
   quoteUrl.searchParams.set("slippageBps", String(input.slippageBps));
   const quoteResponse = await fetch(quoteUrl, { cache: "no-store" });
   if (!quoteResponse.ok) throw new Error(`Jupiter quote failed (${quoteResponse.status})`);
   const quote = await quoteResponse.json();
+  if (!quote?.outAmount || BigInt(String(quote.outAmount)) <= 0n) throw new Error("Jupiter returned an empty quote");
 
   const swapResponse = await fetch(JUPITER_SWAP, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ quoteResponse: quote, userPublicKey: signer.publicKey.toBase58(), wrapAndUnwrapSol: true, dynamicComputeUnitLimit: true }),
+    body: JSON.stringify({
+      quoteResponse: quote,
+      userPublicKey: signer.publicKey.toBase58(),
+      wrapAndUnwrapSol: true,
+      dynamicComputeUnitLimit: true,
+      prioritizationFeeLamports: "auto",
+    }),
   });
   if (!swapResponse.ok) throw new Error(`Jupiter swap build failed (${swapResponse.status})`);
   const swap = await swapResponse.json();
@@ -104,9 +133,21 @@ export async function executeJupiterBuy(input: {
 
   const transaction = VersionedTransaction.deserialize(Buffer.from(swap.swapTransaction, "base64"));
   transaction.sign([signer]);
-  const connection = new Connection(rpcUrl, "confirmed");
+  const connection = getLiveConnection();
+  const latest = await connection.getLatestBlockhash("confirmed");
   const signature = await connection.sendRawTransaction(transaction.serialize(), { maxRetries: 3, skipPreflight: false });
-  const confirmation = await connection.confirmTransaction(signature, "confirmed");
+  const confirmation = await connection.confirmTransaction({ signature, ...latest }, "confirmed");
   if (confirmation.value.err) throw new Error(`Transaction failed: ${JSON.stringify(confirmation.value.err)}`);
+  const status = await connection.getSignatureStatus(signature, { searchTransactionHistory: true });
+  if (status.value?.err) throw new Error(`Confirmed transaction has an error: ${JSON.stringify(status.value.err)}`);
   return { signature, quote };
+}
+
+export async function executeJupiterBuy(input: { outputMint: string; lamports: number; slippageBps: number }) {
+  if (!Number.isSafeInteger(input.lamports) || input.lamports <= 0) throw new Error("Invalid lamport amount");
+  return executeJupiterSwap({ inputMint: SOL_MINT, outputMint: input.outputMint, rawAmount: String(input.lamports), slippageBps: input.slippageBps });
+}
+
+export async function executeJupiterSell(input: { inputMint: string; rawTokenAmount: string; slippageBps: number }) {
+  return executeJupiterSwap({ inputMint: input.inputMint, outputMint: SOL_MINT, rawAmount: input.rawTokenAmount, slippageBps: input.slippageBps });
 }
