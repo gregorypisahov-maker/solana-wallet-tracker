@@ -51,7 +51,11 @@ const when = (value: string | null | undefined) => value ? new Intl.DateTimeForm
 }).format(new Date(value)) : "—";
 const solscan = (signature: string | null | undefined) => signature ? `https://solscan.io/tx/${encodeURIComponent(signature)}` : null;
 
-export default async function LiveTradingPage() {
+export default async function LiveTradingPage({
+  searchParams,
+}: {
+  searchParams?: { stopped?: string; stop_error?: string };
+}) {
   const health = await getLiveWalletHealth();
   const limitsConfigured = Boolean(process.env.LIVE_MAX_POSITION_USD && process.env.LIVE_MAX_DAILY_LOSS_USD);
   const databaseControlsConfigured = Boolean((process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL) && process.env.SUPABASE_SERVICE_ROLE_KEY);
@@ -96,6 +100,8 @@ export default async function LiveTradingPage() {
   const lastOrder = orders[0] ?? null;
   const heartbeatFresh = executor?.last_heartbeat_at ? Date.now() - Date.parse(executor.last_heartbeat_at) < 60_000 : false;
   const automationActive = fullyReady && Boolean(executor?.enabled) && !executor?.halted && heartbeatFresh;
+  const stopConfirmed = searchParams?.stopped === "1";
+  const stopError = searchParams?.stop_error ? decodeURIComponent(searchParams.stop_error) : null;
 
   return (
     <main className="livePage">
@@ -104,6 +110,20 @@ export default async function LiveTradingPage() {
         <div className={automationActive ? "status ready" : fullyReady ? "status safe" : "status safe"}>{automationActive ? "AUTO LIVE" : fullyReady ? "ARMED — WAITING FOR WORKER" : "FAIL-CLOSED"}</div>
         <h1>Live Trading Control Center</h1>
         <p>The AI discovery strategy is connected to the guarded live executor. Fresh paper entries are mirrored automatically and their exits are sold automatically.</p>
+      </section>
+
+      {stopConfirmed && <section className="stopNotice">Live trading is completely stopped. No new live buy or sell signal will be executed.</section>}
+      {stopError && <section className="stopNotice error">Stop failed: {stopError}</section>}
+
+      <section className="emergencyPanel">
+        <div>
+          <span>EMERGENCY CONTROL</span>
+          <h2>Stop all real live trading</h2>
+          <p>This immediately disables the database execution gate, halts the live executor and rejects pending live signals. A transaction already submitted to Solana may still finish.</p>
+        </div>
+        <form action="/api/live/stop" method="post">
+          <button type="submit" className="stopButton">STOP REAL TRADING</button>
+        </form>
       </section>
 
       <section className="liveGrid">
