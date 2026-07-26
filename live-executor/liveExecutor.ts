@@ -1,4 +1,5 @@
 import "dotenv/config";
+import { randomUUID } from "node:crypto";
 import { getSupabaseAdmin } from "../lib/supabase";
 import { executeJupiterBuy, getLiveWalletHealth } from "../lib/liveWallet";
 
@@ -8,7 +9,7 @@ const APPROVED_STRATEGY = "ai_discovery";
 const LAMPORTS_PER_SOL = 1_000_000_000;
 const MIN_WALLET_RESERVE_SOL = Math.max(0.02, Number(process.env.LIVE_MIN_WALLET_RESERVE_SOL) || 0.02);
 
- type ExecutorState = {
+type ExecutorState = {
   enabled: boolean;
   halted: boolean;
   halt_reason: string | null;
@@ -42,9 +43,7 @@ const n = (value: unknown, fallback = 0): number => {
 };
 
 function runtimeArmed(): boolean {
-  // Reuse the two safety locks already shown in the existing /live dashboard.
-  return process.env.LIVE_TRADING_ENABLED === "true" &&
-    process.env.LIVE_EXECUTION_ARMED === "true";
+  return process.env.LIVE_TRADING_ENABLED === "true" && process.env.LIVE_EXECUTION_ARMED === "true";
 }
 
 async function heartbeat(reason?: string): Promise<void> {
@@ -113,8 +112,8 @@ async function nextSignal(): Promise<Signal | null> {
 
 async function claim(signal: Signal): Promise<boolean> {
   const { data, error } = await supabase.from("live_trade_signals").update({
-    status: "processing",
-    processing_started_at: new Date().toISOString(),
+    status: "claimed",
+    claimed_at: new Date().toISOString(),
   }).eq("id", signal.id).eq("status", "pending").select("id").maybeSingle();
   if (error) throw new Error(error.message);
   return Boolean(data?.id);
@@ -122,50 +121,58 @@ async function claim(signal: Signal): Promise<boolean> {
 
 async function executeBuy(signal: Signal, state: ExecutorState): Promise<void> {
   const sizeSol = n(signal.requested_size_sol);
-  const orderId = `buy_${signal.id}`;
-  const { error: orderError } = await supabase.from("live_trade_orders").insert({
+  const orderId = randomUUID();
+  const { error: orderError } = await supabase.from("live_orders").insert({
     id: orderId,
     signal_id: signal.id,
     strategy: signal.strategy,
-    source_position_id: signal.source_position_id,
     mint: signal.mint,
-    token_symbol: signal.token_symbol,
     side: "buy",
     requested_size_sol: sizeSol,
     max_slippage_bps: signal.max_slippage_bps,
-    status: "submitting",
-    metadata: signal.metadata ?? {},
+    status: "created",
   });
   if (orderError) throw new Error(orderError.message);
 
   try {
+    await supabase.from("live_orders").update({ status: "submitted", updated_at: new Date().toISOString() }).eq("id", orderId);
     const result = await executeJupiterBuy({
       outputMint: signal.mint,
       lamports: Math.floor(sizeSol * LAMPORTS_PER_SOL),
       slippageBps: signal.max_slippage_bps,
     });
+    const quote = result.quote as Record<string, unknown>;
     const now = new Date().toISOString();
-    await supabase.from("live_trade_orders").update({ status: "confirmed", transaction_signature: result.signature, confirmed_at: now, updated_at: now }).eq("id", orderId);
+    await supabase.from("live_orders").update({
+      status: "confirmed",
+      tx_signature: result.signature,
+      quoted_input_amount: String(quote.inAmount ?? ""),
+      quoted_output_amount: String(quote.outAmount ?? ""),
+      quote,
+      updated_at: now,
+    }).eq("id", orderId);
     await supabase.from("live_positions").insert({
+      id: randomUUID(),
       strategy: signal.strategy,
       source_position_id: signal.source_position_id,
       mint: signal.mint,
       token_symbol: signal.token_symbol,
       status: "reconciliation_required",
       entry_order_id: orderId,
-      entry_signature: result.signature,
-      invested_sol: sizeSol,
+      entry_tx_signature: result.signature,
+      token_amount: String(quote.outAmount ?? "0"),
+      spent_sol: sizeSol,
       opened_at: now,
-      metadata: { signalId: signal.id, quote: result.quote },
+      updated_at: now,
     });
-    await supabase.from("live_trade_signals").update({ status: "completed", completed_at: now, transaction_signature: result.signature }).eq("id", signal.id).eq("status", "processing");
+    await supabase.from("live_trade_signals").update({ status: "executed", completed_at: now }).eq("id", signal.id).eq("status", "claimed");
     await supabase.from("live_executor_state").update({ daily_entries: state.daily_entries + 1, updated_at: now }).eq("id", 1);
     console.log(`[live-executor] confirmed buy ${signal.token_symbol ?? signal.mint}: ${result.signature}`);
   } catch (error) {
     const reason = error instanceof Error ? error.message : "unknown_execution_error";
     const now = new Date().toISOString();
-    await supabase.from("live_trade_orders").update({ status: "failed", error_message: reason, updated_at: now }).eq("id", orderId);
-    await supabase.from("live_trade_signals").update({ status: "failed", rejection_reason: reason, completed_at: now }).eq("id", signal.id).eq("status", "processing");
+    await supabase.from("live_orders").update({ status: "failed", error: reason, updated_at: now }).eq("id", orderId);
+    await supabase.from("live_trade_signals").update({ status: "failed", rejection_reason: reason, completed_at: now }).eq("id", signal.id).eq("status", "claimed");
     throw error;
   }
 }
