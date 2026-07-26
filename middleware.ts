@@ -1,57 +1,52 @@
 import { NextRequest, NextResponse } from "next/server";
 
 const CANONICAL_HOST = "dashboard-production-cf83.up.railway.app";
+const COOKIE = "private_dashboard_session";
 
-function unauthorized(): NextResponse {
-  return new NextResponse("Private dashboard — owner authentication required", {
-    status: 401,
-    headers: {
-      "WWW-Authenticate": 'Basic realm="Private Trading Dashboard", charset="UTF-8"',
-      "Cache-Control": "no-store, private",
-      "X-Robots-Tag": "noindex, nofollow, noarchive",
-    },
-  });
+async function sha256(value: string): Promise<string> {
+  const bytes = new TextEncoder().encode(value);
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return Array.from(new Uint8Array(digest)).map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
-function safeEqual(left: string, right: string): boolean {
-  if (left.length !== right.length) return false;
-  let mismatch = 0;
-  for (let index = 0; index < left.length; index += 1) {
-    mismatch |= left.charCodeAt(index) ^ right.charCodeAt(index);
-  }
-  return mismatch === 0;
+async function expectedSession(password: string): Promise<string> {
+  const secret = process.env.DASHBOARD_SESSION_SECRET?.trim() || password;
+  return sha256(`private-dashboard-v1:${password}:${secret}`);
 }
 
-export function middleware(request: NextRequest) {
+function privateHeaders(response: NextResponse): NextResponse {
+  response.headers.set("Cache-Control", "no-store, private");
+  response.headers.set("X-Robots-Tag", "noindex, nofollow, noarchive");
+  response.headers.set("Referrer-Policy", "no-referrer");
+  return response;
+}
+
+export async function middleware(request: NextRequest) {
   const host = request.headers.get("host")?.toLowerCase() ?? "";
 
-  // The old Vercel deployment does not share Railway's owner password.
-  // Send every legacy Vercel link to the single canonical private dashboard.
   if (host.endsWith(".vercel.app")) {
     const canonicalUrl = new URL(request.nextUrl.pathname + request.nextUrl.search, `https://${CANONICAL_HOST}`);
     return NextResponse.redirect(canonicalUrl, 308);
   }
 
-  const password = process.env.DASHBOARD_ADMIN_PASSWORD?.trim();
-
-  // Fail closed: without an owner password, nothing on the public domain is served.
-  if (!password) return unauthorized();
-
-  const authorization = request.headers.get("authorization");
-  if (!authorization?.startsWith("Basic ")) return unauthorized();
-
-  try {
-    const decoded = atob(authorization.slice(6));
-    const separator = decoded.indexOf(":");
-    const suppliedPassword = separator >= 0 ? decoded.slice(separator + 1) : "";
-    if (!safeEqual(suppliedPassword, password)) return unauthorized();
-  } catch {
-    return unauthorized();
+  const pathname = request.nextUrl.pathname;
+  if (pathname === "/login" || pathname === "/api/auth/login") {
+    return privateHeaders(NextResponse.next());
   }
 
-  const pathname = request.nextUrl.pathname;
-  let response: NextResponse;
+  const password = process.env.DASHBOARD_ADMIN_PASSWORD?.trim();
+  const suppliedSession = request.cookies.get(COOKIE)?.value;
+  const validSession = Boolean(password && suppliedSession && suppliedSession === await expectedSession(password));
 
+  if (!validSession) {
+    const loginUrl = request.nextUrl.clone();
+    loginUrl.pathname = "/login";
+    loginUrl.search = "";
+    loginUrl.searchParams.set("next", pathname + request.nextUrl.search);
+    return privateHeaders(NextResponse.redirect(loginUrl, 303));
+  }
+
+  let response: NextResponse;
   if (pathname === "/platform") {
     const dashboardUrl = request.nextUrl.clone();
     dashboardUrl.pathname = "/";
@@ -65,10 +60,7 @@ export function middleware(request: NextRequest) {
     response = NextResponse.next();
   }
 
-  response.headers.set("Cache-Control", "no-store, private");
-  response.headers.set("X-Robots-Tag", "noindex, nofollow, noarchive");
-  response.headers.set("Referrer-Policy", "no-referrer");
-  return response;
+  return privateHeaders(response);
 }
 
 export const config = {
