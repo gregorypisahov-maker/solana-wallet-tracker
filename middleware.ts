@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
+const CANONICAL_HOST = "dashboard-production-cf83.up.railway.app";
+
 function unauthorized(): NextResponse {
   return new NextResponse("Private dashboard — owner authentication required", {
     status: 401,
@@ -21,6 +23,15 @@ function safeEqual(left: string, right: string): boolean {
 }
 
 export function middleware(request: NextRequest) {
+  const host = request.headers.get("host")?.toLowerCase() ?? "";
+
+  // The old Vercel deployment does not share Railway's owner password.
+  // Send every legacy Vercel link to the single canonical private dashboard.
+  if (host.endsWith(".vercel.app")) {
+    const canonicalUrl = new URL(request.nextUrl.pathname + request.nextUrl.search, `https://${CANONICAL_HOST}`);
+    return NextResponse.redirect(canonicalUrl, 308);
+  }
+
   const password = process.env.DASHBOARD_ADMIN_PASSWORD?.trim();
 
   // Fail closed: without an owner password, nothing on the public domain is served.
