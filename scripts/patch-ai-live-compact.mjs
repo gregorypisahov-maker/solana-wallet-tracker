@@ -20,18 +20,20 @@ patchFile("app/page.tsx", (source) => {
     'sub={`Fast 2-second refresh · ${live.priceSource}`}'
   );
 
-  text = text.replace(
-    /\n\s*<div className="v2PriceChartWrap">[\s\S]*?<\/div>\n\n\s*<div className="v2RuleGrid">/,
-    `
+  const metricsPanel = String.raw`
 
       <div className="v2SignalGrid">
         <div><small>Gross move</small><strong className={Number(live.grossReturnPct) >= 0 ? "positive" : "negative"}>{Number(live.grossReturnPct) >= 0 ? "+" : ""}{Number(live.grossReturnPct).toFixed(2)}%</strong><span>Before paper friction</span></div>
         <div><small>To take profit</small><strong>{Math.max(0, Number(live.rules?.takeProfitPct ?? 10) - Number(live.grossReturnPct ?? 0)).toFixed(2)}%</strong><span>Remaining gross move</span></div>
         <div><small>To hard stop</small><strong>{Math.max(0, Number(live.grossReturnPct ?? 0) - Number(live.rules?.hardStopPct ?? -6)).toFixed(2)}%</strong><span>Safety distance remaining</span></div>
-        <div><small>Liquidity</small><strong>{Number(live.liquidityUsd ?? 0) > 0 ? `$${Math.round(Number(live.liquidityUsd)).toLocaleString("en-IL")}` : "—"}</strong><span>{Number(live.priceChangeM5 ?? 0) >= 0 ? "Positive" : "Negative"} 5-minute momentum</span></div>
+        <div><small>Liquidity</small><strong>{Number(live.liquidityUsd ?? 0) > 0 ? "$" + Math.round(Number(live.liquidityUsd)).toLocaleString("en-IL") : "—"}</strong><span>{Number(live.priceChangeM5 ?? 0) >= 0 ? "Positive" : "Negative"} 5-minute momentum</span></div>
       </div>
 
-      <div className="v2RuleGrid">`
+      <div className="v2RuleGrid">`;
+
+  text = text.replace(
+    /\n\s*<div className="v2PriceChartWrap">[\s\S]*?<\/div>\n\n\s*<div className="v2RuleGrid">/,
+    metricsPanel
   );
 
   text = text.replace("Entry marker on chart", "Original paper entry price");
