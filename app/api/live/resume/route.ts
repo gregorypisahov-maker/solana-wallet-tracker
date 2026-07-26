@@ -3,27 +3,7 @@ import { getSupabaseAdmin } from "@/lib/supabase";
 
 export const dynamic = "force-dynamic";
 
-function isSamePublicOrigin(request: NextRequest): boolean {
-  const origin = request.headers.get("origin");
-  if (!origin) return true;
-
-  try {
-    const originHost = new URL(origin).host.toLowerCase();
-    const forwardedHost = (request.headers.get("x-forwarded-host") || request.headers.get("host") || "")
-      .split(",")[0]
-      .trim()
-      .toLowerCase();
-    return Boolean(forwardedHost) && originHost === forwardedHost;
-  } catch {
-    return false;
-  }
-}
-
 export async function POST(request: NextRequest) {
-  if (!isSamePublicOrigin(request)) {
-    return NextResponse.json({ error: "Cross-site resume request rejected" }, { status: 403 });
-  }
-
   try {
     const supabase = getSupabaseAdmin({ noStore: true });
     const now = new Date().toISOString();
