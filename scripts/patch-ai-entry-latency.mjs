@@ -17,9 +17,9 @@ function patch(path, replacements) {
 
 patch("paper-trader/marketDiscoveryAgent.ts", [
   {
-    from: "const DEFAULT_INTERVAL_MS = 60_000;",
-    to: "const DEFAULT_INTERVAL_MS = 30_000;",
-    marker: "const DEFAULT_INTERVAL_MS = 30_000;",
+    from: "const DEFAULT_INTERVAL_MS = 30_000;",
+    to: "const DEFAULT_INTERVAL_MS = 60_000;",
+    marker: "const DEFAULT_INTERVAL_MS = 60_000;",
   },
   {
     from: "signal_snapshot: { version: VERSION, buyRatio: item.buysM5 / Math.max(1, item.buysM5 + item.sellsM5) },",
@@ -55,10 +55,43 @@ patch("paper-trader/aiDiscoveryTrader.ts", [
     marker: "priceFor(opportunity.mint, opportunity.pair_address, FetchPriority.HIGH)",
   },
   {
-    from: "setInterval(() => void scanEntries().catch((error) => console.error(\"[ai-discovery-trader] scan failed\", error)), 60_000);",
-    to: "setInterval(() => void scanEntries().catch((error) => console.error(\"[ai-discovery-trader] scan failed\", error)), 30_000);",
-    marker: "scanEntries().catch((error) => console.error(\"[ai-discovery-trader] scan failed\", error)), 30_000",
+    from: "setInterval(() => void scanEntries().catch((error) => console.error(\"[ai-discovery-trader] scan failed\", error)), 30_000);",
+    to: "setInterval(() => void scanEntries().catch((error) => console.error(\"[ai-discovery-trader] scan failed\", error)), 60_000);",
+    marker: "scanEntries().catch((error) => console.error(\"[ai-discovery-trader] scan failed\", error)), 60_000",
   },
 ]);
 
-console.log("[patch-ai-entry-latency] enabled 30s discovery/entry scans, fresh high-priority entry quotes, and timing telemetry");
+patch("paper-trader/fetchQueue.ts", [
+  {
+    from: "const MAX_CONCURRENT = Math.max(1, Math.floor(envNumber(\"FETCH_MAX_CONCURRENT_PER_HOST\", 2, 1)));",
+    to: "const MAX_CONCURRENT = Math.max(1, Math.floor(envNumber(\"FETCH_MAX_CONCURRENT_PER_HOST\", 1, 1)));",
+    marker: "FETCH_MAX_CONCURRENT_PER_HOST\", 1",
+  },
+  {
+    from: "const MIN_INTERVAL_MS = envNumber(\"FETCH_MIN_INTERVAL_MS\", 350, 0);",
+    to: "const MIN_INTERVAL_MS = envNumber(\"FETCH_MIN_INTERVAL_MS\", 1_000, 0);",
+    marker: "FETCH_MIN_INTERVAL_MS\", 1_000",
+  },
+  {
+    from: "const MAX_RETRIES = Math.floor(envNumber(\"FETCH_MAX_RETRIES\", 3, 0));",
+    to: "const MAX_RETRIES = Math.floor(envNumber(\"FETCH_MAX_RETRIES\", 1, 0));",
+    marker: "FETCH_MAX_RETRIES\", 1",
+  },
+  {
+    from: "const CACHE_TTL_MS = envNumber(\"FETCH_CACHE_TTL_MS\", 8_000, 0);",
+    to: "const CACHE_TTL_MS = envNumber(\"FETCH_CACHE_TTL_MS\", 30_000, 0);",
+    marker: "FETCH_CACHE_TTL_MS\", 30_000",
+  },
+  {
+    from: "const ADAPTIVE_MULTIPLIER = envNumber(\"FETCH_ADAPTIVE_429_MULTIPLIER\", 2, 1);",
+    to: "const ADAPTIVE_MULTIPLIER = envNumber(\"FETCH_ADAPTIVE_429_MULTIPLIER\", 5, 1);",
+    marker: "FETCH_ADAPTIVE_429_MULTIPLIER\", 5",
+  },
+  {
+    from: "const ADAPTIVE_COOLDOWN_MS = envNumber(\"FETCH_ADAPTIVE_COOLDOWN_MS\", 60_000, 1);",
+    to: "const ADAPTIVE_COOLDOWN_MS = envNumber(\"FETCH_ADAPTIVE_COOLDOWN_MS\", 120_000, 1);",
+    marker: "FETCH_ADAPTIVE_COOLDOWN_MS\", 120_000",
+  },
+]);
+
+console.log("[patch-ai-entry-latency] safe mode enabled: 60s discovery/entry scans, fresh entry quotes, 1 request/host, 30s cache, and stronger 429 cooldown");
