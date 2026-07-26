@@ -3,6 +3,7 @@ import { createHmac, timingSafeEqual } from "crypto";
 import {
   createViewerSessionToken,
   getViewerSecret,
+  getViewerSecrets,
   VIEWER_COOKIE,
   VIEWER_SESSION_TTL_SECONDS,
 } from "@/lib/dashboardAuth";
@@ -47,10 +48,13 @@ function jsonError(message: string, status: number, retryAfterSeconds?: number) 
 }
 
 export async function POST(request: NextRequest) {
-  const expectedPassword = getViewerSecret();
-  if (!expectedPassword) return jsonError("Dashboard login is not configured", 503);
+  const acceptedPasswords = getViewerSecrets();
+  const fingerprintSecret = getViewerSecret();
+  if (!fingerprintSecret || acceptedPasswords.length === 0) {
+    return jsonError("Dashboard login is not configured", 503);
+  }
 
-  const identifier = requestFingerprint(request, expectedPassword);
+  const identifier = requestFingerprint(request, fingerprintSecret);
   const supabase = getSupabaseAdmin({ noStore: true });
   const { data: attemptData, error: attemptError } = await supabase
     .from("dashboard_login_attempts")
@@ -78,7 +82,8 @@ export async function POST(request: NextRequest) {
     return jsonError("Invalid request", 400);
   }
 
-  if (!safeEqual(password, expectedPassword)) {
+  const passwordMatches = acceptedPasswords.some((expected) => safeEqual(password, expected));
+  if (!passwordMatches) {
     const existingWindowStart = attempt?.window_started_at ? Date.parse(attempt.window_started_at) : 0;
     const insideWindow = existingWindowStart > 0 && now - existingWindowStart < WINDOW_MS;
     const attempts = insideWindow ? Number(attempt?.attempts ?? 0) + 1 : 1;
