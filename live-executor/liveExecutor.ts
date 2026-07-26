@@ -1,11 +1,14 @@
 import "dotenv/config";
 import { getSupabaseAdmin } from "../lib/supabase";
+import { executeJupiterBuy, getLiveWalletHealth } from "../lib/liveWallet";
 
 const supabase = getSupabaseAdmin();
 const POLL_MS = Math.max(5_000, Number(process.env.LIVE_EXECUTOR_POLL_MS) || 10_000);
 const APPROVED_STRATEGY = "ai_discovery";
+const LAMPORTS_PER_SOL = 1_000_000_000;
+const MIN_WALLET_RESERVE_SOL = Math.max(0.02, Number(process.env.LIVE_MIN_WALLET_RESERVE_SOL) || 0.02);
 
-type ExecutorState = {
+ type ExecutorState = {
   enabled: boolean;
   halted: boolean;
   halt_reason: string | null;
@@ -39,8 +42,9 @@ const n = (value: unknown, fallback = 0): number => {
 };
 
 function runtimeArmed(): boolean {
-  return process.env.LIVE_EXECUTION_ENABLED === "true" &&
-    process.env.LIVE_EXECUTION_ARM_TOKEN === "I_UNDERSTAND_REAL_SOL_IS_AT_RISK";
+  // Reuse the two safety locks already shown in the existing /live dashboard.
+  return process.env.LIVE_TRADING_ENABLED === "true" &&
+    process.env.LIVE_EXECUTION_ARMED === "true";
 }
 
 async function heartbeat(reason?: string): Promise<void> {
@@ -88,6 +92,10 @@ async function validate(signal: Signal, state: ExecutorState): Promise<string | 
     if (!(size > 0)) return "invalid_position_size";
     if (size > n(state.max_position_sol)) return "position_size_above_limit";
     if (await openPositionCount() >= state.max_open_positions) return "max_open_positions";
+    const health = await getLiveWalletHealth();
+    if (!health.publicKey || !health.signerConfigured || !health.rpcConfigured) return "existing_live_wallet_not_ready";
+    if (health.error) return "wallet_health_check_failed";
+    if (health.balanceSol == null || health.balanceSol - size < MIN_WALLET_RESERVE_SOL) return "wallet_reserve_limit";
   }
   return null;
 }
@@ -101,6 +109,65 @@ async function nextSignal(): Promise<Signal | null> {
     .maybeSingle();
   if (error) throw new Error(error.message);
   return data as Signal | null;
+}
+
+async function claim(signal: Signal): Promise<boolean> {
+  const { data, error } = await supabase.from("live_trade_signals").update({
+    status: "processing",
+    processing_started_at: new Date().toISOString(),
+  }).eq("id", signal.id).eq("status", "pending").select("id").maybeSingle();
+  if (error) throw new Error(error.message);
+  return Boolean(data?.id);
+}
+
+async function executeBuy(signal: Signal, state: ExecutorState): Promise<void> {
+  const sizeSol = n(signal.requested_size_sol);
+  const orderId = `buy_${signal.id}`;
+  const { error: orderError } = await supabase.from("live_trade_orders").insert({
+    id: orderId,
+    signal_id: signal.id,
+    strategy: signal.strategy,
+    source_position_id: signal.source_position_id,
+    mint: signal.mint,
+    token_symbol: signal.token_symbol,
+    side: "buy",
+    requested_size_sol: sizeSol,
+    max_slippage_bps: signal.max_slippage_bps,
+    status: "submitting",
+    metadata: signal.metadata ?? {},
+  });
+  if (orderError) throw new Error(orderError.message);
+
+  try {
+    const result = await executeJupiterBuy({
+      outputMint: signal.mint,
+      lamports: Math.floor(sizeSol * LAMPORTS_PER_SOL),
+      slippageBps: signal.max_slippage_bps,
+    });
+    const now = new Date().toISOString();
+    await supabase.from("live_trade_orders").update({ status: "confirmed", transaction_signature: result.signature, confirmed_at: now, updated_at: now }).eq("id", orderId);
+    await supabase.from("live_positions").insert({
+      strategy: signal.strategy,
+      source_position_id: signal.source_position_id,
+      mint: signal.mint,
+      token_symbol: signal.token_symbol,
+      status: "reconciliation_required",
+      entry_order_id: orderId,
+      entry_signature: result.signature,
+      invested_sol: sizeSol,
+      opened_at: now,
+      metadata: { signalId: signal.id, quote: result.quote },
+    });
+    await supabase.from("live_trade_signals").update({ status: "completed", completed_at: now, transaction_signature: result.signature }).eq("id", signal.id).eq("status", "processing");
+    await supabase.from("live_executor_state").update({ daily_entries: state.daily_entries + 1, updated_at: now }).eq("id", 1);
+    console.log(`[live-executor] confirmed buy ${signal.token_symbol ?? signal.mint}: ${result.signature}`);
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : "unknown_execution_error";
+    const now = new Date().toISOString();
+    await supabase.from("live_trade_orders").update({ status: "failed", error_message: reason, updated_at: now }).eq("id", orderId);
+    await supabase.from("live_trade_signals").update({ status: "failed", rejection_reason: reason, completed_at: now }).eq("id", signal.id).eq("status", "processing");
+    throw error;
+  }
 }
 
 async function processOnce(): Promise<void> {
@@ -120,14 +187,16 @@ async function processOnce(): Promise<void> {
     await reject(signal, rejection);
     return;
   }
-
-  // Deliberately fail closed until the transaction adapter is reviewed and configured.
-  // The executor is isolated and ready to receive signals, but it cannot spend SOL yet.
-  await reject(signal, "transaction_adapter_not_enabled");
+  if (signal.side !== "buy") {
+    await reject(signal, "sell_adapter_not_enabled");
+    return;
+  }
+  if (!(await claim(signal))) return;
+  await executeBuy(signal, state);
 }
 
 export function startLiveExecutor(): void {
-  console.log(`[live-executor] isolated service starting; armed=${runtimeArmed()} pollMs=${POLL_MS}`);
+  console.log(`[live-executor] isolated service starting; armed=${runtimeArmed()} pollMs=${POLL_MS}; wallet=reused-existing-live-wallet`);
   void processOnce().catch((error) => console.error("[live-executor] cycle failed", error));
   setInterval(() => void processOnce().catch((error) => console.error("[live-executor] cycle failed", error)), POLL_MS);
 }
