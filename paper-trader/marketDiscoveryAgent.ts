@@ -2,11 +2,10 @@ import { getSupabaseAdmin } from "../lib/supabase";
 import { FetchPriority, fetchJsonQueued, logAndResetFetchQueueStats } from "./fetchQueue";
 
 const supabase = getSupabaseAdmin();
-const VERSION = "market_discovery_ai_v1_2026_07_26_dex_batch";
+const VERSION = "market_discovery_ai_v1_2026_07_24";
 const REQUEST_TIMEOUT_MS = 12_000;
 const DEFAULT_INTERVAL_MS = 60_000;
 const TOP_LIMIT = 25;
-const MAX_DISCOVERY_MINTS = 18;
 const WRAPPED_SOL = "So11111111111111111111111111111111111111112";
 const STABLES = new Set([
   WRAPPED_SOL,
@@ -14,10 +13,11 @@ const STABLES = new Set([
   "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",
 ]);
 
-const DISCOVERY_FEEDS = [
-  "https://api.dexscreener.com/token-profiles/latest/v1",
-  "https://api.dexscreener.com/token-boosts/top/v1",
-  "https://api.dexscreener.com/token-boosts/latest/v1",
+const FEEDS = [
+  "https://api.geckoterminal.com/api/v2/networks/solana/trending_pools?duration=5m&page=1",
+  "https://api.geckoterminal.com/api/v2/networks/solana/trending_pools?duration=1h&page=1",
+  "https://api.geckoterminal.com/api/v2/networks/solana/trending_pools?duration=1h&page=2",
+  "https://api.geckoterminal.com/api/v2/networks/solana/new_pools?page=1",
 ] as const;
 
 type Candidate = {
@@ -52,10 +52,14 @@ function num(value: unknown, fallback = 0): number {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
+function stripId(value: unknown): string {
+  return String(value ?? "").replace(/^solana_/, "");
+}
+
 function intervalMs(): number {
   const parsed = Number(process.env.MARKET_DISCOVERY_INTERVAL_MS);
   if (!Number.isFinite(parsed)) return DEFAULT_INTERVAL_MS;
-  return Math.min(300_000, Math.max(60_000, parsed));
+  return Math.min(300_000, Math.max(30_000, parsed));
 }
 
 function enabled(): boolean {
@@ -63,105 +67,63 @@ function enabled(): boolean {
   return !raw || !["0", "false", "off", "no"].includes(raw);
 }
 
-async function fetchJson(url: string, cacheTtlMs = 30_000): Promise<any> {
+async function fetchJson(url: string): Promise<any> {
   return fetchJsonQueued(url, {
     priority: FetchPriority.NORMAL,
     timeoutMs: REQUEST_TIMEOUT_MS,
-    cacheTtlMs,
     headers: {
-      Accept: "application/json",
-      "User-Agent": "solana-market-discovery-ai/2.1",
+      Accept: "application/vnd.api+json;version=20230302",
+      "User-Agent": "solana-market-discovery-ai/1.0",
     },
   });
 }
 
-function parseDexPair(pair: any, requestedMint: string): Candidate | null {
-  if (!pair || String(pair.chainId ?? "").toLowerCase() !== "solana") return null;
+function parse(row: any): Candidate | null {
+  const a = row?.attributes;
+  const mint = stripId(row?.relationships?.base_token?.data?.id);
+  if (!a || !mint || STABLES.has(mint)) return null;
 
-  const baseMint = String(pair.baseToken?.address ?? "");
-  const quoteMint = String(pair.quoteToken?.address ?? "");
-  const mint = baseMint === requestedMint ? baseMint : quoteMint === requestedMint ? quoteMint : "";
-  if (!mint || STABLES.has(mint)) return null;
-
-  const token = baseMint === mint ? pair.baseToken : pair.quoteToken;
-  const createdAt = num(pair.pairCreatedAt, NaN);
-  const buysM5 = Math.max(0, Math.floor(num(pair.txns?.m5?.buys, 0)));
-  const sellsM5 = Math.max(0, Math.floor(num(pair.txns?.m5?.sells, 0)));
-  const explicitBuyers = Math.max(0, Math.floor(num(pair.txns?.m5?.buyers, 0)));
-
+  const createdAt = Date.parse(String(a.pool_created_at ?? ""));
   const candidate: Candidate = {
     mint,
-    symbol: String(token?.symbol ?? "UNKNOWN").trim() || "UNKNOWN",
-    pairAddress: String(pair.pairAddress ?? ""),
-    priceUsd: num(pair.priceUsd, NaN),
-    liquidityUsd: num(pair.liquidity?.usd, NaN),
-    marketCapUsd: num(pair.marketCap ?? pair.fdv, NaN),
-    changeM5: num(pair.priceChange?.m5, 0),
-    changeH1: num(pair.priceChange?.h1, 0),
-    volumeM5: num(pair.volume?.m5, 0),
-    volumeH1: num(pair.volume?.h1, 0),
-    buysM5,
-    sellsM5,
-    buyersM5: explicitBuyers,
-    poolAgeMinutes: Number.isFinite(createdAt) ? Math.max(0, Date.now() - createdAt) / 60_000 : 0,
+    symbol: String(a.name ?? "UNKNOWN").split("/")[0]?.trim() || "UNKNOWN",
+    pairAddress: String(a.address ?? ""),
+    priceUsd: num(a.base_token_price_usd, NaN),
+    liquidityUsd: num(a.reserve_in_usd, NaN),
+    marketCapUsd: num(a.market_cap_usd ?? a.fdv_usd, NaN),
+    changeM5: num(a.price_change_percentage?.m5, NaN),
+    changeH1: num(a.price_change_percentage?.h1, NaN),
+    volumeM5: num(a.volume_usd?.m5, NaN),
+    volumeH1: num(a.volume_usd?.h1, NaN),
+    buysM5: Math.max(0, Math.floor(num(a.transactions?.m5?.buys, NaN))),
+    sellsM5: Math.max(0, Math.floor(num(a.transactions?.m5?.sells, NaN))),
+    buyersM5: Math.max(0, Math.floor(num(a.transactions?.m5?.buyers, NaN))),
+    poolAgeMinutes: Number.isFinite(createdAt) ? Math.max(0, Date.now() - createdAt) / 60_000 : NaN,
   };
 
-  const required = [candidate.priceUsd, candidate.liquidityUsd, candidate.marketCapUsd];
-  if (!candidate.pairAddress || required.some((value) => !Number.isFinite(value) || value <= 0)) return null;
+  const values = Object.values(candidate).filter((value) => typeof value === "number") as number[];
+  if (!candidate.pairAddress || values.some((value) => !Number.isFinite(value))) return null;
+  if (candidate.priceUsd <= 0 || candidate.liquidityUsd <= 0 || candidate.marketCapUsd <= 0) return null;
   return candidate;
 }
 
-function extractSolanaMints(payload: any): string[] {
-  const rows = Array.isArray(payload) ? payload : Array.isArray(payload?.data) ? payload.data : [];
-  const mints: string[] = [];
-  for (const row of rows) {
-    if (String(row?.chainId ?? "").toLowerCase() !== "solana") continue;
-    const mint = String(row?.tokenAddress ?? row?.address ?? "").trim();
-    if (!mint || STABLES.has(mint)) continue;
-    mints.push(mint);
-  }
-  return mints;
-}
-
 async function discover(): Promise<Candidate[]> {
-  const seedResults = await Promise.allSettled(DISCOVERY_FEEDS.map((url) => fetchJson(url, 60_000)));
-  const mints: string[] = [];
-  const seen = new Set<string>();
-
-  for (const result of seedResults) {
+  const results = await Promise.allSettled(FEEDS.map(fetchJson));
+  const byMint = new Map<string, Candidate>();
+  for (const result of results) {
     if (result.status === "rejected") {
-      console.warn("[market-discovery-ai] optional Dexscreener seed feed skipped:", result.reason);
+      console.warn("[market-discovery-ai] feed failed:", result.reason);
       continue;
     }
-    for (const mint of extractSolanaMints(result.value)) {
-      if (seen.has(mint)) continue;
-      seen.add(mint);
-      mints.push(mint);
-      if (mints.length >= MAX_DISCOVERY_MINTS) break;
+    const rows = Array.isArray(result.value?.data) ? result.value.data : [];
+    for (const row of rows) {
+      const candidate = parse(row);
+      if (!candidate) continue;
+      const existing = byMint.get(candidate.mint);
+      if (!existing || candidate.liquidityUsd > existing.liquidityUsd) byMint.set(candidate.mint, candidate);
     }
-    if (mints.length >= MAX_DISCOVERY_MINTS) break;
   }
-
-  if (mints.length === 0) throw new Error("Dexscreener discovery returned no Solana token seeds");
-
-  const requestedMints = new Set(mints);
-  const batchUrl = `https://api.dexscreener.com/tokens/v1/solana/${mints.map(encodeURIComponent).join(",")}`;
-  const payload = await fetchJson(batchUrl, 30_000);
-  const pairs = Array.isArray(payload) ? payload : Array.isArray(payload?.pairs) ? payload.pairs : [];
-  const byMint = new Map<string, Candidate>();
-
-  for (const pair of pairs) {
-    const baseMint = String(pair?.baseToken?.address ?? "");
-    const quoteMint = String(pair?.quoteToken?.address ?? "");
-    const requestedMint = requestedMints.has(baseMint) ? baseMint : requestedMints.has(quoteMint) ? quoteMint : "";
-    if (!requestedMint) continue;
-    const candidate = parseDexPair(pair, requestedMint);
-    if (!candidate) continue;
-    const existing = byMint.get(candidate.mint);
-    if (!existing || candidate.liquidityUsd > existing.liquidityUsd) byMint.set(candidate.mint, candidate);
-  }
-
-  if (byMint.size === 0) throw new Error("Dexscreener batch lookup returned no valid Solana pairs");
+  if (results.every((result) => result.status === "rejected")) throw new Error("all discovery feeds failed");
   return [...byMint.values()];
 }
 
@@ -251,16 +213,7 @@ async function persist(startedAt: string, candidates: Candidate[], ranked: Ranke
         pool_age_minutes: item.poolAgeMinutes,
         reasons: item.reasons,
         risks: item.risks,
-        signal_snapshot: {
-          version: VERSION,
-          provider: "dexscreener",
-          buyRatio: item.buysM5 / Math.max(1, item.buysM5 + item.sellsM5),
-          timing: {
-            discoveryScanStartedAt: startedAt,
-            opportunityPersistedAt: now,
-            discoveryPipelineMs: Math.max(0, Date.parse(now) - Date.parse(startedAt)),
-          },
-        },
+        signal_snapshot: { version: VERSION, buyRatio: item.buysM5 / Math.max(1, item.buysM5 + item.sellsM5) },
         last_seen_at: now,
         updated_at: now,
       })),
@@ -280,7 +233,7 @@ async function persist(startedAt: string, candidates: Candidate[], ranked: Ranke
     top_score: top[0]?.score ?? null,
     market_regime: marketRegime,
     message: top[0] ? `top_candidate:${top[0].symbol}` : "no_candidates",
-    snapshot: { version: VERSION, provider: "dexscreener", top: top.slice(0, 10) },
+    snapshot: { version: VERSION, top: top.slice(0, 10) },
   });
   if (error) throw new Error(`discovery run insert failed: ${error.message}`);
 
@@ -295,34 +248,21 @@ export async function runMarketDiscoveryScan(): Promise<void> {
     const marketRegime = regime(ranked);
     await persist(startedAt, candidates, ranked, marketRegime);
     const top = ranked[0];
-    console.log(`[market-discovery-ai] scanned ${candidates.length}; provider dexscreener; regime ${marketRegime}; top ${top ? `${top.symbol} ${top.score}/100` : "none"}; pipelineMs=${Math.max(0, Date.now() - Date.parse(startedAt))}`);
+    console.log(`[market-discovery-ai] scanned ${candidates.length}; regime ${marketRegime}; top ${top ? `${top.symbol} ${top.score}/100` : "none"}`);
   } catch (error) {
     const now = new Date().toISOString();
     const message = error instanceof Error ? error.message : String(error);
     console.error("[market-discovery-ai] scan failed:", error);
-    await supabase.from("market_discovery_runs").insert({
-      started_at: startedAt,
-      finished_at: now,
-      status: "error",
-      message,
-      snapshot: { version: VERSION, provider: "dexscreener" },
-    });
+    await supabase.from("market_discovery_runs").insert({ started_at: startedAt, finished_at: now, status: "error", message, snapshot: { version: VERSION } });
   } finally {
     logAndResetFetchQueueStats();
   }
 }
 
 async function runSafely(): Promise<void> {
-  if (running) {
-    console.warn("[market-discovery-ai] previous scan still running; skipped overlapping scan");
-    return;
-  }
+  if (running) return;
   running = true;
-  try {
-    await runMarketDiscoveryScan();
-  } finally {
-    running = false;
-  }
+  try { await runMarketDiscoveryScan(); } finally { running = false; }
 }
 
 export function startMarketDiscoveryAgent(): void {
@@ -331,7 +271,7 @@ export function startMarketDiscoveryAgent(): void {
     return;
   }
   const every = intervalMs();
-  console.log(`[market-discovery-ai] ${VERSION} enabled; scan ${every / 1000}s; Dexscreener-only discovery; analysis-only, no direct real-money execution`);
+  console.log(`[market-discovery-ai] ${VERSION} enabled; scan ${every / 1000}s; analysis-only, no direct real-money execution`);
   void runSafely();
   setInterval(() => void runSafely(), every);
 }
