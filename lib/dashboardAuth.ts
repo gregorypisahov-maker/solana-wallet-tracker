@@ -5,11 +5,20 @@ export const VIEWER_COOKIE = "swt_viewer";
 export const VIEWER_SESSION_TTL_SECONDS = 60 * 60 * 12;
 const SESSION_VERSION = "v1";
 
-export function getViewerSecret(): string | undefined {
-  return (
-    process.env.VIEWER_SHARE_TOKEN?.trim() ||
-    process.env.DASHBOARD_KEY?.trim()
+export function getViewerSecrets(): string[] {
+  return Array.from(
+    new Set(
+      [
+        process.env.VIEWER_SHARE_TOKEN?.trim(),
+        process.env.DASHBOARD_KEY?.trim(),
+        process.env.DASHBOARD_ADMIN_PASSWORD?.trim(),
+      ].filter((value): value is string => Boolean(value))
+    )
   );
+}
+
+export function getViewerSecret(): string | undefined {
+  return getViewerSecrets()[0];
 }
 
 function getSessionSecret(): string | undefined {
