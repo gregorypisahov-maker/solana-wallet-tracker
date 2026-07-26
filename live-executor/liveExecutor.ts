@@ -1,47 +1,44 @@
 import "dotenv/config";
 import { randomUUID } from "node:crypto";
 import { getSupabaseAdmin } from "../lib/supabase";
-import { executeJupiterBuy, getLiveWalletHealth } from "../lib/liveWallet";
+import {
+  executeJupiterBuy,
+  executeJupiterSell,
+  getLiveWalletHealth,
+  getWalletSolLamports,
+  getWalletTokenRawAmount,
+} from "../lib/liveWallet";
 
 const supabase = getSupabaseAdmin();
 const POLL_MS = Math.max(5_000, Number(process.env.LIVE_EXECUTOR_POLL_MS) || 10_000);
 const APPROVED_STRATEGY = "ai_discovery";
 const LAMPORTS_PER_SOL = 1_000_000_000;
 const MIN_WALLET_RESERVE_SOL = Math.max(0.02, Number(process.env.LIVE_MIN_WALLET_RESERVE_SOL) || 0.02);
+const SOURCE_ENTRY_MAX_AGE_MS = Math.max(15_000, Number(process.env.LIVE_SOURCE_ENTRY_MAX_AGE_MS) || 45_000);
+let cycleRunning = false;
 
 type ExecutorState = {
-  enabled: boolean;
-  halted: boolean;
-  halt_reason: string | null;
-  max_position_sol: number | string;
-  max_open_positions: number;
-  max_daily_entries: number;
-  max_daily_loss_sol: number | string;
-  daily_date: string;
-  daily_entries: number;
-  daily_realized_pnl_sol: number | string;
+  enabled: boolean; halted: boolean; halt_reason: string | null;
+  max_position_sol: number | string; max_open_positions: number;
+  max_daily_entries: number; max_daily_loss_sol: number | string;
+  daily_date: string; daily_entries: number; daily_realized_pnl_sol: number | string;
 };
-
 type Signal = {
-  id: string;
-  strategy: string;
-  source_position_id: string | null;
-  mint: string;
-  token_symbol: string | null;
-  side: "buy" | "sell";
-  requested_size_sol: number | string | null;
-  requested_token_amount: number | string | null;
-  max_slippage_bps: number;
-  status: string;
-  created_at: string;
-  metadata: Record<string, unknown> | null;
+  id: string; strategy: string; source_position_id: string | null; mint: string;
+  token_symbol: string | null; side: "buy" | "sell";
+  requested_size_sol: number | string | null; requested_token_amount: number | string | null;
+  max_slippage_bps: number; status: string; created_at: string; metadata: Record<string, unknown> | null;
+};
+type LivePosition = {
+  id: string; source_position_id: string; mint: string; token_symbol: string | null;
+  token_amount: string; spent_sol: number | string; status: string;
 };
 
 const n = (value: unknown, fallback = 0): number => {
   const parsed = typeof value === "number" ? value : Number(value);
   return Number.isFinite(parsed) ? parsed : fallback;
 };
-
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 function runtimeArmed(): boolean {
   return process.env.LIVE_TRADING_ENABLED === "true" && process.env.LIVE_EXECUTION_ARMED === "true";
 }
@@ -53,29 +50,32 @@ async function heartbeat(reason?: string): Promise<void> {
     updated_at: new Date().toISOString(),
   }).eq("id", 1);
 }
-
 async function loadState(): Promise<ExecutorState> {
   const { data, error } = await supabase.from("live_executor_state").select("*").eq("id", 1).single();
   if (error) throw new Error(error.message);
-  return data as ExecutorState;
+  const state = data as ExecutorState;
+  const today = new Date().toISOString().slice(0, 10);
+  if (state.daily_date !== today) {
+    const { data: reset, error: resetError } = await supabase.from("live_executor_state").update({
+      daily_date: today, daily_entries: 0, daily_realized_pnl_sol: 0, updated_at: new Date().toISOString(),
+    }).eq("id", 1).select("*").single();
+    if (resetError) throw new Error(resetError.message);
+    return reset as ExecutorState;
+  }
+  return state;
 }
-
 async function reject(signal: Signal, reason: string): Promise<void> {
   const { error } = await supabase.from("live_trade_signals").update({
-    status: "rejected",
-    rejection_reason: reason,
-    completed_at: new Date().toISOString(),
+    status: "rejected", rejection_reason: reason, completed_at: new Date().toISOString(),
   }).eq("id", signal.id).eq("status", "pending");
   if (error) throw new Error(error.message);
   console.warn(`[live-executor] rejected ${signal.id}: ${reason}`);
 }
-
 async function openPositionCount(): Promise<number> {
   const { count, error } = await supabase.from("live_positions").select("id", { count: "exact", head: true }).in("status", ["open", "closing", "reconciliation_required"]);
   if (error) throw new Error(error.message);
   return count ?? 0;
 }
-
 async function validate(signal: Signal, state: ExecutorState): Promise<string | null> {
   if (!runtimeArmed()) return "runtime_not_armed";
   if (!state.enabled) return "database_gate_disabled";
@@ -84,126 +84,169 @@ async function validate(signal: Signal, state: ExecutorState): Promise<string | 
   if (!signal.source_position_id) return "missing_source_position_id";
   if (!signal.mint || signal.mint.length < 32) return "invalid_mint";
   if (signal.max_slippage_bps < 10 || signal.max_slippage_bps > 200) return "slippage_out_of_bounds";
-  if (state.daily_entries >= state.max_daily_entries && signal.side === "buy") return "daily_entry_limit";
   if (n(state.daily_realized_pnl_sol) <= -Math.abs(n(state.max_daily_loss_sol))) return "daily_loss_limit";
+  const health = await getLiveWalletHealth();
+  if (!health.publicKey || !health.signerConfigured || !health.rpcConfigured) return "existing_live_wallet_not_ready";
+  if (health.error) return "wallet_health_check_failed";
   if (signal.side === "buy") {
     const size = n(signal.requested_size_sol);
+    if (state.daily_entries >= state.max_daily_entries) return "daily_entry_limit";
     if (!(size > 0)) return "invalid_position_size";
     if (size > n(state.max_position_sol)) return "position_size_above_limit";
     if (await openPositionCount() >= state.max_open_positions) return "max_open_positions";
-    const health = await getLiveWalletHealth();
-    if (!health.publicKey || !health.signerConfigured || !health.rpcConfigured) return "existing_live_wallet_not_ready";
-    if (health.error) return "wallet_health_check_failed";
     if (health.balanceSol == null || health.balanceSol - size < MIN_WALLET_RESERVE_SOL) return "wallet_reserve_limit";
+  } else {
+    const { data } = await supabase.from("live_positions").select("id").eq("source_position_id", signal.source_position_id).eq("status", "open").maybeSingle();
+    if (!data) return "open_live_position_not_found";
   }
   return null;
 }
 
+async function createSourceSignals(state: ExecutorState): Promise<void> {
+  if (!runtimeArmed() || !state.enabled || state.halted) return;
+  if (state.daily_entries < state.max_daily_entries && await openPositionCount() < state.max_open_positions) {
+    const cutoff = new Date(Date.now() - SOURCE_ENTRY_MAX_AGE_MS).toISOString();
+    const { data: source } = await supabase.from("ai_discovery_positions").select("position_id,mint,token_symbol,size_sol,opened_at").gte("opened_at", cutoff).order("opened_at", { ascending: false }).limit(1).maybeSingle();
+    if (source) {
+      await supabase.from("live_trade_signals").upsert({
+        id: randomUUID(), strategy: APPROVED_STRATEGY, source_position_id: source.position_id,
+        mint: source.mint, token_symbol: source.token_symbol, side: "buy",
+        requested_size_sol: Math.min(n(source.size_sol), n(state.max_position_sol)),
+        max_slippage_bps: Math.min(200, Math.max(10, Number(process.env.LIVE_MAX_SLIPPAGE_BPS) || 100)),
+        metadata: { source: "ai_discovery_positions", source_opened_at: source.opened_at },
+      }, { onConflict: "strategy,source_position_id,side", ignoreDuplicates: true });
+    }
+  }
+  const { data: positions } = await supabase.from("live_positions").select("id,source_position_id,mint,token_symbol,token_amount,spent_sol,status").eq("status", "open");
+  for (const position of (positions ?? []) as LivePosition[]) {
+    const { data: close } = await supabase.from("ai_discovery_trades").select("position_id,exit_reason,closed_at").eq("position_id", position.source_position_id).limit(1).maybeSingle();
+    if (!close) continue;
+    await supabase.from("live_trade_signals").upsert({
+      id: randomUUID(), strategy: APPROVED_STRATEGY, source_position_id: position.source_position_id,
+      mint: position.mint, token_symbol: position.token_symbol, side: "sell",
+      requested_token_amount: position.token_amount,
+      max_slippage_bps: Math.min(200, Math.max(10, Number(process.env.LIVE_MAX_SLIPPAGE_BPS) || 100)),
+      metadata: { source: "ai_discovery_trades", exit_reason: close.exit_reason, source_closed_at: close.closed_at },
+    }, { onConflict: "strategy,source_position_id,side", ignoreDuplicates: true });
+  }
+}
+
 async function nextSignal(): Promise<Signal | null> {
-  const { data, error } = await supabase.from("live_trade_signals")
-    .select("*")
-    .eq("status", "pending")
-    .order("created_at", { ascending: true })
-    .limit(1)
-    .maybeSingle();
+  const { data, error } = await supabase.from("live_trade_signals").select("*").eq("status", "pending").order("created_at", { ascending: true }).limit(1).maybeSingle();
   if (error) throw new Error(error.message);
   return data as Signal | null;
 }
-
 async function claim(signal: Signal): Promise<boolean> {
-  const { data, error } = await supabase.from("live_trade_signals").update({
-    status: "claimed",
-    claimed_at: new Date().toISOString(),
-  }).eq("id", signal.id).eq("status", "pending").select("id").maybeSingle();
+  const { data, error } = await supabase.from("live_trade_signals").update({ status: "claimed", claimed_at: new Date().toISOString() }).eq("id", signal.id).eq("status", "pending").select("id").maybeSingle();
   if (error) throw new Error(error.message);
   return Boolean(data?.id);
+}
+async function waitForTokenChange(mint: string, before: bigint, direction: "up" | "down"): Promise<bigint> {
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    const current = await getWalletTokenRawAmount(mint);
+    if ((direction === "up" && current > before) || (direction === "down" && current < before)) return current;
+    await sleep(2_000);
+  }
+  throw new Error("confirmed_transaction_token_balance_not_reconciled");
 }
 
 async function executeBuy(signal: Signal, state: ExecutorState): Promise<void> {
   const sizeSol = n(signal.requested_size_sol);
   const orderId = randomUUID();
-  const { error: orderError } = await supabase.from("live_orders").insert({
-    id: orderId,
-    signal_id: signal.id,
-    strategy: signal.strategy,
-    mint: signal.mint,
-    side: "buy",
-    requested_size_sol: sizeSol,
-    max_slippage_bps: signal.max_slippage_bps,
-    status: "created",
-  });
-  if (orderError) throw new Error(orderError.message);
-
+  const tokenBefore = await getWalletTokenRawAmount(signal.mint);
+  const solBefore = await getWalletSolLamports();
+  const { error } = await supabase.from("live_orders").insert({ id: orderId, signal_id: signal.id, strategy: signal.strategy, mint: signal.mint, side: "buy", requested_size_sol: sizeSol, max_slippage_bps: signal.max_slippage_bps, status: "created" });
+  if (error) throw new Error(error.message);
   try {
     await supabase.from("live_orders").update({ status: "submitted", updated_at: new Date().toISOString() }).eq("id", orderId);
-    const result = await executeJupiterBuy({
-      outputMint: signal.mint,
-      lamports: Math.floor(sizeSol * LAMPORTS_PER_SOL),
-      slippageBps: signal.max_slippage_bps,
-    });
-    const quote = result.quote as Record<string, unknown>;
+    const result = await executeJupiterBuy({ outputMint: signal.mint, lamports: Math.floor(sizeSol * LAMPORTS_PER_SOL), slippageBps: signal.max_slippage_bps });
+    const tokenAfter = await waitForTokenChange(signal.mint, tokenBefore, "up");
+    const solAfter = await getWalletSolLamports();
+    const received = tokenAfter - tokenBefore;
+    const spentLamports = Math.max(0, solBefore - solAfter);
+    if (received <= 0n) throw new Error("buy_reconciliation_received_zero_tokens");
     const now = new Date().toISOString();
-    await supabase.from("live_orders").update({
-      status: "confirmed",
-      tx_signature: result.signature,
-      quoted_input_amount: String(quote.inAmount ?? ""),
-      quoted_output_amount: String(quote.outAmount ?? ""),
-      quote,
-      updated_at: now,
-    }).eq("id", orderId);
-    await supabase.from("live_positions").insert({
-      id: randomUUID(),
-      strategy: signal.strategy,
-      source_position_id: signal.source_position_id,
-      mint: signal.mint,
-      token_symbol: signal.token_symbol,
-      status: "reconciliation_required",
-      entry_order_id: orderId,
-      entry_tx_signature: result.signature,
-      token_amount: String(quote.outAmount ?? "0"),
-      spent_sol: sizeSol,
-      opened_at: now,
-      updated_at: now,
-    });
+    const quote = result.quote as Record<string, unknown>;
+    await supabase.from("live_orders").update({ status: "confirmed", tx_signature: result.signature, quoted_input_amount: String(quote.inAmount ?? ""), quoted_output_amount: String(quote.outAmount ?? ""), actual_input_amount: String(spentLamports), actual_output_amount: received.toString(), quote, updated_at: now }).eq("id", orderId);
+    await supabase.from("live_positions").insert({ id: randomUUID(), strategy: signal.strategy, source_position_id: signal.source_position_id, mint: signal.mint, token_symbol: signal.token_symbol, status: "open", entry_order_id: orderId, entry_tx_signature: result.signature, token_amount: received.toString(), spent_sol: spentLamports / LAMPORTS_PER_SOL, opened_at: now, updated_at: now });
     await supabase.from("live_trade_signals").update({ status: "executed", completed_at: now }).eq("id", signal.id).eq("status", "claimed");
     await supabase.from("live_executor_state").update({ daily_entries: state.daily_entries + 1, updated_at: now }).eq("id", 1);
-    console.log(`[live-executor] confirmed buy ${signal.token_symbol ?? signal.mint}: ${result.signature}`);
-  } catch (error) {
-    const reason = error instanceof Error ? error.message : "unknown_execution_error";
+    console.log(`[live-executor] reconciled buy ${signal.token_symbol ?? signal.mint}: ${result.signature}`);
+  } catch (cause) {
+    const reason = cause instanceof Error ? cause.message : "unknown_execution_error";
     const now = new Date().toISOString();
     await supabase.from("live_orders").update({ status: "failed", error: reason, updated_at: now }).eq("id", orderId);
     await supabase.from("live_trade_signals").update({ status: "failed", rejection_reason: reason, completed_at: now }).eq("id", signal.id).eq("status", "claimed");
-    throw error;
+    await supabase.from("live_executor_state").update({ halted: true, halt_reason: `buy_failed:${reason}`, updated_at: now }).eq("id", 1);
+    throw cause;
+  }
+}
+
+async function executeSell(signal: Signal, state: ExecutorState): Promise<void> {
+  const { data, error } = await supabase.from("live_positions").select("*").eq("source_position_id", signal.source_position_id).eq("status", "open").single();
+  if (error) throw new Error(error.message);
+  const position = data as LivePosition;
+  const walletAmount = await getWalletTokenRawAmount(position.mint);
+  const storedAmount = BigInt(position.token_amount);
+  const sellAmount = walletAmount < storedAmount ? walletAmount : storedAmount;
+  if (sellAmount <= 0n) throw new Error("sell_reconciliation_no_tokens_available");
+  const tokenBefore = walletAmount;
+  const solBefore = await getWalletSolLamports();
+  const orderId = randomUUID();
+  await supabase.from("live_positions").update({ status: "closing", updated_at: new Date().toISOString() }).eq("id", position.id).eq("status", "open");
+  const { error: orderError } = await supabase.from("live_orders").insert({ id: orderId, signal_id: signal.id, strategy: signal.strategy, mint: signal.mint, side: "sell", requested_token_amount: sellAmount.toString(), max_slippage_bps: signal.max_slippage_bps, status: "created" });
+  if (orderError) throw new Error(orderError.message);
+  try {
+    await supabase.from("live_orders").update({ status: "submitted", updated_at: new Date().toISOString() }).eq("id", orderId);
+    const result = await executeJupiterSell({ inputMint: position.mint, rawTokenAmount: sellAmount.toString(), slippageBps: signal.max_slippage_bps });
+    const tokenAfter = await waitForTokenChange(position.mint, tokenBefore, "down");
+    const solAfter = await getWalletSolLamports();
+    const sold = tokenBefore - tokenAfter;
+    const receivedLamports = Math.max(0, solAfter - solBefore);
+    if (sold <= 0n || receivedLamports <= 0) throw new Error("sell_reconciliation_balance_delta_invalid");
+    const proceedsSol = receivedLamports / LAMPORTS_PER_SOL;
+    const pnlSol = proceedsSol - n(position.spent_sol);
+    const now = new Date().toISOString();
+    const quote = result.quote as Record<string, unknown>;
+    await supabase.from("live_orders").update({ status: "confirmed", tx_signature: result.signature, quoted_input_amount: String(quote.inAmount ?? ""), quoted_output_amount: String(quote.outAmount ?? ""), actual_input_amount: sold.toString(), actual_output_amount: String(receivedLamports), quote, updated_at: now }).eq("id", orderId);
+    await supabase.from("live_positions").update({ status: "closed", exit_order_id: orderId, exit_tx_signature: result.signature, proceeds_sol: proceedsSol, realized_pnl_sol: pnlSol, closed_at: now, updated_at: now }).eq("id", position.id);
+    await supabase.from("live_trade_signals").update({ status: "executed", completed_at: now }).eq("id", signal.id).eq("status", "claimed");
+    await supabase.from("live_executor_state").update({ daily_realized_pnl_sol: n(state.daily_realized_pnl_sol) + pnlSol, updated_at: now }).eq("id", 1);
+    console.log(`[live-executor] reconciled sell ${signal.token_symbol ?? signal.mint}: ${result.signature}; pnl=${pnlSol.toFixed(6)} SOL`);
+  } catch (cause) {
+    const reason = cause instanceof Error ? cause.message : "unknown_execution_error";
+    const now = new Date().toISOString();
+    await supabase.from("live_orders").update({ status: "failed", error: reason, updated_at: now }).eq("id", orderId);
+    await supabase.from("live_trade_signals").update({ status: "failed", rejection_reason: reason, completed_at: now }).eq("id", signal.id).eq("status", "claimed");
+    await supabase.from("live_positions").update({ status: "reconciliation_required", updated_at: now }).eq("id", position.id);
+    await supabase.from("live_executor_state").update({ halted: true, halt_reason: `sell_failed:${reason}`, updated_at: now }).eq("id", 1);
+    throw cause;
   }
 }
 
 async function processOnce(): Promise<void> {
-  const state = await loadState();
-  await heartbeat(runtimeArmed() ? undefined : "runtime_not_armed");
-  const signal = await nextSignal();
-  if (!signal) return;
-
-  const signalAgeMs = Date.now() - Date.parse(signal.created_at);
-  if (!Number.isFinite(signalAgeMs) || signalAgeMs > 60_000) {
-    await reject(signal, "stale_signal");
-    return;
+  if (cycleRunning) return;
+  cycleRunning = true;
+  try {
+    const state = await loadState();
+    await heartbeat(runtimeArmed() ? undefined : "runtime_not_armed");
+    await createSourceSignals(state);
+    const signal = await nextSignal();
+    if (!signal) return;
+    const signalAgeMs = Date.now() - Date.parse(signal.created_at);
+    if (!Number.isFinite(signalAgeMs) || signalAgeMs > 60_000) { await reject(signal, "stale_signal"); return; }
+    const rejection = await validate(signal, state);
+    if (rejection) { await reject(signal, rejection); return; }
+    if (!(await claim(signal))) return;
+    if (signal.side === "buy") await executeBuy(signal, state);
+    else await executeSell(signal, state);
+  } finally {
+    cycleRunning = false;
   }
-
-  const rejection = await validate(signal, state);
-  if (rejection) {
-    await reject(signal, rejection);
-    return;
-  }
-  if (signal.side !== "buy") {
-    await reject(signal, "sell_adapter_not_enabled");
-    return;
-  }
-  if (!(await claim(signal))) return;
-  await executeBuy(signal, state);
 }
 
 export function startLiveExecutor(): void {
-  console.log(`[live-executor] isolated service starting; armed=${runtimeArmed()} pollMs=${POLL_MS}; wallet=reused-existing-live-wallet`);
+  console.log(`[live-executor] isolated AI mirror starting; armed=${runtimeArmed()} pollMs=${POLL_MS}; wallet=reused-existing-live-wallet`);
   void processOnce().catch((error) => console.error("[live-executor] cycle failed", error));
   setInterval(() => void processOnce().catch((error) => console.error("[live-executor] cycle failed", error)), POLL_MS);
 }
