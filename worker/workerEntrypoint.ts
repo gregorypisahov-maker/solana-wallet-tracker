@@ -1,6 +1,7 @@
 import "dotenv/config";
 import { startMarketDiscoveryAgent } from "../paper-trader/marketDiscoveryAgent";
 import { startAiDiscoveryTrader } from "../paper-trader/aiDiscoveryTrader";
+import { startAiCapitalMirror } from "../paper-trader/aiCapitalMirror";
 import { startAiTradeAutopsyEngine } from "../paper-trader/aiTradeAutopsy";
 
 // Paper-only AI runtime. AI Discovery and its AI Capital mirror remain controlled
@@ -9,4 +10,5 @@ import { startAiTradeAutopsyEngine } from "../paper-trader/aiTradeAutopsy";
 console.log("[worker] paper-only AI runtime starting; live execution is isolated in its dedicated service");
 startMarketDiscoveryAgent();
 startAiDiscoveryTrader();
+startAiCapitalMirror();
 startAiTradeAutopsyEngine();
