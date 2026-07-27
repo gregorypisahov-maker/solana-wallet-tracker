@@ -1,6 +1,9 @@
 // lib/telegram.ts
 //
 // Telegram delivery is bounded so a network problem cannot freeze the worker.
+// Services without Telegram secrets enqueue alerts for the dedicated Telegram worker.
+
+import { getSupabaseAdmin } from './supabase';
 
 const configuredTelegramTimeoutMs = Number(process.env.TELEGRAM_TIMEOUT_MS ?? 10_000);
 const TELEGRAM_TIMEOUT_MS = Number.isFinite(configuredTelegramTimeoutMs)
@@ -11,13 +14,34 @@ function cleanEnv(value: string | undefined): string {
   return (value ?? '').trim().replace(/^[\'\"]|[\'\"]$/g, '').trim();
 }
 
+async function enqueueTelegramAlert(message: string, reason: string): Promise<boolean> {
+  try {
+    const service = cleanEnv(process.env.RAILWAY_SERVICE_NAME) || cleanEnv(process.env.SERVICE_NAME) || 'runtime';
+    const supabase = getSupabaseAdmin();
+    const { error } = await supabase.from('telegram_alert_outbox').insert({
+      message,
+      source: `${service}:${reason}`,
+      status: 'pending',
+    });
+    if (error) throw new Error(error.message);
+    console.log(`[telegram] Alert queued for dedicated sender (${reason}).`);
+    return true;
+  } catch (error) {
+    console.error('[telegram] Could not queue alert:', error instanceof Error ? error.message : String(error));
+    return false;
+  }
+}
+
 export async function sendTelegramAlert(message: string): Promise<void> {
-  // One shared token for alerts and inbound commands.
+  // One shared token for alerts and inbound commands when available on this service.
   const token = cleanEnv(process.env.TELEGRAM_BOT_TOKEN);
   const chatId = cleanEnv(process.env.TELEGRAM_CHAT_ID);
   if (!token || !chatId) {
-    console.log('Telegram not configured. Alert skipped:');
-    console.log(message);
+    const queued = await enqueueTelegramAlert(message, 'credentials_unavailable');
+    if (!queued) {
+      console.log('Telegram not configured and queue unavailable. Alert skipped:');
+      console.log(message);
+    }
     return;
   }
 
@@ -40,6 +64,7 @@ export async function sendTelegramAlert(message: string): Promise<void> {
     if (!res.ok) {
       const text = await res.text();
       console.error('Telegram send failed:', res.status, text);
+      await enqueueTelegramAlert(message, `direct_http_${res.status}`);
     }
   } catch (error) {
     const reason =
@@ -49,6 +74,7 @@ export async function sendTelegramAlert(message: string): Promise<void> {
           ? error.message
           : String(error);
     console.error('Telegram send failed:', reason);
+    await enqueueTelegramAlert(message, 'direct_network_failure');
   } finally {
     clearTimeout(timeout);
   }
