@@ -4,7 +4,18 @@ const JUPITER_API_KEY = process.env.JUPITER_API_KEY?.trim() || "";
 const JUPITER_BASE = (process.env.JUPITER_API_BASE_URL?.trim() || (JUPITER_API_KEY ? "https://api.jup.ag/swap/v1" : "https://lite-api.jup.ag/swap/v1")).replace(/\/$/, "");
 const JUPITER_QUOTE = `${JUPITER_BASE}/quote`;
 const JUPITER_SWAP = `${JUPITER_BASE}/swap`;
+const JUPITER_HTTP_ATTEMPTS = Math.max(1, Math.min(5, Number(process.env.JUPITER_HTTP_ATTEMPTS) || 3));
+const JUPITER_HTTP_TIMEOUT_MS = Math.max(3_000, Number(process.env.JUPITER_HTTP_TIMEOUT_MS) || 12_000);
+const JUPITER_BUILD_ATTEMPTS = Math.max(1, Math.min(3, Number(process.env.JUPITER_BUILD_ATTEMPTS) || 2));
+const JUPITER_CONFIRM_TIMEOUT_MS = Math.max(30_000, Number(process.env.JUPITER_CONFIRM_TIMEOUT_MS) || 100_000);
+const JUPITER_REBROADCAST_MS = Math.max(1_000, Number(process.env.JUPITER_REBROADCAST_MS) || 2_000);
+const JUPITER_MAX_PRIORITY_FEE_LAMPORTS = Math.max(50_000, Number(process.env.JUPITER_MAX_PRIORITY_FEE_LAMPORTS) || 500_000);
+const JUPITER_PRIORITY_LEVEL = ["medium", "high", "veryHigh"].includes(process.env.JUPITER_PRIORITY_LEVEL || "")
+  ? process.env.JUPITER_PRIORITY_LEVEL
+  : "veryHigh";
 export const SOL_MINT = "So11111111111111111111111111111111111111112";
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function decodeBase58(value: string): Uint8Array {
   const alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
@@ -30,6 +41,29 @@ function decodeBase58(value: string): Uint8Array {
   return Uint8Array.from(bytes.reverse());
 }
 
+function encodeBase58(value: Uint8Array): string {
+  const alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+  if (value.length === 0) return "";
+  const digits = [0];
+  for (const byte of value) {
+    let carry = byte;
+    for (let i = 0; i < digits.length; i += 1) {
+      carry += digits[i] << 8;
+      digits[i] = carry % 58;
+      carry = Math.floor(carry / 58);
+    }
+    while (carry > 0) {
+      digits.push(carry % 58);
+      carry = Math.floor(carry / 58);
+    }
+  }
+  let leadingZeroes = 0;
+  while (leadingZeroes < value.length && value[leadingZeroes] === 0) leadingZeroes += 1;
+  let result = "1".repeat(leadingZeroes);
+  for (let i = digits.length - 1; i >= 0; i -= 1) result += alphabet[digits[i]];
+  return result;
+}
+
 function errorDetails(cause: unknown): string {
   if (!(cause instanceof Error)) return String(cause);
   const nested = cause.cause;
@@ -51,6 +85,35 @@ function jupiterHeaders(json = false): Record<string, string> {
     ...(json ? { "Content-Type": "application/json" } : {}),
     ...(JUPITER_API_KEY ? { "x-api-key": JUPITER_API_KEY } : {}),
   };
+}
+
+function retryableHttpStatus(status: number): boolean {
+  return status === 408 || status === 425 || status === 429 || status >= 500;
+}
+
+async function fetchJupiter(endpoint: URL | string, init: RequestInit, label: string): Promise<Response> {
+  const target = endpoint instanceof URL ? endpoint : new URL(endpoint);
+  let lastError = `${label} failed`;
+  for (let attempt = 1; attempt <= JUPITER_HTTP_ATTEMPTS; attempt += 1) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), JUPITER_HTTP_TIMEOUT_MS);
+    let response: Response | null = null;
+    try {
+      response = await fetch(target, { ...init, signal: controller.signal, cache: "no-store" });
+    } catch (cause) {
+      lastError = `${label} network failure at ${target.origin}: ${errorDetails(cause)}`;
+    } finally {
+      clearTimeout(timeout);
+    }
+
+    if (response?.ok) return response;
+    if (response) {
+      lastError = `${label} failed (${response.status}): ${await responseError(response)}`;
+      if (!retryableHttpStatus(response.status)) throw new Error(lastError);
+    }
+    if (attempt < JUPITER_HTTP_ATTEMPTS) await sleep(250 * 2 ** (attempt - 1));
+  }
+  throw new Error(lastError);
 }
 
 export function getRpcUrl(): string | null {
@@ -116,6 +179,72 @@ export async function getLiveWalletHealth() {
   return { rpcConfigured: Boolean(rpcUrl), publicKey, signerConfigured, armed, enabled, balanceSol, error };
 }
 
+async function confirmedSignature(connection: Connection, signature: string): Promise<boolean> {
+  const response = await connection.getSignatureStatuses([signature], { searchTransactionHistory: true });
+  const status = response.value[0];
+  if (!status) return false;
+  if (status.err) throw new Error(`Transaction failed: ${JSON.stringify(status.err)}`);
+  return status.confirmationStatus === "confirmed" || status.confirmationStatus === "finalized" || status.confirmations === null;
+}
+
+async function confirmJupiterTransaction(input: {
+  connection: Connection;
+  signature: string;
+  transactionBinary: Uint8Array;
+  lastValidBlockHeight: number;
+}): Promise<void> {
+  const startedAt = Date.now();
+  let lastBroadcastAt = 0;
+  let lastRpcError = "";
+
+  while (Date.now() - startedAt < JUPITER_CONFIRM_TIMEOUT_MS) {
+    try {
+      if (await confirmedSignature(input.connection, input.signature)) return;
+      lastRpcError = "";
+    } catch (cause) {
+      const message = errorDetails(cause);
+      if (message.startsWith("Transaction failed:")) throw cause;
+      lastRpcError = message;
+    }
+
+    try {
+      const currentBlockHeight = await input.connection.getBlockHeight("confirmed");
+      if (currentBlockHeight > input.lastValidBlockHeight) {
+        const landed = await input.connection.getTransaction(input.signature, {
+          commitment: "confirmed",
+          maxSupportedTransactionVersion: 0,
+        }).catch(() => null);
+        if (landed?.meta?.err) throw new Error(`Transaction failed: ${JSON.stringify(landed.meta.err)}`);
+        if (landed) return;
+        throw new Error(`Jupiter transaction expired before confirmation: ${input.signature}`);
+      }
+    } catch (cause) {
+      const message = errorDetails(cause);
+      if (message.startsWith("Transaction failed:") || message.startsWith("Jupiter transaction expired")) throw cause;
+      lastRpcError = message;
+    }
+
+    if (Date.now() - lastBroadcastAt >= JUPITER_REBROADCAST_MS) {
+      lastBroadcastAt = Date.now();
+      await input.connection.sendRawTransaction(input.transactionBinary, {
+        maxRetries: 0,
+        skipPreflight: true,
+        preflightCommitment: "confirmed",
+      }).catch((cause) => {
+        lastRpcError = errorDetails(cause);
+      });
+    }
+    await sleep(1_000);
+  }
+
+  if (await confirmedSignature(input.connection, input.signature).catch(() => false)) return;
+  throw new Error(`Jupiter confirmation timed out for ${input.signature}${lastRpcError ? `: ${lastRpcError}` : ""}`);
+}
+
+function safeToRebuild(message: string): boolean {
+  return /Jupiter (quote|swap build) (network failure|failed)|Jupiter transaction expired|blockhash not found|block height exceeded/i.test(message);
+}
+
 export async function executeJupiterSwap(input: {
   inputMint: string;
   outputMint: string;
@@ -131,53 +260,80 @@ export async function executeJupiterSwap(input: {
   new PublicKey(input.outputMint);
 
   const signer = getLiveSigner();
-  const quoteUrl = new URL(JUPITER_QUOTE);
-  quoteUrl.searchParams.set("inputMint", input.inputMint);
-  quoteUrl.searchParams.set("outputMint", input.outputMint);
-  quoteUrl.searchParams.set("amount", input.rawAmount);
-  quoteUrl.searchParams.set("slippageBps", String(input.slippageBps));
-  quoteUrl.searchParams.set("restrictIntermediateTokens", "true");
+  let lastError = "Jupiter swap failed";
 
-  let quoteResponse: Response;
-  try {
-    quoteResponse = await fetch(quoteUrl, { cache: "no-store", headers: jupiterHeaders() });
-  } catch (cause) {
-    throw new Error(`Jupiter quote network failure at ${quoteUrl.origin}: ${errorDetails(cause)}`);
+  for (let buildAttempt = 1; buildAttempt <= JUPITER_BUILD_ATTEMPTS; buildAttempt += 1) {
+    try {
+      const quoteUrl = new URL(JUPITER_QUOTE);
+      quoteUrl.searchParams.set("inputMint", input.inputMint);
+      quoteUrl.searchParams.set("outputMint", input.outputMint);
+      quoteUrl.searchParams.set("amount", input.rawAmount);
+      quoteUrl.searchParams.set("slippageBps", String(input.slippageBps));
+      quoteUrl.searchParams.set("restrictIntermediateTokens", "true");
+
+      const quoteResponse = await fetchJupiter(quoteUrl, { headers: jupiterHeaders() }, "Jupiter quote");
+      const quote = await quoteResponse.json();
+      if (!quote?.outAmount || BigInt(String(quote.outAmount)) <= 0n) throw new Error("Jupiter returned an empty quote");
+
+      const swapResponse = await fetchJupiter(JUPITER_SWAP, {
+        method: "POST",
+        headers: jupiterHeaders(true),
+        body: JSON.stringify({
+          quoteResponse: quote,
+          userPublicKey: signer.publicKey.toBase58(),
+          wrapAndUnwrapSol: true,
+          dynamicComputeUnitLimit: true,
+          prioritizationFeeLamports: {
+            priorityLevelWithMaxLamports: {
+              maxLamports: JUPITER_MAX_PRIORITY_FEE_LAMPORTS,
+              global: false,
+              priorityLevel: JUPITER_PRIORITY_LEVEL,
+            },
+          },
+        }),
+      }, "Jupiter swap build");
+      const swap = await swapResponse.json();
+      if (swap?.simulationError) throw new Error(`Jupiter swap simulation failed: ${JSON.stringify(swap.simulationError)}`);
+      if (!swap?.swapTransaction) throw new Error("Jupiter returned no swap transaction");
+      const lastValidBlockHeight = Number(swap.lastValidBlockHeight);
+      if (!Number.isSafeInteger(lastValidBlockHeight) || lastValidBlockHeight <= 0) {
+        throw new Error("Jupiter returned no valid lastValidBlockHeight");
+      }
+
+      const transaction = VersionedTransaction.deserialize(Buffer.from(swap.swapTransaction, "base64"));
+      transaction.sign([signer]);
+      const transactionBinary = transaction.serialize();
+      const expectedSignature = encodeBase58(transaction.signatures[0]);
+      const connection = getLiveConnection();
+
+      let signature: string;
+      try {
+        signature = await connection.sendRawTransaction(transactionBinary, {
+          maxRetries: 0,
+          skipPreflight: false,
+          preflightCommitment: "confirmed",
+        });
+      } catch (cause) {
+        const message = errorDetails(cause);
+        if (/blockhash not found|block height exceeded/i.test(message)) throw new Error(message);
+        if (/simulation failed|insufficient funds|custom program error|slippage/i.test(message)) {
+          throw new Error(`Solana preflight failed: ${message}`);
+        }
+        const landed = await confirmedSignature(connection, expectedSignature).catch(() => false);
+        if (landed) return { signature: expectedSignature, quote };
+        throw new Error(`Solana transaction submission failed: ${message}`);
+      }
+
+      await confirmJupiterTransaction({ connection, signature, transactionBinary, lastValidBlockHeight });
+      return { signature, quote };
+    } catch (cause) {
+      lastError = errorDetails(cause);
+      if (buildAttempt >= JUPITER_BUILD_ATTEMPTS || !safeToRebuild(lastError)) throw new Error(lastError);
+      await sleep(500 * buildAttempt);
+    }
   }
-  if (!quoteResponse.ok) throw new Error(`Jupiter quote failed (${quoteResponse.status}): ${await responseError(quoteResponse)}`);
-  const quote = await quoteResponse.json();
-  if (!quote?.outAmount || BigInt(String(quote.outAmount)) <= 0n) throw new Error("Jupiter returned an empty quote");
 
-  let swapResponse: Response;
-  try {
-    swapResponse = await fetch(JUPITER_SWAP, {
-      method: "POST",
-      headers: jupiterHeaders(true),
-      body: JSON.stringify({
-        quoteResponse: quote,
-        userPublicKey: signer.publicKey.toBase58(),
-        wrapAndUnwrapSol: true,
-        dynamicComputeUnitLimit: true,
-        prioritizationFeeLamports: "auto",
-      }),
-    });
-  } catch (cause) {
-    throw new Error(`Jupiter swap network failure at ${new URL(JUPITER_SWAP).origin}: ${errorDetails(cause)}`);
-  }
-  if (!swapResponse.ok) throw new Error(`Jupiter swap build failed (${swapResponse.status}): ${await responseError(swapResponse)}`);
-  const swap = await swapResponse.json();
-  if (!swap.swapTransaction) throw new Error("Jupiter returned no swap transaction");
-
-  const transaction = VersionedTransaction.deserialize(Buffer.from(swap.swapTransaction, "base64"));
-  transaction.sign([signer]);
-  const connection = getLiveConnection();
-  const latest = await connection.getLatestBlockhash("confirmed");
-  const signature = await connection.sendRawTransaction(transaction.serialize(), { maxRetries: 3, skipPreflight: false });
-  const confirmation = await connection.confirmTransaction({ signature, ...latest }, "confirmed");
-  if (confirmation.value.err) throw new Error(`Transaction failed: ${JSON.stringify(confirmation.value.err)}`);
-  const status = await connection.getSignatureStatus(signature, { searchTransactionHistory: true });
-  if (status.value?.err) throw new Error(`Confirmed transaction has an error: ${JSON.stringify(status.value.err)}`);
-  return { signature, quote };
+  throw new Error(lastError);
 }
 
 export async function executeJupiterBuy(input: { outputMint: string; lamports: number; slippageBps: number }) {
