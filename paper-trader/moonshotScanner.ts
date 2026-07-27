@@ -296,6 +296,7 @@ export async function startMoonshotScanner(): Promise<void> {
   let rpcTail: Promise<void> = Promise.resolve();
   let lastRpcFinishedAt = 0;
   let polling = false;
+  let scannerStatus: "active" | "degraded" = "degraded";
 
   async function pacedRpc<T>(operation: () => Promise<T>): Promise<T> {
     const run = rpcTail
@@ -599,11 +600,13 @@ export async function startMoonshotScanner(): Promise<void> {
       if (failures === 0 && metrics.queueDepth === 0) {
         metrics.lastError = null;
       }
-      await persistState(failures === config.programIds.length ? "degraded" : "active");
+      scannerStatus = failures === config.programIds.length ? "degraded" : "active";
+      await persistState(scannerStatus);
     } catch (error) {
       metrics.lastError = `poll loop: ${errorMessage(error)}`;
       console.error(`[moonshot-scanner] ${metrics.lastError}`);
-      await persistState("degraded");
+      scannerStatus = "degraded";
+      await persistState(scannerStatus);
     } finally {
       polling = false;
     }
@@ -624,6 +627,6 @@ export async function startMoonshotScanner(): Promise<void> {
   scheduleNextPoll();
 
   setInterval(() => {
-    void persistState(metrics.lastPollAt ? "active" : "degraded");
+    void persistState(scannerStatus);
   }, config.heartbeatMs);
 }
