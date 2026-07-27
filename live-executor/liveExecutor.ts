@@ -85,30 +85,6 @@ async function openPositionCount(): Promise<number> {
   if (error) throw new Error(error.message);
   return count ?? 0;
 }
-async function hasDuplicateTokenSymbol(signal: Signal): Promise<boolean> {
-  const symbol = signal.token_symbol?.trim();
-  if (!symbol) return false;
-
-  const { data: discoveredDuplicate, error: discoveryError } = await supabase
-    .from("ai_discovery_positions")
-    .select("mint")
-    .ilike("token_symbol", symbol)
-    .neq("mint", signal.mint)
-    .limit(1)
-    .maybeSingle();
-  if (discoveryError) throw new Error(discoveryError.message);
-  if (discoveredDuplicate) return true;
-
-  const { data: liveDuplicate, error: liveError } = await supabase
-    .from("live_positions")
-    .select("mint")
-    .ilike("token_symbol", symbol)
-    .neq("mint", signal.mint)
-    .limit(1)
-    .maybeSingle();
-  if (liveError) throw new Error(liveError.message);
-  return Boolean(liveDuplicate);
-}
 async function validate(signal: Signal, state: ExecutorState): Promise<string | null> {
   if (!runtimeArmed()) return "runtime_not_armed";
   if (!state.enabled) return "database_gate_disabled";
@@ -126,7 +102,6 @@ async function validate(signal: Signal, state: ExecutorState): Promise<string | 
     if (state.daily_entries >= state.max_daily_entries) return "daily_entry_limit";
     if (!(size > 0)) return "invalid_position_size";
     if (size > n(state.max_position_sol)) return "position_size_above_limit";
-    if (await hasDuplicateTokenSymbol(signal)) return "duplicate_token_symbol_different_mint";
     if (await openPositionCount() >= state.max_open_positions) return "max_open_positions";
     if (health.balanceSol == null || health.balanceSol - size < MIN_WALLET_RESERVE_SOL) return "wallet_reserve_limit";
   } else {
