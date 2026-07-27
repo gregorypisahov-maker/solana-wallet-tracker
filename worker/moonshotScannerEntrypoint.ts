@@ -1,9 +1,19 @@
 import "dotenv/config";
 import { startMoonshotScanner } from "../paper-trader/moonshotScanner";
 
-// A dedicated scanner service must remain healthy even when disabled or
-// misconfigured. This timer prevents Railway from treating a safe idle state as
-// a crash. The process imports no paper or live execution module.
+// Emergency fail-closed lock. The current provider subscription can report a
+// local subscription before the remote WebSocket accepts logsSubscribe. Keep
+// Moonshot observation disabled until the remote-ack validation is repaired.
+const railwayRequestedEnabled = process.env.ENABLE_MOONSHOT_SCANNER;
+process.env.ENABLE_MOONSHOT_SCANNER = "false";
+
+console.log(
+  `[moonshot-scanner] safety lock active; scanner forced disabled during WebSocket repair${
+    railwayRequestedEnabled === "true" ? " (Railway requested true)" : ""
+  }`,
+);
+
+// Keep the dedicated Railway service healthy in its intentionally idle state.
 setInterval(() => undefined, 60_000);
 
 void startMoonshotScanner().catch((error) => {
