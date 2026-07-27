@@ -1,0 +1,32 @@
+name: Moonshot Phase 1
+
+on:
+  pull_request:
+    paths:
+      - "paper-trader/moonshotScanner.ts"
+      - "paper-trader/moonshotScanner.test.ts"
+      - "worker/moonshotScannerEntrypoint.ts"
+      - "supabase/migrations/20260727123000_moonshot_scanner_phase1.sql"
+      - "docs/moonshot-phase1.md"
+      - "package.json"
+      - ".github/workflows/moonshot-phase1.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --silent
+      - name: Moonshot unit tests
+        run: node --import tsx --test paper-trader/moonshotScanner.test.ts
+      - name: TypeScript check
+        run: npm run typecheck
