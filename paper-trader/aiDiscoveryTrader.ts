@@ -1,13 +1,17 @@
 import { randomUUID } from "node:crypto";
 import { getSupabaseAdmin } from "../lib/supabase";
 import { sendTelegramAlert } from "../lib/telegram";
+import {
+  getJupiterQuote,
+  JUPITER_SOL_MINT,
+  type JupiterQuoteOnlyResult,
+} from "../lib/jupiterQuote";
+import { PAPER_COST_MODEL } from "./executionCosts";
 
 const supabase = getSupabaseAdmin();
-const VERSION = "ai_discovery_trader_v1_5_2026_07_24";
+const VERSION = "ai_discovery_trader_v1_6_quote_exits_2026_07_28";
 const SHADOW_MODEL_VERSION = "baseline_v1_2026_07_24";
 const DEX_URL = "https://api.dexscreener.com/tokens/v1/solana";
-const ENTRY_FRICTION_PCT = 0.6;
-const EXIT_FRICTION_PCT = 0.6;
 const FIXED_SIZE_SOL = 0.2;
 const MAX_CONSECUTIVE_LOSSES = 3;
 const DAILY_LOSS_LIMIT_SOL = 0.05;
@@ -21,6 +25,16 @@ const TRAIL_DISTANCE_PCT = 4;
 const MAX_HOLD_MS = 45 * 60_000;
 const REQUEST_TIMEOUT_MS = 12_000;
 const OUTCOME_HORIZONS = [5, 15, 30, 45] as const;
+const LAMPORTS_PER_SOL = 1_000_000_000;
+const QUOTE_EXITS_ENABLED = process.env.AI_PAPER_QUOTE_EXITS_ENABLED !== "false";
+const QUOTE_SLIPPAGE_BPS = Math.min(
+  200,
+  Math.max(10, Number(process.env.LIVE_MAX_SLIPPAGE_BPS) || 100)
+);
+const EMERGENCY_EXIT_FLOOR_PCT = Math.min(
+  100,
+  Math.max(0, Number(process.env.EMERGENCY_EXIT_FLOOR_PCT) || 30)
+);
 
 let scanRunning = false;
 let positionRunning = false;
@@ -47,6 +61,9 @@ type Position = {
   last_price_usd: number | string;
   peak_price_usd: number | string;
   size_sol: number | string;
+  token_amount: string | null;
+  quote_peak_value_sol: number | string | null;
+  last_executable_value_sol: number | string | null;
   opened_at: string;
   entry_snapshot: Record<string, unknown>;
 };
@@ -56,6 +73,27 @@ type Market = {
   liquidityUsd: number;
   marketCapUsd: number;
   changeM5: number;
+};
+
+type LiveMirror = {
+  token_amount: string;
+  spent_sol: number | string;
+  proceeds_sol: number | string | null;
+  realized_pnl_sol: number | string | null;
+  status: string;
+  closed_at: string | null;
+};
+
+type ExitValuation = {
+  source: "quote" | "live_mirror";
+  route: boolean;
+  outLamports: bigint;
+  executableSol: number;
+  proceedsSol: number;
+  impliedPriceUsd: number;
+  entryValueSol: number;
+  quoteError?: string;
+  rawQuote?: Record<string, unknown> | null;
 };
 
 function n(value: unknown, fallback = 0): number {
@@ -154,7 +192,6 @@ async function resetDay(state: State): Promise<State> {
     .eq("id", 1)
     .select("*")
     .single();
-
   if (error) throw new Error(error.message);
   return data as State;
 }
@@ -261,7 +298,6 @@ async function recordObservation(
     })
     .select("id")
     .single();
-
   if (error) throw new Error(error.message);
   return Number(data.id);
 }
@@ -333,6 +369,27 @@ async function maybeSummary(): Promise<void> {
   );
 }
 
+async function paperEntryTokenAmount(
+  mint: string,
+  sizeSol: number
+): Promise<{ tokenAmount: string | null; quote: Record<string, unknown> | null }> {
+  try {
+    const quote = await getJupiterQuote({
+      inputMint: JUPITER_SOL_MINT,
+      outputMint: mint,
+      rawTokenAmount: String(Math.floor(sizeSol * LAMPORTS_PER_SOL)),
+      slippageBps: QUOTE_SLIPPAGE_BPS,
+    });
+    return {
+      tokenAmount: quote.route ? String(quote.outLamports) : null,
+      quote: quote.raw,
+    };
+  } catch (error) {
+    console.warn("[ai-discovery-trader] entry token amount quote failed", error);
+    return { tokenAmount: null, quote: null };
+  }
+}
+
 async function openTrade(
   state: State,
   opportunity: any,
@@ -344,12 +401,14 @@ async function openTrade(
 
   const now = new Date().toISOString();
   const positionId = `ai_${randomUUID()}`;
+  const entryQuote = await paperEntryTokenAmount(opportunity.mint, sizeSol);
   const snapshot = {
     version: VERSION,
     opportunity,
     market,
     observationId,
-    friction: { entryPct: ENTRY_FRICTION_PCT, exitPct: EXIT_FRICTION_PCT },
+    quoteExitAccounting: true,
+    entryQuote: entryQuote.quote,
   };
 
   const { error } = await supabase.from("ai_discovery_positions").insert({
@@ -361,6 +420,9 @@ async function openTrade(
     last_price_usd: market.priceUsd,
     peak_price_usd: market.priceUsd,
     size_sol: sizeSol,
+    token_amount: entryQuote.tokenAmount,
+    quote_peak_value_sol: sizeSol,
+    last_executable_value_sol: sizeSol,
     opened_at: now,
     last_checked_at: now,
     entry_snapshot: snapshot,
@@ -400,11 +462,9 @@ async function openTrade(
 async function scanEntries(): Promise<void> {
   if (scanRunning) return;
   scanRunning = true;
-
   try {
     const state = await resetDay(await loadState());
     const now = new Date().toISOString();
-
     await supabase
       .from("ai_discovery_state")
       .update({ last_scan_at: now, updated_at: now })
@@ -416,7 +476,6 @@ async function scanEntries(): Promise<void> {
 
     const cutoff = new Date(Date.now() - MAX_OPPORTUNITY_AGE_MS).toISOString();
     const opportunities = await collectCandidateObservations(cutoff);
-
     if (!state.enabled || state.halted) return;
 
     if (
@@ -435,7 +494,6 @@ async function scanEntries(): Promise<void> {
     }
 
     if ((await loadPositions()).length > 0) return;
-
     for (const opportunity of opportunities.filter(
       (item: any) => ruleAssessment(item).passed
     )) {
@@ -444,7 +502,6 @@ async function scanEntries(): Promise<void> {
         ruleAssessment(opportunity)
       );
       if (await cooledDown(opportunity.mint)) continue;
-
       try {
         const market = await priceFor(opportunity.mint, opportunity.pair_address);
         if (!market || market.changeM5 < 0 || market.changeM5 > 15) continue;
@@ -465,7 +522,6 @@ async function scanEntries(): Promise<void> {
 async function trackCandidateOutcomes(): Promise<void> {
   if (outcomeRunning) return;
   outcomeRunning = true;
-
   try {
     const oldest = new Date(Date.now() - 48 * 60 * 60_000).toISOString();
     const { data, error } = await supabase
@@ -486,7 +542,6 @@ async function trackCandidateOutcomes(): Promise<void> {
           observation[`price_${minutes}m_usd`] == null
       );
       if (!due.length) continue;
-
       try {
         const market = await pairFor(
           observation.mint,
@@ -494,7 +549,6 @@ async function trackCandidateOutcomes(): Promise<void> {
           0
         );
         if (!market) continue;
-
         const basePrice =
           n(
             observation.entry_price_usd ??
@@ -509,18 +563,14 @@ async function trackCandidateOutcomes(): Promise<void> {
         const updates: Record<string, unknown> = {
           updated_at: new Date().toISOString(),
         };
-
         for (const minutes of due) {
           updates[`price_${minutes}m_usd`] = market.priceUsd;
           updates[`return_${minutes}m_pct`] =
             effectiveBase > 0
-              ? Number(
-                  (((market.priceUsd / effectiveBase) - 1) * 100).toFixed(4)
-                )
+              ? Number((((market.priceUsd / effectiveBase) - 1) * 100).toFixed(4))
               : null;
         }
         if (ageMinutes >= 45) updates.outcome_complete = true;
-
         await supabase
           .from("ai_candidate_observations")
           .update(updates)
@@ -537,11 +587,130 @@ async function trackCandidateOutcomes(): Promise<void> {
   }
 }
 
+async function liveMirrorFor(positionId: string): Promise<LiveMirror | null> {
+  const { data, error } = await supabase
+    .from("live_positions")
+    .select("token_amount,spent_sol,proceeds_sol,realized_pnl_sol,status,closed_at")
+    .eq("source_position_id", positionId)
+    .maybeSingle();
+  if (error) throw new Error(error.message);
+  return data as LiveMirror | null;
+}
+
+async function syncPositionTokenAmount(
+  position: Position,
+  mirror: LiveMirror | null
+): Promise<string | null> {
+  if (mirror?.token_amount && mirror.token_amount !== position.token_amount) {
+    await supabase
+      .from("ai_discovery_positions")
+      .update({ token_amount: mirror.token_amount, updated_at: new Date().toISOString() })
+      .eq("position_id", position.position_id);
+    position.token_amount = mirror.token_amount;
+  }
+  return position.token_amount;
+}
+
+async function quoteExitValuation(
+  position: Position,
+  mirror: LiveMirror | null
+): Promise<ExitValuation> {
+  const entryValueSol = Math.max(0, n(mirror?.spent_sol, n(position.size_sol)));
+  const tokenAmount = await syncPositionTokenAmount(position, mirror);
+  const entryPriceUsd = n(position.entry_price_usd);
+
+  if (!QUOTE_EXITS_ENABLED) {
+    const market = await pairFor(position.mint, position.pair_address, 0).catch(() => null);
+    if (!market) {
+      return {
+        source: "quote",
+        route: false,
+        outLamports: 0n,
+        executableSol: 0,
+        proceedsSol: 0,
+        impliedPriceUsd: 0,
+        entryValueSol,
+        quoteError: "quote_exits_disabled_and_market_unavailable",
+      };
+    }
+    const executableSol = Math.max(
+      0,
+      entryValueSol * (market.priceUsd / Math.max(entryPriceUsd, Number.EPSILON))
+    );
+    return {
+      source: "quote",
+      route: true,
+      outLamports: BigInt(Math.floor(executableSol * LAMPORTS_PER_SOL)),
+      executableSol,
+      proceedsSol: Math.max(
+        0,
+        executableSol - PAPER_COST_MODEL.networkCostSolPerTransaction
+      ),
+      impliedPriceUsd: market.priceUsd,
+      entryValueSol,
+      quoteError: "quote_exits_disabled",
+    };
+  }
+
+  if (!tokenAmount || !/^\d+$/.test(tokenAmount) || BigInt(tokenAmount) <= 0n) {
+    return {
+      source: "quote",
+      route: false,
+      outLamports: 0n,
+      executableSol: 0,
+      proceedsSol: 0,
+      impliedPriceUsd: 0,
+      entryValueSol,
+      quoteError: "missing_raw_token_amount",
+    };
+  }
+
+  let quote: JupiterQuoteOnlyResult;
+  try {
+    quote = await getJupiterQuote({
+      inputMint: position.mint,
+      outputMint: JUPITER_SOL_MINT,
+      rawTokenAmount: tokenAmount,
+      slippageBps: QUOTE_SLIPPAGE_BPS,
+    });
+  } catch (error) {
+    return {
+      source: "quote",
+      route: false,
+      outLamports: 0n,
+      executableSol: 0,
+      proceedsSol: 0,
+      impliedPriceUsd: 0,
+      entryValueSol,
+      quoteError: error instanceof Error ? error.message : String(error),
+    };
+  }
+
+  const executableSol = Number(quote.outLamports) / LAMPORTS_PER_SOL;
+  const proceedsSol = Math.max(
+    0,
+    executableSol - PAPER_COST_MODEL.networkCostSolPerTransaction
+  );
+  const impliedPriceUsd =
+    entryValueSol > 0
+      ? entryPriceUsd * (executableSol / entryValueSol)
+      : 0;
+  return {
+    source: "quote",
+    route: quote.route,
+    outLamports: quote.outLamports,
+    executableSol,
+    proceedsSol,
+    impliedPriceUsd,
+    entryValueSol,
+    rawQuote: quote.raw,
+  };
+}
+
 async function closeTrade(
   position: Position,
-  market: any,
-  reason: string,
-  grossPct: number
+  valuation: ExitValuation,
+  reason: string
 ): Promise<void> {
   const { data: existing, error: existingError } = await supabase
     .from("ai_discovery_trades")
@@ -554,20 +723,23 @@ async function closeTrade(
       .from("ai_discovery_positions")
       .delete()
       .eq("position_id", position.position_id);
-    console.warn(
-      `[ai-discovery-trader] close already recorded for ${position.token_symbol}`
-    );
     return;
   }
 
-  const exitMultiple =
-    1 + (grossPct - ENTRY_FRICTION_PCT - EXIT_FRICTION_PCT) / 100;
   const sizeSol = n(position.size_sol);
-  const proceeds = Math.max(0, sizeSol * exitMultiple);
+  const proceeds = Math.max(0, valuation.proceedsSol);
   const pnlSol = proceeds - sizeSol;
-  const netPct = grossPct - ENTRY_FRICTION_PCT - EXIT_FRICTION_PCT;
+  const grossPct = sizeSol > 0 ? ((valuation.executableSol / sizeSol) - 1) * 100 : -100;
+  const netPct = sizeSol > 0 ? (pnlSol / sizeSol) * 100 : -100;
   const now = new Date().toISOString();
   const state = await loadState();
+
+  console.log(
+    `[ai-discovery-trader] exit quote ${position.token_symbol} ` +
+      `outLamports=${valuation.outLamports.toString()} route=${valuation.route} ` +
+      `impliedPrice=${valuation.impliedPriceUsd} slippageBps=${QUOTE_SLIPPAGE_BPS} ` +
+      `source=${valuation.source} reason=${reason}`
+  );
 
   const { error } = await supabase.from("ai_discovery_trades").insert({
     position_id: position.position_id,
@@ -575,18 +747,28 @@ async function closeTrade(
     token_symbol: position.token_symbol,
     pair_address: position.pair_address,
     entry_price_usd: n(position.entry_price_usd),
-    exit_price_usd: market.priceUsd,
+    exit_price_usd: Math.max(0, valuation.impliedPriceUsd),
     size_sol: sizeSol,
+    proceeds_sol: proceeds,
     gross_return_pct: grossPct,
     net_return_pct: netPct,
     pnl_sol: pnlSol,
+    execution_source: valuation.source,
     exit_reason: reason,
     opened_at: position.opened_at,
     closed_at: now,
     entry_snapshot: position.entry_snapshot,
     exit_snapshot: {
       version: VERSION,
-      market,
+      source: valuation.source,
+      route: valuation.route,
+      outLamports: valuation.outLamports.toString(),
+      executableSol: valuation.executableSol,
+      proceedsSol: proceeds,
+      impliedPriceUsd: valuation.impliedPriceUsd,
+      slippageBps: QUOTE_SLIPPAGE_BPS,
+      quoteError: valuation.quoteError ?? null,
+      quote: valuation.rawQuote ?? null,
       peakPriceUsd: n(position.peak_price_usd),
     },
   });
@@ -600,9 +782,6 @@ async function closeTrade(
         .from("ai_discovery_positions")
         .delete()
         .eq("position_id", position.position_id);
-      console.warn(
-        `[ai-discovery-trader] close already recorded for ${position.token_symbol}`
-      );
       return;
     }
     throw new Error(error.message);
@@ -618,8 +797,7 @@ async function closeTrade(
     .from("ai_discovery_state")
     .update({
       bankroll_sol: n(state.bankroll_sol) + proceeds,
-      daily_realized_pnl_sol:
-        n(state.daily_realized_pnl_sol) + pnlSol,
+      daily_realized_pnl_sol: n(state.daily_realized_pnl_sol) + pnlSol,
       consecutive_losses: losses,
       updated_at: now,
     })
@@ -633,17 +811,79 @@ async function closeTrade(
       `Exit: <b>${reason.replaceAll("_", " ")}</b>`,
       `Net: <b>${netPct >= 0 ? "+" : ""}${netPct.toFixed(2)}%</b>`,
       `PnL: <b>${pnlSol >= 0 ? "+" : ""}${pnlSol.toFixed(5)} SOL</b>`,
+      `Source: <b>${valuation.source}</b>`,
       "",
-      "🧪 Paper only.",
+      "🧪 Paper accounting uses executable value.",
     ].join("\n")
   );
+}
+
+async function reconcileClosedLiveMirrors(): Promise<void> {
+  const { data: mirrors, error } = await supabase
+    .from("live_positions")
+    .select("source_position_id,proceeds_sol,realized_pnl_sol,closed_at")
+    .eq("status", "closed")
+    .not("proceeds_sol", "is", null)
+    .order("closed_at", { ascending: false })
+    .limit(50);
+  if (error) throw new Error(error.message);
+
+  for (const mirror of mirrors ?? []) {
+    const { data: trade, error: tradeError } = await supabase
+      .from("ai_discovery_trades")
+      .select("id,size_sol,pnl_sol,proceeds_sol,execution_source,exit_snapshot")
+      .eq("position_id", mirror.source_position_id)
+      .maybeSingle();
+    if (tradeError) throw new Error(tradeError.message);
+    if (!trade || trade.execution_source === "live_mirror") continue;
+
+    const actualProceeds = n(mirror.proceeds_sol);
+    const actualPnl = n(mirror.realized_pnl_sol, actualProceeds - n(trade.size_sol));
+    const oldPnl = n(trade.pnl_sol);
+    const delta = actualPnl - oldPnl;
+    const netPct = n(trade.size_sol) > 0 ? (actualPnl / n(trade.size_sol)) * 100 : -100;
+
+    const { error: updateError } = await supabase
+      .from("ai_discovery_trades")
+      .update({
+        proceeds_sol: actualProceeds,
+        pnl_sol: actualPnl,
+        net_return_pct: netPct,
+        execution_source: "live_mirror",
+        exit_snapshot: {
+          ...(trade.exit_snapshot ?? {}),
+          liveMirror: {
+            proceedsSol: actualProceeds,
+            realizedPnlSol: actualPnl,
+            closedAt: mirror.closed_at,
+          },
+        },
+      })
+      .eq("id", trade.id);
+    if (updateError) throw new Error(updateError.message);
+
+    const state = await loadState();
+    await supabase
+      .from("ai_discovery_state")
+      .update({
+        bankroll_sol: n(state.bankroll_sol) + delta,
+        daily_realized_pnl_sol: n(state.daily_realized_pnl_sol) + delta,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", 1);
+
+    console.log(
+      `[ai-discovery-trader] live mirror parity ${mirror.source_position_id} ` +
+        `proceedsSol=${actualProceeds} pnlSol=${actualPnl}`
+    );
+  }
 }
 
 async function managePositions(): Promise<void> {
   if (positionRunning) return;
   positionRunning = true;
-
   try {
+    await reconcileClosedLiveMirrors();
     for (const position of await loadPositions()) {
       try {
         const { data: recorded, error: recordedError } = await supabase
@@ -657,36 +897,30 @@ async function managePositions(): Promise<void> {
             .from("ai_discovery_positions")
             .delete()
             .eq("position_id", position.position_id);
-          console.warn(
-            `[ai-discovery-trader] close already recorded for ${position.token_symbol}`
-          );
           continue;
         }
 
         const heldMs = Date.now() - Date.parse(position.opened_at);
-        const market = await priceFor(position.mint, position.pair_address);
+        const mirror = await liveMirrorFor(position.position_id);
+        const valuation = await quoteExitValuation(position, mirror);
+        const entryValue = Math.max(valuation.entryValueSol, Number.EPSILON);
+        const recoveryPct = (valuation.executableSol / entryValue) * 100;
 
-        if (!market) {
-          if (heldMs < MAX_HOLD_MS) continue;
-          const fallbackPrice = n(
-            position.last_price_usd,
-            n(position.entry_price_usd)
-          );
-          const entry = n(position.entry_price_usd);
-          await closeTrade(
-            position,
-            { priceUsd: fallbackPrice, source: "last_valid_price" },
-            "max_hold_price_unavailable",
-            (fallbackPrice / entry - 1) * 100
-          );
+        if (!valuation.route) {
+          await closeTrade(position, valuation, "liquidity_gone");
+          continue;
+        }
+        if (recoveryPct < EMERGENCY_EXIT_FLOOR_PCT) {
+          await closeTrade(position, valuation, "emergency_liquidity_drop");
           continue;
         }
 
         const entry = n(position.entry_price_usd);
-        const grossPct = (market.priceUsd / entry - 1) * 100;
-        const peak = Math.max(n(position.peak_price_usd), market.priceUsd);
-        const peakPct = (peak / entry - 1) * 100;
-        const pullbackPct = (market.priceUsd / peak - 1) * 100;
+        const impliedPrice = valuation.impliedPriceUsd;
+        const grossPct = entry > 0 ? (impliedPrice / entry - 1) * 100 : -100;
+        const peak = Math.max(n(position.peak_price_usd), impliedPrice);
+        const peakPct = entry > 0 ? (peak / entry - 1) * 100 : 0;
+        const pullbackPct = peak > 0 ? (impliedPrice / peak - 1) * 100 : -100;
 
         let reason: string | null = null;
         if (grossPct <= HARD_STOP_PCT) reason = "hard_stop";
@@ -701,14 +935,19 @@ async function managePositions(): Promise<void> {
         }
 
         if (reason) {
-          await closeTrade(position, market, reason, grossPct);
+          await closeTrade(position, valuation, reason);
         } else {
           const now = new Date().toISOString();
           await supabase
             .from("ai_discovery_positions")
             .update({
-              last_price_usd: market.priceUsd,
+              last_price_usd: impliedPrice,
               peak_price_usd: peak,
+              quote_peak_value_sol: Math.max(
+                n(position.quote_peak_value_sol, n(position.size_sol)),
+                valuation.executableSol
+              ),
+              last_executable_value_sol: valuation.executableSol,
               last_checked_at: now,
               updated_at: now,
             })
@@ -716,8 +955,28 @@ async function managePositions(): Promise<void> {
         }
       } catch (error) {
         console.warn(
-          `[ai-discovery-trader] position ${position.token_symbol} check skipped`,
+          `[ai-discovery-trader] position ${position.token_symbol} check failed closed`,
           error
+        );
+        const entryValue = n(position.size_sol);
+        await closeTrade(
+          position,
+          {
+            source: "quote",
+            route: false,
+            outLamports: 0n,
+            executableSol: 0,
+            proceedsSol: 0,
+            impliedPriceUsd: 0,
+            entryValueSol: entryValue,
+            quoteError: error instanceof Error ? error.message : String(error),
+          },
+          "liquidity_gone"
+        ).catch((closeError) =>
+          console.error(
+            `[ai-discovery-trader] fail-closed exit failed for ${position.token_symbol}`,
+            closeError
+          )
         );
       }
     }
@@ -735,8 +994,8 @@ export function startAiDiscoveryTrader(): void {
   }
 
   console.log(
-    `[ai-discovery-trader] ${VERSION} enabled; paper-only; restored pre-queue feed behavior; ` +
-      `shadow dataset ${SHADOW_MODEL_VERSION}; no daily entry pause; ` +
+    `[ai-discovery-trader] ${VERSION} enabled; quote exits=${QUOTE_EXITS_ENABLED}; ` +
+      `emergency floor=${EMERGENCY_EXIT_FLOOR_PCT}%; slippage=${QUOTE_SLIPPAGE_BPS}bps; ` +
       `size ${FIXED_SIZE_SOL.toFixed(2)} SOL; score ${MIN_SCORE}+`
   );
 
@@ -747,10 +1006,7 @@ export function startAiDiscoveryTrader(): void {
     console.error("[ai-discovery-trader] initial position check failed", error)
   );
   void trackCandidateOutcomes().catch((error) =>
-    console.error(
-      "[ai-discovery-trader] initial outcome tracking failed",
-      error
-    )
+    console.error("[ai-discovery-trader] initial outcome tracking failed", error)
   );
 
   setInterval(
