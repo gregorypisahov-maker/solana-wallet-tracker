@@ -1,5 +1,4 @@
 import { getSupabaseAdmin } from "../lib/supabase";
-import { FetchPriority, fetchJsonQueued, logAndResetFetchQueueStats } from "./fetchQueue";
 
 const supabase = getSupabaseAdmin();
 const VERSION = "market_discovery_ai_v1_2026_07_24";
@@ -68,128 +67,248 @@ function enabled(): boolean {
 }
 
 async function fetchJson(url: string): Promise<any> {
-  return fetchJsonQueued(url, {
-    priority: FetchPriority.NORMAL,
-    timeoutMs: REQUEST_TIMEOUT_MS,
-    headers: {
-      Accept: "application/vnd.api+json;version=20230302",
-      "User-Agent": "solana-market-discovery-ai/1.0",
-    },
-  });
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    const response = await fetch(url, {
+      cache: "no-store",
+      signal: controller.signal,
+      headers: {
+        Accept: "application/vnd.api+json;version=20230302",
+        "User-Agent": "solana-market-discovery-ai/1.0",
+      },
+    });
+    if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+    return await response.json();
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 function parse(row: any): Candidate | null {
-  const a = row?.attributes;
+  const attributes = row?.attributes;
   const mint = stripId(row?.relationships?.base_token?.data?.id);
-  if (!a || !mint || STABLES.has(mint)) return null;
+  if (!attributes || !mint || STABLES.has(mint)) return null;
 
-  const createdAt = Date.parse(String(a.pool_created_at ?? ""));
+  const createdAt = Date.parse(String(attributes.pool_created_at ?? ""));
   const candidate: Candidate = {
     mint,
-    symbol: String(a.name ?? "UNKNOWN").split("/")[0]?.trim() || "UNKNOWN",
-    pairAddress: String(a.address ?? ""),
-    priceUsd: num(a.base_token_price_usd, NaN),
-    liquidityUsd: num(a.reserve_in_usd, NaN),
-    marketCapUsd: num(a.market_cap_usd ?? a.fdv_usd, NaN),
-    changeM5: num(a.price_change_percentage?.m5, NaN),
-    changeH1: num(a.price_change_percentage?.h1, NaN),
-    volumeM5: num(a.volume_usd?.m5, NaN),
-    volumeH1: num(a.volume_usd?.h1, NaN),
-    buysM5: Math.max(0, Math.floor(num(a.transactions?.m5?.buys, NaN))),
-    sellsM5: Math.max(0, Math.floor(num(a.transactions?.m5?.sells, NaN))),
-    buyersM5: Math.max(0, Math.floor(num(a.transactions?.m5?.buyers, NaN))),
-    poolAgeMinutes: Number.isFinite(createdAt) ? Math.max(0, Date.now() - createdAt) / 60_000 : NaN,
+    symbol:
+      String(attributes.name ?? "UNKNOWN").split("/")[0]?.trim() || "UNKNOWN",
+    pairAddress: String(attributes.address ?? ""),
+    priceUsd: num(attributes.base_token_price_usd, Number.NaN),
+    liquidityUsd: num(attributes.reserve_in_usd, Number.NaN),
+    marketCapUsd: num(
+      attributes.market_cap_usd ?? attributes.fdv_usd,
+      Number.NaN
+    ),
+    changeM5: num(attributes.price_change_percentage?.m5, Number.NaN),
+    changeH1: num(attributes.price_change_percentage?.h1, Number.NaN),
+    volumeM5: num(attributes.volume_usd?.m5, Number.NaN),
+    volumeH1: num(attributes.volume_usd?.h1, Number.NaN),
+    buysM5: Math.max(
+      0,
+      Math.floor(num(attributes.transactions?.m5?.buys, Number.NaN))
+    ),
+    sellsM5: Math.max(
+      0,
+      Math.floor(num(attributes.transactions?.m5?.sells, Number.NaN))
+    ),
+    buyersM5: Math.max(
+      0,
+      Math.floor(num(attributes.transactions?.m5?.buyers, Number.NaN))
+    ),
+    poolAgeMinutes: Number.isFinite(createdAt)
+      ? Math.max(0, Date.now() - createdAt) / 60_000
+      : Number.NaN,
   };
 
-  const values = Object.values(candidate).filter((value) => typeof value === "number") as number[];
-  if (!candidate.pairAddress || values.some((value) => !Number.isFinite(value))) return null;
-  if (candidate.priceUsd <= 0 || candidate.liquidityUsd <= 0 || candidate.marketCapUsd <= 0) return null;
+  const values = Object.values(candidate).filter(
+    (value) => typeof value === "number"
+  ) as number[];
+  if (!candidate.pairAddress || values.some((value) => !Number.isFinite(value))) {
+    return null;
+  }
+  if (
+    candidate.priceUsd <= 0 ||
+    candidate.liquidityUsd <= 0 ||
+    candidate.marketCapUsd <= 0
+  ) {
+    return null;
+  }
   return candidate;
 }
 
 async function discover(): Promise<Candidate[]> {
   const results = await Promise.allSettled(FEEDS.map(fetchJson));
   const byMint = new Map<string, Candidate>();
+
   for (const result of results) {
     if (result.status === "rejected") {
       console.warn("[market-discovery-ai] feed failed:", result.reason);
       continue;
     }
+
     const rows = Array.isArray(result.value?.data) ? result.value.data : [];
     for (const row of rows) {
       const candidate = parse(row);
       if (!candidate) continue;
       const existing = byMint.get(candidate.mint);
-      if (!existing || candidate.liquidityUsd > existing.liquidityUsd) byMint.set(candidate.mint, candidate);
+      if (!existing || candidate.liquidityUsd > existing.liquidityUsd) {
+        byMint.set(candidate.mint, candidate);
+      }
     }
   }
-  if (results.every((result) => result.status === "rejected")) throw new Error("all discovery feeds failed");
+
+  if (
+    byMint.size === 0 &&
+    results.every((result) => result.status === "rejected")
+  ) {
+    throw new Error("all discovery feeds failed");
+  }
+
   return [...byMint.values()];
 }
 
-function rank(c: Candidate): Ranked {
+function rank(candidate: Candidate): Ranked {
   let score = 0;
   const reasons: string[] = [];
   const risks: string[] = [];
-  const buyRatio = c.buysM5 / Math.max(1, c.buysM5 + c.sellsM5);
-  const turnover = c.volumeM5 / Math.max(1, c.liquidityUsd);
-  const liqToCap = c.liquidityUsd / Math.max(1, c.marketCapUsd);
+  const buyRatio =
+    candidate.buysM5 / Math.max(1, candidate.buysM5 + candidate.sellsM5);
+  const turnover =
+    candidate.volumeM5 / Math.max(1, candidate.liquidityUsd);
+  const liquidityToCap =
+    candidate.liquidityUsd / Math.max(1, candidate.marketCapUsd);
 
-  if (c.liquidityUsd >= 150_000) { score += 22; reasons.push("deep_liquidity"); }
-  else if (c.liquidityUsd >= 60_000) { score += 17; reasons.push("healthy_liquidity"); }
-  else if (c.liquidityUsd >= 25_000) { score += 10; reasons.push("acceptable_liquidity"); }
-  else risks.push("thin_liquidity");
+  if (candidate.liquidityUsd >= 150_000) {
+    score += 22;
+    reasons.push("deep_liquidity");
+  } else if (candidate.liquidityUsd >= 60_000) {
+    score += 17;
+    reasons.push("healthy_liquidity");
+  } else if (candidate.liquidityUsd >= 25_000) {
+    score += 10;
+    reasons.push("acceptable_liquidity");
+  } else {
+    risks.push("thin_liquidity");
+  }
 
-  if (c.volumeM5 >= 75_000) { score += 18; reasons.push("strong_volume_acceleration"); }
-  else if (c.volumeM5 >= 25_000) { score += 12; reasons.push("rising_short_term_volume"); }
-  else if (c.volumeM5 >= 8_000) score += 6;
+  if (candidate.volumeM5 >= 75_000) {
+    score += 18;
+    reasons.push("strong_volume_acceleration");
+  } else if (candidate.volumeM5 >= 25_000) {
+    score += 12;
+    reasons.push("rising_short_term_volume");
+  } else if (candidate.volumeM5 >= 8_000) {
+    score += 6;
+  }
 
-  if (buyRatio >= 0.68 && c.buysM5 >= 20) { score += 16; reasons.push("strong_buy_pressure"); }
-  else if (buyRatio >= 0.58 && c.buysM5 >= 10) { score += 10; reasons.push("positive_buy_pressure"); }
-  else if (buyRatio < 0.45) risks.push("sell_pressure");
+  if (buyRatio >= 0.68 && candidate.buysM5 >= 20) {
+    score += 16;
+    reasons.push("strong_buy_pressure");
+  } else if (buyRatio >= 0.58 && candidate.buysM5 >= 10) {
+    score += 10;
+    reasons.push("positive_buy_pressure");
+  } else if (buyRatio < 0.45) {
+    risks.push("sell_pressure");
+  }
 
-  if (c.buyersM5 >= 35) { score += 14; reasons.push("broad_buyer_growth"); }
-  else if (c.buyersM5 >= 15) { score += 8; reasons.push("buyer_count_rising"); }
+  if (candidate.buyersM5 >= 35) {
+    score += 14;
+    reasons.push("broad_buyer_growth");
+  } else if (candidate.buyersM5 >= 15) {
+    score += 8;
+    reasons.push("buyer_count_rising");
+  }
 
-  if (c.changeM5 >= 2 && c.changeM5 <= 12) { score += 12; reasons.push("healthy_momentum"); }
-  else if (c.changeM5 > 12 && c.changeM5 <= 25) { score += 5; risks.push("extended_momentum"); }
-  else if (c.changeM5 > 25) { score -= 12; risks.push("vertical_price_spike"); }
-  else if (c.changeM5 < -4) risks.push("negative_momentum");
+  if (candidate.changeM5 >= 2 && candidate.changeM5 <= 12) {
+    score += 12;
+    reasons.push("healthy_momentum");
+  } else if (candidate.changeM5 > 12 && candidate.changeM5 <= 25) {
+    score += 5;
+    risks.push("extended_momentum");
+  } else if (candidate.changeM5 > 25) {
+    score -= 12;
+    risks.push("vertical_price_spike");
+  } else if (candidate.changeM5 < -4) {
+    risks.push("negative_momentum");
+  }
 
-  if (c.changeH1 >= 5 && c.changeH1 <= 60) { score += 8; reasons.push("one_hour_confirmation"); }
-  else if (c.changeH1 > 100) { score -= 8; risks.push("late_entry_risk"); }
+  if (candidate.changeH1 >= 5 && candidate.changeH1 <= 60) {
+    score += 8;
+    reasons.push("one_hour_confirmation");
+  } else if (candidate.changeH1 > 100) {
+    score -= 8;
+    risks.push("late_entry_risk");
+  }
 
-  if (liqToCap >= 0.15) { score += 6; reasons.push("strong_liquidity_to_cap"); }
-  else if (liqToCap < 0.05) risks.push("weak_liquidity_to_cap");
+  if (liquidityToCap >= 0.15) {
+    score += 6;
+    reasons.push("strong_liquidity_to_cap");
+  } else if (liquidityToCap < 0.05) {
+    risks.push("weak_liquidity_to_cap");
+  }
 
-  if (turnover >= 0.15 && turnover <= 2.5) score += 4;
-  else if (turnover > 4) risks.push("possible_churn_or_fake_volume");
+  if (turnover >= 0.15 && turnover <= 2.5) {
+    score += 4;
+  } else if (turnover > 4) {
+    risks.push("possible_churn_or_fake_volume");
+  }
 
-  if (c.poolAgeMinutes >= 20 && c.poolAgeMinutes <= 720) { score += 6; reasons.push("useful_pool_age"); }
-  else if (c.poolAgeMinutes < 5) { score -= 10; risks.push("extremely_new_pool"); }
+  if (
+    candidate.poolAgeMinutes >= 20 &&
+    candidate.poolAgeMinutes <= 720
+  ) {
+    score += 6;
+    reasons.push("useful_pool_age");
+  } else if (candidate.poolAgeMinutes < 5) {
+    score -= 10;
+    risks.push("extremely_new_pool");
+  }
 
-  if (c.marketCapUsd < 20_000) risks.push("micro_market_cap");
-  if (c.marketCapUsd > 5_000_000) risks.push("outside_primary_discovery_range");
+  if (candidate.marketCapUsd < 20_000) risks.push("micro_market_cap");
+  if (candidate.marketCapUsd > 5_000_000) {
+    risks.push("outside_primary_discovery_range");
+  }
 
   score = Math.max(0, Math.min(100, Math.round(score)));
-  const confidence = score >= 78 ? "high" : score >= 62 ? "medium" : "low";
-  const status = score >= 78 && risks.length <= 2 ? "armed" : "watching";
-  return { ...c, score, confidence, status, reasons, risks };
+  const confidence =
+    score >= 78 ? "high" : score >= 62 ? "medium" : "low";
+  const status =
+    score >= 78 && risks.length <= 2 ? "armed" : "watching";
+
+  return {
+    ...candidate,
+    score,
+    confidence,
+    status,
+    reasons,
+    risks,
+  };
 }
 
 function regime(ranked: Ranked[]): string {
   if (ranked.length === 0) return "quiet";
   const strong = ranked.filter((item) => item.score >= 70).length;
-  const positive = ranked.filter((item) => item.changeM5 > 0).length / ranked.length;
+  const positive =
+    ranked.filter((item) => item.changeM5 > 0).length / ranked.length;
+
   if (strong >= 8 && positive >= 0.7) return "hot";
   if (strong >= 3 && positive >= 0.55) return "normal";
   if (positive < 0.4) return "weak";
   return "selective";
 }
 
-async function persist(startedAt: string, candidates: Candidate[], ranked: Ranked[], marketRegime: string): Promise<void> {
+async function persist(
+  startedAt: string,
+  candidates: Candidate[],
+  ranked: Ranked[],
+  marketRegime: string
+): Promise<void> {
   const now = new Date().toISOString();
   const top = ranked.slice(0, TOP_LIMIT);
+
   if (top.length > 0) {
     const { error } = await supabase.from("market_opportunities").upsert(
       top.map((item) => ({
@@ -213,13 +332,18 @@ async function persist(startedAt: string, candidates: Candidate[], ranked: Ranke
         pool_age_minutes: item.poolAgeMinutes,
         reasons: item.reasons,
         risks: item.risks,
-        signal_snapshot: { version: VERSION, buyRatio: item.buysM5 / Math.max(1, item.buysM5 + item.sellsM5) },
+        signal_snapshot: {
+          version: VERSION,
+          buyRatio: item.buysM5 / Math.max(1, item.buysM5 + item.sellsM5),
+        },
         last_seen_at: now,
         updated_at: now,
       })),
       { onConflict: "mint" }
     );
-    if (error) throw new Error(`opportunity upsert failed: ${error.message}`);
+    if (error) {
+      throw new Error(`opportunity upsert failed: ${error.message}`);
+    }
   }
 
   const { error } = await supabase.from("market_discovery_runs").insert({
@@ -237,41 +361,67 @@ async function persist(startedAt: string, candidates: Candidate[], ranked: Ranke
   });
   if (error) throw new Error(`discovery run insert failed: ${error.message}`);
 
-  await supabase.from("market_opportunities").delete().lt("last_seen_at", new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString());
+  await supabase
+    .from("market_opportunities")
+    .delete()
+    .lt(
+      "last_seen_at",
+      new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString()
+    );
 }
 
 export async function runMarketDiscoveryScan(): Promise<void> {
   const startedAt = new Date().toISOString();
+
   try {
     const candidates = await discover();
     const ranked = candidates.map(rank).sort((a, b) => b.score - a.score);
     const marketRegime = regime(ranked);
     await persist(startedAt, candidates, ranked, marketRegime);
+
     const top = ranked[0];
-    console.log(`[market-discovery-ai] scanned ${candidates.length}; regime ${marketRegime}; top ${top ? `${top.symbol} ${top.score}/100` : "none"}`);
+    console.log(
+      `[market-discovery-ai] scanned ${candidates.length}; regime ${marketRegime}; ` +
+        `top ${top ? `${top.symbol} ${top.score}/100` : "none"}`
+    );
   } catch (error) {
     const now = new Date().toISOString();
     const message = error instanceof Error ? error.message : String(error);
     console.error("[market-discovery-ai] scan failed:", error);
-    await supabase.from("market_discovery_runs").insert({ started_at: startedAt, finished_at: now, status: "error", message, snapshot: { version: VERSION } });
-  } finally {
-    logAndResetFetchQueueStats();
+
+    await supabase.from("market_discovery_runs").insert({
+      started_at: startedAt,
+      finished_at: now,
+      status: "error",
+      message,
+      snapshot: { version: VERSION },
+    });
   }
 }
 
 async function runSafely(): Promise<void> {
   if (running) return;
   running = true;
-  try { await runMarketDiscoveryScan(); } finally { running = false; }
+  try {
+    await runMarketDiscoveryScan();
+  } finally {
+    running = false;
+  }
 }
 
 export function startMarketDiscoveryAgent(): void {
   if (!enabled()) {
-    console.log("[market-discovery-ai] disabled by ENABLE_MARKET_DISCOVERY_AI");
+    console.log(
+      "[market-discovery-ai] disabled by ENABLE_MARKET_DISCOVERY_AI"
+    );
     return;
   }
+
   const every = intervalMs();
-  console.log(`[market-discovery-ai] ${VERSION} enabled; scan ${every / 1000}s; analysis-only, no direct real-money execution`);
+  console.log(
+    `[market-discovery-ai] ${VERSION} enabled; scan ${every / 1000}s; ` +
+      "restored original GeckoTerminal discovery; analysis-only, no direct real-money execution"
+  );
   void runSafely();
   setInterval(() => void runSafely(), every);
 }
