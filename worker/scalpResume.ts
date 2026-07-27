@@ -1,5 +1,8 @@
 import { getSupabaseAdmin } from "../lib/supabase";
 import { sendTelegramAlert } from "../lib/telegram";
+import { startTelegramAlertRelay } from "./telegramAlertRelay";
+
+startTelegramAlertRelay();
 
 const supabase = getSupabaseAdmin();
 
@@ -58,6 +61,5 @@ export async function getScalperStatus(): Promise<{ enabled: boolean; halted: bo
     .single();
 
   if (error || !data) throw error;
-
   return { enabled: data.enabled as boolean, halted: data.halted as boolean, halt_reason: data.halt_reason as string | null, bankroll_sol: Number(data.bankroll_sol || 0), entries_today: data.entries_today as number, consecutive_losses: data.consecutive_losses as number };
 }
