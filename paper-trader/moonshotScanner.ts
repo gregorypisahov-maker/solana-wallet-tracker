@@ -1,21 +1,33 @@
-import { Logs, ParsedTransactionWithMeta, PublicKey } from "@solana/web3.js";
+import {
+  ConfirmedSignatureInfo,
+  ParsedTransactionWithMeta,
+  PublicKey,
+} from "@solana/web3.js";
 import { getConnection } from "../lib/solana";
 import { getSupabaseAdmin } from "../lib/supabase";
 import { SerialEventQueue, SignatureDeduper } from "../worker/eventIntake";
 
-export const MOONSHOT_SCANNER_VERSION = "moonshot_scanner_v1_2026_07_27";
+export const MOONSHOT_SCANNER_VERSION =
+  "moonshot_scanner_v2_http_polling_2026_07_27";
 
 const WRAPPED_SOL = "So11111111111111111111111111111111111111112";
 const USDC = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 const USDT = "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB";
 const EXCLUDED_MINTS = new Set([WRAPPED_SOL, USDC, USDT]);
 
+const RPC_RETRY_DELAYS_MS = [0, 500, 1_500, 3_000] as const;
 const TX_FETCH_DELAYS_MS = [0, 250, 750, 1_500] as const;
 const DEFAULT_HEARTBEAT_MS = 30_000;
-const DEFAULT_SUBSCRIPTION_SYNC_MS = 60_000;
+const DEFAULT_POLL_INTERVAL_MS = 15_000;
+const DEFAULT_RPC_MIN_INTERVAL_MS = 250;
 const DEFAULT_MAX_QUEUE_DEPTH = 200;
 const DEFAULT_MAX_MINTS_PER_TRANSACTION = 8;
+const DEFAULT_MAX_SIGNATURES_PER_POLL = 25;
+const DEFAULT_MAX_SIGNATURE_AGE_MS = 120_000;
 const DEDUPE_TTL_MS = 30 * 60_000;
+
+type ProgramCursor = string | null;
+type ProgramCursorMap = Map<string, ProgramCursor>;
 
 export type MoonshotMintEvidence = {
   mint: string;
@@ -26,7 +38,12 @@ export type MoonshotMintEvidence = {
   postOwnerCount: number;
 };
 
-type MoonshotLogEvent = {
+export type MoonshotSignatureInfo = Pick<
+  ConfirmedSignatureInfo,
+  "signature" | "slot" | "err" | "blockTime"
+>;
+
+type MoonshotSignatureEvent = {
   programId: string;
   signature: string;
   slot: number;
@@ -37,8 +54,11 @@ type MoonshotScannerMetrics = {
   eventsReceived: number;
   eventsDropped: number;
   transactionFetchFailures: number;
+  signatureFetchFailures: number;
   candidatesRecorded: number;
+  pollsCompleted: number;
   queueDepth: number;
+  lastPollAt: string | null;
   lastEventAt: string | null;
   lastCandidateAt: string | null;
   lastError: string | null;
@@ -48,9 +68,12 @@ type MoonshotScannerConfig = {
   enabled: boolean;
   programIds: string[];
   heartbeatMs: number;
-  subscriptionSyncMs: number;
+  pollIntervalMs: number;
+  rpcMinIntervalMs: number;
   maxQueueDepth: number;
   maxMintsPerTransaction: number;
+  maxSignaturesPerPoll: number;
+  maxSignatureAgeMs: number;
 };
 
 function sleep(ms: number): Promise<void> {
@@ -102,11 +125,17 @@ function loadConfig(): MoonshotScannerConfig {
       10_000,
       5 * 60_000
     ),
-    subscriptionSyncMs: boundedInteger(
-      process.env.MOONSHOT_SUBSCRIPTION_SYNC_MS,
-      DEFAULT_SUBSCRIPTION_SYNC_MS,
-      30_000,
-      10 * 60_000
+    pollIntervalMs: boundedInteger(
+      process.env.MOONSHOT_POLL_INTERVAL_MS,
+      DEFAULT_POLL_INTERVAL_MS,
+      5_000,
+      5 * 60_000
+    ),
+    rpcMinIntervalMs: boundedInteger(
+      process.env.MOONSHOT_RPC_MIN_INTERVAL_MS,
+      DEFAULT_RPC_MIN_INTERVAL_MS,
+      100,
+      10_000
     ),
     maxQueueDepth: boundedInteger(
       process.env.MOONSHOT_MAX_QUEUE_DEPTH,
@@ -119,6 +148,18 @@ function loadConfig(): MoonshotScannerConfig {
       DEFAULT_MAX_MINTS_PER_TRANSACTION,
       1,
       32
+    ),
+    maxSignaturesPerPoll: boundedInteger(
+      process.env.MOONSHOT_MAX_SIGNATURES_PER_POLL,
+      DEFAULT_MAX_SIGNATURES_PER_POLL,
+      1,
+      500
+    ),
+    maxSignatureAgeMs: boundedInteger(
+      process.env.MOONSHOT_MAX_SIGNATURE_AGE_MS,
+      DEFAULT_MAX_SIGNATURE_AGE_MS,
+      30_000,
+      15 * 60_000
     ),
   };
 }
@@ -165,8 +206,43 @@ export function extractMoonshotCandidateMints(
     .slice(0, Math.max(1, maximum));
 }
 
+export function selectMoonshotSignatures(
+  signaturesNewestFirst: readonly MoonshotSignatureInfo[],
+  nowMs: number,
+  maxAgeMs: number
+): MoonshotSignatureInfo[] {
+  return signaturesNewestFirst
+    .filter((signature) => {
+      if (signature.err) return false;
+      if (signature.blockTime == null) return true;
+      return nowMs - signature.blockTime * 1_000 <= maxAgeMs;
+    })
+    .reverse();
+}
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function deserializeProgramCursors(
+  value: unknown,
+  allowedProgramIds: readonly string[]
+): ProgramCursorMap {
+  const cursors: ProgramCursorMap = new Map();
+  if (!value || typeof value !== "object" || Array.isArray(value)) return cursors;
+
+  const allowed = new Set(allowedProgramIds);
+  for (const [programId, cursor] of Object.entries(value)) {
+    if (!allowed.has(programId)) continue;
+    if (cursor === null || typeof cursor === "string") {
+      cursors.set(programId, cursor);
+    }
+  }
+  return cursors;
+}
+
+function serializeProgramCursors(cursors: ProgramCursorMap): Record<string, ProgramCursor> {
+  return Object.fromEntries(cursors.entries());
 }
 
 export async function startMoonshotScanner(): Promise<void> {
@@ -175,8 +251,11 @@ export async function startMoonshotScanner(): Promise<void> {
     eventsReceived: 0,
     eventsDropped: 0,
     transactionFetchFailures: 0,
+    signatureFetchFailures: 0,
     candidatesRecorded: 0,
+    pollsCompleted: 0,
     queueDepth: 0,
+    lastPollAt: null,
     lastEventAt: null,
     lastCandidateAt: null,
     lastError: null,
@@ -186,7 +265,7 @@ export async function startMoonshotScanner(): Promise<void> {
     console.log(
       `[moonshot-scanner] ${MOONSHOT_SCANNER_VERSION} disabled; set ENABLE_MOONSHOT_SCANNER=true only after Phase 1 review`
     );
-    setInterval(() => undefined, 60_000).unref?.();
+    setInterval(() => undefined, 60_000);
     return;
   }
 
@@ -194,7 +273,7 @@ export async function startMoonshotScanner(): Promise<void> {
     console.error(
       "[moonshot-scanner] configuration blocked: MOONSHOT_PROGRAM_IDS contains no valid Solana program IDs"
     );
-    setInterval(() => undefined, 60_000).unref?.();
+    setInterval(() => undefined, 60_000);
     return;
   }
 
@@ -207,13 +286,39 @@ export async function startMoonshotScanner(): Promise<void> {
     console.error(
       `[moonshot-scanner] configuration blocked: ${errorMessage(error)}`
     );
-    setInterval(() => undefined, 60_000).unref?.();
+    setInterval(() => undefined, 60_000);
     return;
   }
 
   const processed = new SignatureDeduper(DEDUPE_TTL_MS, 100_000);
-  const subscriptions = new Map<string, number>();
+  let cursors: ProgramCursorMap = new Map();
   let lastStateErrorLogAt = 0;
+  let rpcTail: Promise<void> = Promise.resolve();
+  let lastRpcFinishedAt = 0;
+  let polling = false;
+
+  async function pacedRpc<T>(operation: () => Promise<T>): Promise<T> {
+    const run = rpcTail
+      .catch(() => undefined)
+      .then(async () => {
+        const waitMs = Math.max(
+          0,
+          config.rpcMinIntervalMs - (Date.now() - lastRpcFinishedAt)
+        );
+        if (waitMs > 0) await sleep(waitMs);
+        try {
+          return await operation();
+        } finally {
+          lastRpcFinishedAt = Date.now();
+        }
+      });
+
+    rpcTail = run.then(
+      () => undefined,
+      () => undefined
+    );
+    return run;
+  }
 
   async function persistState(status: string): Promise<void> {
     try {
@@ -222,15 +327,21 @@ export async function startMoonshotScanner(): Promise<void> {
           id: 1,
           version: MOONSHOT_SCANNER_VERSION,
           mode: "scanner_only",
+          intake_mode: "http_polling",
           enabled: true,
           status,
           program_ids: config.programIds,
-          active_subscriptions: subscriptions.size,
+          active_subscriptions: 0,
+          active_programs: cursors.size,
+          program_cursors: serializeProgramCursors(cursors),
           queue_depth: metrics.queueDepth,
           events_received: metrics.eventsReceived,
           events_dropped: metrics.eventsDropped,
           transaction_fetch_failures: metrics.transactionFetchFailures,
+          signature_fetch_failures: metrics.signatureFetchFailures,
           candidates_recorded: metrics.candidatesRecorded,
+          polls_completed: metrics.pollsCompleted,
+          last_poll_at: metrics.lastPollAt,
           last_event_at: metrics.lastEventAt,
           last_candidate_at: metrics.lastCandidateAt,
           last_error: metrics.lastError,
@@ -250,6 +361,67 @@ export async function startMoonshotScanner(): Promise<void> {
     }
   }
 
+  async function loadStoredCursors(): Promise<void> {
+    try {
+      const { data, error } = await supabase
+        .from("moonshot_scanner_state")
+        .select("program_cursors")
+        .eq("id", 1)
+        .maybeSingle();
+      if (error) throw error;
+      cursors = deserializeProgramCursors(data?.program_cursors, config.programIds);
+    } catch (error) {
+      metrics.lastError = `cursor load: ${errorMessage(error)}`;
+      console.warn(`[moonshot-scanner] ${metrics.lastError}; starting at now`);
+      cursors = new Map();
+    }
+  }
+
+  async function fetchProgramSignatures(
+    programId: string,
+    untilSignature: string | null,
+    limit: number
+  ): Promise<ConfirmedSignatureInfo[] | null> {
+    let lastError: unknown = null;
+
+    for (const delayMs of RPC_RETRY_DELAYS_MS) {
+      if (delayMs > 0) await sleep(delayMs);
+      try {
+        return await pacedRpc(() =>
+          connection.getSignaturesForAddress(
+            new PublicKey(programId),
+            {
+              limit,
+              until: untilSignature ?? undefined,
+            },
+            "confirmed"
+          )
+        );
+      } catch (error) {
+        lastError = error;
+      }
+    }
+
+    metrics.signatureFetchFailures += 1;
+    metrics.lastError = `signature fetch ${programId.slice(0, 8)}: ${errorMessage(lastError)}`;
+    console.error(`[moonshot-scanner] ${metrics.lastError}`);
+    return null;
+  }
+
+  async function initializeProgramCursor(programId: string): Promise<boolean> {
+    if (cursors.has(programId)) return true;
+
+    const latest = await fetchProgramSignatures(programId, null, 1);
+    if (!latest) return false;
+
+    const latestSignature = latest[0]?.signature ?? null;
+    cursors.set(programId, latestSignature);
+    console.log(
+      `[moonshot-scanner] cursor initialized ${programId.slice(0, 8)}…; historical transactions skipped`
+    );
+    return true;
+  }
+
   async function fetchTransaction(
     signature: string
   ): Promise<ParsedTransactionWithMeta | null> {
@@ -258,10 +430,12 @@ export async function startMoonshotScanner(): Promise<void> {
     for (const delayMs of TX_FETCH_DELAYS_MS) {
       if (delayMs > 0) await sleep(delayMs);
       try {
-        const transaction = await connection.getParsedTransaction(signature, {
-          commitment: "confirmed",
-          maxSupportedTransactionVersion: 0,
-        });
+        const transaction = await pacedRpc(() =>
+          connection.getParsedTransaction(signature, {
+            commitment: "confirmed",
+            maxSupportedTransactionVersion: 0,
+          })
+        );
         if (transaction) return transaction;
         lastError = new Error("confirmed transaction not available yet");
       } catch (error) {
@@ -275,7 +449,7 @@ export async function startMoonshotScanner(): Promise<void> {
     return null;
   }
 
-  async function recordCandidates(event: MoonshotLogEvent): Promise<void> {
+  async function recordCandidates(event: MoonshotSignatureEvent): Promise<void> {
     const transaction = await fetchTransaction(event.signature);
     if (!transaction) {
       processed.mark(event.signature);
@@ -309,6 +483,7 @@ export async function startMoonshotScanner(): Promise<void> {
       would_enter: false,
       evidence: {
         scannerVersion: MOONSHOT_SCANNER_VERSION,
+        intakeMode: "http_polling",
         appearedInPreBalances: candidate.appearedInPreBalances,
         appearedInPostBalances: candidate.appearedInPostBalances,
         newlyVisibleInPostBalances: candidate.newlyVisibleInPostBalances,
@@ -339,7 +514,7 @@ export async function startMoonshotScanner(): Promise<void> {
     }
   }
 
-  const queue = new SerialEventQueue<MoonshotLogEvent>(
+  const queue = new SerialEventQueue<MoonshotSignatureEvent>(
     recordCandidates,
     (error, event) => {
       metrics.lastError = `queue ${event.signature.slice(0, 8)}: ${errorMessage(error)}`;
@@ -350,65 +525,105 @@ export async function startMoonshotScanner(): Promise<void> {
     }
   );
 
-  function handleLogs(programId: string, logs: Logs, slot: number): void {
-    if (logs.err || processed.has(logs.signature)) return;
+  async function pollProgram(programId: string): Promise<boolean> {
+    const initialized = await initializeProgramCursor(programId);
+    if (!initialized) return false;
 
-    metrics.eventsReceived += 1;
-    metrics.lastEventAt = new Date().toISOString();
+    const previousCursor = cursors.get(programId) ?? null;
+    const fetchedAt = Date.now();
+    const signatures = await fetchProgramSignatures(
+      programId,
+      previousCursor,
+      config.maxSignaturesPerPoll
+    );
+    if (!signatures) return false;
 
-    if (queue.depth >= config.maxQueueDepth) {
+    if (signatures.length === config.maxSignaturesPerPoll) {
       metrics.eventsDropped += 1;
-      metrics.lastError = `queue limit reached at ${queue.depth}`;
       console.warn(
-        `[moonshot-scanner] event dropped; queue limit ${config.maxQueueDepth} reached`
+        `[moonshot-scanner] ${programId.slice(0, 8)}… poll cap reached (${config.maxSignaturesPerPoll}); older backlog may be skipped`
       );
-      return;
     }
 
-    const enqueued = queue.enqueue(logs.signature, {
-      programId,
-      signature: logs.signature,
-      slot,
-      receivedAt: Date.now(),
-    });
-    if (!enqueued) return;
+    const selected = selectMoonshotSignatures(
+      signatures,
+      fetchedAt,
+      config.maxSignatureAgeMs
+    );
+
+    for (const signatureInfo of selected) {
+      if (processed.has(signatureInfo.signature)) continue;
+      if (queue.depth >= config.maxQueueDepth) {
+        metrics.eventsDropped += 1;
+        metrics.lastError = `queue limit reached at ${queue.depth}`;
+        console.warn(
+          `[moonshot-scanner] event dropped; queue limit ${config.maxQueueDepth} reached`
+        );
+        continue;
+      }
+
+      const enqueued = queue.enqueue(signatureInfo.signature, {
+        programId,
+        signature: signatureInfo.signature,
+        slot: signatureInfo.slot,
+        receivedAt: fetchedAt,
+      });
+      if (!enqueued) continue;
+
+      metrics.eventsReceived += 1;
+      metrics.lastEventAt = new Date(fetchedAt).toISOString();
+    }
+
+    await queue.whenIdle();
+
+    const newestSignature = signatures[0]?.signature;
+    if (newestSignature) {
+      cursors.set(programId, newestSignature);
+    }
+    return true;
   }
 
-  async function syncSubscriptions(): Promise<void> {
-    for (const programId of config.programIds) {
-      if (subscriptions.has(programId)) continue;
-      try {
-        const subscriptionId = connection.onLogs(
-          new PublicKey(programId),
-          (logs, context) => handleLogs(programId, logs, context.slot),
-          "confirmed"
-        );
-        subscriptions.set(programId, subscriptionId);
-        console.log(
-          `[moonshot-scanner] subscribed ${programId.slice(0, 8)}…`
-        );
-      } catch (error) {
-        metrics.lastError = `subscribe ${programId.slice(0, 8)}: ${errorMessage(error)}`;
-        console.error(`[moonshot-scanner] ${metrics.lastError}`);
+  async function pollAllPrograms(): Promise<void> {
+    if (polling) return;
+    polling = true;
+    let failures = 0;
+
+    try {
+      for (const programId of config.programIds) {
+        const ok = await pollProgram(programId);
+        if (!ok) failures += 1;
       }
+
+      metrics.pollsCompleted += 1;
+      metrics.lastPollAt = new Date().toISOString();
+      if (failures === 0 && metrics.queueDepth === 0) {
+        metrics.lastError = null;
+      }
+      await persistState(failures === config.programIds.length ? "degraded" : "active");
+    } catch (error) {
+      metrics.lastError = `poll loop: ${errorMessage(error)}`;
+      console.error(`[moonshot-scanner] ${metrics.lastError}`);
+      await persistState("degraded");
+    } finally {
+      polling = false;
     }
+  }
+
+  function scheduleNextPoll(): void {
+    setTimeout(() => {
+      void pollAllPrograms().finally(scheduleNextPoll);
+    }, config.pollIntervalMs);
   }
 
   console.log(
-    `[moonshot-scanner] ${MOONSHOT_SCANNER_VERSION} starting in scanner-only mode; trades disabled; programs=${config.programIds.length}`
+    `[moonshot-scanner] ${MOONSHOT_SCANNER_VERSION} starting in scanner-only HTTP polling mode; trades disabled; programs=${config.programIds.length}; intervalMs=${config.pollIntervalMs}; maxSignatures=${config.maxSignaturesPerPoll}`
   );
 
-  await syncSubscriptions();
-  await persistState(subscriptions.size > 0 ? "active" : "degraded");
+  await loadStoredCursors();
+  await pollAllPrograms();
+  scheduleNextPoll();
 
   setInterval(() => {
-    void syncSubscriptions().catch((error) => {
-      metrics.lastError = `subscription sync: ${errorMessage(error)}`;
-      console.error(`[moonshot-scanner] ${metrics.lastError}`);
-    });
-  }, config.subscriptionSyncMs);
-
-  setInterval(() => {
-    void persistState(subscriptions.size > 0 ? "active" : "degraded");
+    void persistState(metrics.lastPollAt ? "active" : "degraded");
   }, config.heartbeatMs);
 }
