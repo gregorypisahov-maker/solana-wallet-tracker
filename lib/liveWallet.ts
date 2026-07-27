@@ -1,7 +1,9 @@
 import { Connection, Keypair, PublicKey, VersionedTransaction } from "@solana/web3.js";
 
-const JUPITER_QUOTE = "https://quote-api.jup.ag/v6/quote";
-const JUPITER_SWAP = "https://quote-api.jup.ag/v6/swap";
+const JUPITER_API_KEY = process.env.JUPITER_API_KEY?.trim() || "";
+const JUPITER_BASE = (process.env.JUPITER_API_BASE_URL?.trim() || (JUPITER_API_KEY ? "https://api.jup.ag/swap/v1" : "https://lite-api.jup.ag/swap/v1")).replace(/\/$/, "");
+const JUPITER_QUOTE = `${JUPITER_BASE}/quote`;
+const JUPITER_SWAP = `${JUPITER_BASE}/swap`;
 export const SOL_MINT = "So11111111111111111111111111111111111111112";
 
 function decodeBase58(value: string): Uint8Array {
@@ -26,6 +28,29 @@ function decodeBase58(value: string): Uint8Array {
     bytes.push(0);
   }
   return Uint8Array.from(bytes.reverse());
+}
+
+function errorDetails(cause: unknown): string {
+  if (!(cause instanceof Error)) return String(cause);
+  const nested = cause.cause;
+  if (nested && typeof nested === "object") {
+    const code = "code" in nested ? String(nested.code) : "";
+    const message = "message" in nested ? String(nested.message) : "";
+    if (code || message) return [cause.message, code, message].filter(Boolean).join(": ");
+  }
+  return cause.message;
+}
+
+async function responseError(response: Response): Promise<string> {
+  const text = await response.text().catch(() => "");
+  return text ? text.slice(0, 500) : response.statusText;
+}
+
+function jupiterHeaders(json = false): Record<string, string> {
+  return {
+    ...(json ? { "Content-Type": "application/json" } : {}),
+    ...(JUPITER_API_KEY ? { "x-api-key": JUPITER_API_KEY } : {}),
+  };
 }
 
 export function getRpcUrl(): string | null {
@@ -85,7 +110,7 @@ export async function getLiveWalletHealth() {
       const connection = new Connection(rpcUrl, "confirmed");
       balanceSol = (await connection.getBalance(new PublicKey(publicKey))) / 1_000_000_000;
     } catch (cause) {
-      error = cause instanceof Error ? cause.message : "Wallet balance lookup failed";
+      error = errorDetails(cause);
     }
   }
   return { rpcConfigured: Boolean(rpcUrl), publicKey, signerConfigured, armed, enabled, balanceSol, error };
@@ -111,23 +136,35 @@ export async function executeJupiterSwap(input: {
   quoteUrl.searchParams.set("outputMint", input.outputMint);
   quoteUrl.searchParams.set("amount", input.rawAmount);
   quoteUrl.searchParams.set("slippageBps", String(input.slippageBps));
-  const quoteResponse = await fetch(quoteUrl, { cache: "no-store" });
-  if (!quoteResponse.ok) throw new Error(`Jupiter quote failed (${quoteResponse.status})`);
+  quoteUrl.searchParams.set("restrictIntermediateTokens", "true");
+
+  let quoteResponse: Response;
+  try {
+    quoteResponse = await fetch(quoteUrl, { cache: "no-store", headers: jupiterHeaders() });
+  } catch (cause) {
+    throw new Error(`Jupiter quote network failure at ${quoteUrl.origin}: ${errorDetails(cause)}`);
+  }
+  if (!quoteResponse.ok) throw new Error(`Jupiter quote failed (${quoteResponse.status}): ${await responseError(quoteResponse)}`);
   const quote = await quoteResponse.json();
   if (!quote?.outAmount || BigInt(String(quote.outAmount)) <= 0n) throw new Error("Jupiter returned an empty quote");
 
-  const swapResponse = await fetch(JUPITER_SWAP, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      quoteResponse: quote,
-      userPublicKey: signer.publicKey.toBase58(),
-      wrapAndUnwrapSol: true,
-      dynamicComputeUnitLimit: true,
-      prioritizationFeeLamports: "auto",
-    }),
-  });
-  if (!swapResponse.ok) throw new Error(`Jupiter swap build failed (${swapResponse.status})`);
+  let swapResponse: Response;
+  try {
+    swapResponse = await fetch(JUPITER_SWAP, {
+      method: "POST",
+      headers: jupiterHeaders(true),
+      body: JSON.stringify({
+        quoteResponse: quote,
+        userPublicKey: signer.publicKey.toBase58(),
+        wrapAndUnwrapSol: true,
+        dynamicComputeUnitLimit: true,
+        prioritizationFeeLamports: "auto",
+      }),
+    });
+  } catch (cause) {
+    throw new Error(`Jupiter swap network failure at ${new URL(JUPITER_SWAP).origin}: ${errorDetails(cause)}`);
+  }
+  if (!swapResponse.ok) throw new Error(`Jupiter swap build failed (${swapResponse.status}): ${await responseError(swapResponse)}`);
   const swap = await swapResponse.json();
   if (!swap.swapTransaction) throw new Error("Jupiter returned no swap transaction");
 
