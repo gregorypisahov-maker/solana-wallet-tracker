@@ -106,7 +106,8 @@ export default async function LiveTradingPage({
       {notice && <section className="actionNotice">{notice}</section>}
       {actionError && <section className="actionNotice error">Control failed: {decodeURIComponent(actionError)}</section>}
 
-      <section className="controlPanel">
+      <details className="controlPanel">
+        <summary><strong>Emergency trading controls</strong> — tap to open</summary>
         <div>
           <span>REAL MONEY CONTROL</span>
           <h2>{executor?.halted || !executor?.enabled ? "Trading is stopped" : "Trading control is enabled"}</h2>
@@ -116,7 +117,7 @@ export default async function LiveTradingPage({
           <form action="/api/live/stop" method="post"><button className="stopButton" type="submit">STOP REAL TRADING</button></form>
           <form action="/api/live/resume" method="post"><button className="resumeButton" type="submit">RESUME REAL TRADING</button></form>
         </div>
-      </section>
+      </details>
 
       <section className="liveGrid">
         <article className="summaryCard"><span>Wallet balance</span><strong>{health.balanceSol == null ? "—" : `${health.balanceSol.toFixed(4)} SOL`}</strong><small>{health.error ?? "On-chain wallet balance"}</small></article>
