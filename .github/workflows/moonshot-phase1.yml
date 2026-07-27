@@ -4,11 +4,13 @@ on:
   push:
     branches:
       - "feature/moonshot-phase-1"
+      - "feature/moonshot-http-polling-2026-07-27"
     paths:
       - "paper-trader/moonshotScanner.ts"
       - "paper-trader/moonshotScanner.test.ts"
       - "worker/moonshotScannerEntrypoint.ts"
       - "supabase/migrations/20260727123000_moonshot_scanner_phase1.sql"
+      - "supabase/migrations/20260727160000_moonshot_http_polling.sql"
       - "docs/moonshot-phase1.md"
       - "package.json"
       - ".github/workflows/moonshot-phase1.yml"
@@ -18,6 +20,7 @@ on:
       - "paper-trader/moonshotScanner.test.ts"
       - "worker/moonshotScannerEntrypoint.ts"
       - "supabase/migrations/20260727123000_moonshot_scanner_phase1.sql"
+      - "supabase/migrations/20260727160000_moonshot_http_polling.sql"
       - "docs/moonshot-phase1.md"
       - "package.json"
       - ".github/workflows/moonshot-phase1.yml"
