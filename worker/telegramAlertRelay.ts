@@ -11,6 +11,7 @@ const POLL_MS = Math.max(2_000, Number(process.env.TELEGRAM_ALERT_RELAY_POLL_MS)
 const MAX_ATTEMPTS = Math.max(1, Number(process.env.TELEGRAM_ALERT_RELAY_MAX_ATTEMPTS) || 5);
 const supabase = getSupabaseAdmin();
 let relayRunning = false;
+let relayStarted = false;
 
 interface AlertRow {
   id: number;
@@ -88,6 +89,8 @@ async function processOutbox(): Promise<void> {
 }
 
 export function startTelegramAlertRelay(): void {
+  if (relayStarted) return;
+  relayStarted = true;
   if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
     console.error("[telegram-alert-relay] TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID are required. Relay disabled.");
     return;
