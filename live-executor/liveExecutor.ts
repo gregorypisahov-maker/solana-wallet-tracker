@@ -1,6 +1,7 @@
 import "dotenv/config";
 import { randomUUID } from "node:crypto";
 import { getSupabaseAdmin } from "../lib/supabase";
+import { sendTelegramAlert } from "../lib/telegram";
 import {
   executeJupiterBuy,
   executeJupiterSell,
@@ -41,6 +42,36 @@ const n = (value: unknown, fallback = 0): number => {
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 function runtimeArmed(): boolean {
   return process.env.LIVE_TRADING_ENABLED === "true" && process.env.LIVE_EXECUTION_ARMED === "true";
+}
+
+function escapeHtml(value: unknown): string {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function tokenName(signal: Signal): string {
+  return escapeHtml(signal.token_symbol?.trim() || `${signal.mint.slice(0, 6)}…${signal.mint.slice(-6)}`);
+}
+
+function txLink(signature: string): string {
+  return `https://solscan.io/tx/${encodeURIComponent(signature)}`;
+}
+
+function exitReason(signal: Signal): string {
+  const reason = signal.metadata?.exit_reason;
+  return typeof reason === "string" && reason.trim() ? reason.trim() : "strategy exit";
+}
+
+async function notifyTelegram(message: string): Promise<void> {
+  try {
+    await sendTelegramAlert(message);
+  } catch (error) {
+    console.error("[live-executor] Telegram notification failed", error);
+  }
 }
 
 async function heartbeat(reason?: string): Promise<void> {
@@ -165,19 +196,40 @@ async function executeBuy(signal: Signal, state: ExecutorState): Promise<void> {
     const received = tokenAfter - tokenBefore;
     const spentLamports = Math.max(0, solBefore - solAfter);
     if (received <= 0n) throw new Error("buy_reconciliation_received_zero_tokens");
+    const spentSol = spentLamports / LAMPORTS_PER_SOL;
     const now = new Date().toISOString();
     const quote = result.quote as Record<string, unknown>;
     await supabase.from("live_orders").update({ status: "confirmed", tx_signature: result.signature, quoted_input_amount: String(quote.inAmount ?? ""), quoted_output_amount: String(quote.outAmount ?? ""), actual_input_amount: String(spentLamports), actual_output_amount: received.toString(), quote, updated_at: now }).eq("id", orderId);
-    await supabase.from("live_positions").insert({ id: randomUUID(), strategy: signal.strategy, source_position_id: signal.source_position_id, mint: signal.mint, token_symbol: signal.token_symbol, status: "open", entry_order_id: orderId, entry_tx_signature: result.signature, token_amount: received.toString(), spent_sol: spentLamports / LAMPORTS_PER_SOL, opened_at: now, updated_at: now });
+    await supabase.from("live_positions").insert({ id: randomUUID(), strategy: signal.strategy, source_position_id: signal.source_position_id, mint: signal.mint, token_symbol: signal.token_symbol, status: "open", entry_order_id: orderId, entry_tx_signature: result.signature, token_amount: received.toString(), spent_sol: spentSol, opened_at: now, updated_at: now });
     await supabase.from("live_trade_signals").update({ status: "executed", completed_at: now }).eq("id", signal.id).eq("status", "claimed");
     await supabase.from("live_executor_state").update({ daily_entries: state.daily_entries + 1, updated_at: now }).eq("id", 1);
     console.log(`[live-executor] reconciled buy ${signal.token_symbol ?? signal.mint}: ${result.signature}`);
+    await notifyTelegram([
+      "🟢 <b>REAL MONEY TRADE OPENED</b>",
+      "",
+      `Token: <b>${tokenName(signal)}</b>`,
+      `Size: <b>${spentSol.toFixed(6)} SOL</b>`,
+      `Wallet balance: <b>${(solAfter / LAMPORTS_PER_SOL).toFixed(6)} SOL</b>`,
+      `Slippage limit: <b>${signal.max_slippage_bps / 100}%</b>`,
+      "",
+      `<a href="${txLink(result.signature)}">View confirmed transaction</a>`,
+      `<a href="https://dexscreener.com/solana/${encodeURIComponent(signal.mint)}">Open token chart</a>`,
+    ].join("\n"));
   } catch (cause) {
     const reason = cause instanceof Error ? cause.message : "unknown_execution_error";
     const now = new Date().toISOString();
     await supabase.from("live_orders").update({ status: "failed", error: reason, updated_at: now }).eq("id", orderId);
     await supabase.from("live_trade_signals").update({ status: "failed", rejection_reason: reason, completed_at: now }).eq("id", signal.id).eq("status", "claimed");
     await supabase.from("live_executor_state").update({ halted: true, halt_reason: `buy_failed:${reason}`, updated_at: now }).eq("id", 1);
+    await notifyTelegram([
+      "⚠️ <b>REAL MONEY BUY FAILED</b>",
+      "",
+      `Token: <b>${tokenName(signal)}</b>`,
+      `Requested: <b>${sizeSol.toFixed(6)} SOL</b>`,
+      `Reason: <code>${escapeHtml(reason)}</code>`,
+      "",
+      "🛑 The real executor was halted automatically. No confirmed live position was recorded.",
+    ].join("\n"));
     throw cause;
   }
 }
@@ -205,7 +257,9 @@ async function executeSell(signal: Signal, state: ExecutorState): Promise<void> 
     const receivedLamports = Math.max(0, solAfter - solBefore);
     if (sold <= 0n || receivedLamports <= 0) throw new Error("sell_reconciliation_balance_delta_invalid");
     const proceedsSol = receivedLamports / LAMPORTS_PER_SOL;
-    const pnlSol = proceedsSol - n(position.spent_sol);
+    const spentSol = n(position.spent_sol);
+    const pnlSol = proceedsSol - spentSol;
+    const pnlPct = spentSol > 0 ? (pnlSol / spentSol) * 100 : 0;
     const now = new Date().toISOString();
     const quote = result.quote as Record<string, unknown>;
     await supabase.from("live_orders").update({ status: "confirmed", tx_signature: result.signature, quoted_input_amount: String(quote.inAmount ?? ""), quoted_output_amount: String(quote.outAmount ?? ""), actual_input_amount: sold.toString(), actual_output_amount: String(receivedLamports), quote, updated_at: now }).eq("id", orderId);
@@ -213,6 +267,18 @@ async function executeSell(signal: Signal, state: ExecutorState): Promise<void> 
     await supabase.from("live_trade_signals").update({ status: "executed", completed_at: now }).eq("id", signal.id).eq("status", "claimed");
     await supabase.from("live_executor_state").update({ daily_realized_pnl_sol: n(state.daily_realized_pnl_sol) + pnlSol, updated_at: now }).eq("id", 1);
     console.log(`[live-executor] reconciled sell ${signal.token_symbol ?? signal.mint}: ${result.signature}; pnl=${pnlSol.toFixed(6)} SOL`);
+    await notifyTelegram([
+      pnlSol >= 0 ? "🟢 <b>REAL MONEY TRADE CLOSED — PROFIT</b>" : "🔴 <b>REAL MONEY TRADE CLOSED — LOSS</b>",
+      "",
+      `Token: <b>${tokenName(signal)}</b>`,
+      `Exit: <b>${escapeHtml(exitReason(signal))}</b>`,
+      `Spent: <b>${spentSol.toFixed(6)} SOL</b>`,
+      `Returned: <b>${proceedsSol.toFixed(6)} SOL</b>`,
+      `Net PnL: <b>${pnlSol >= 0 ? "+" : ""}${pnlSol.toFixed(6)} SOL (${pnlSol >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%)</b>`,
+      `Wallet balance: <b>${(solAfter / LAMPORTS_PER_SOL).toFixed(6)} SOL</b>`,
+      "",
+      `<a href="${txLink(result.signature)}">View confirmed transaction</a>`,
+    ].join("\n"));
   } catch (cause) {
     const reason = cause instanceof Error ? cause.message : "unknown_execution_error";
     const now = new Date().toISOString();
@@ -220,6 +286,14 @@ async function executeSell(signal: Signal, state: ExecutorState): Promise<void> 
     await supabase.from("live_trade_signals").update({ status: "failed", rejection_reason: reason, completed_at: now }).eq("id", signal.id).eq("status", "claimed");
     await supabase.from("live_positions").update({ status: "reconciliation_required", updated_at: now }).eq("id", position.id);
     await supabase.from("live_executor_state").update({ halted: true, halt_reason: `sell_failed:${reason}`, updated_at: now }).eq("id", 1);
+    await notifyTelegram([
+      "🚨 <b>REAL MONEY SELL FAILED</b>",
+      "",
+      `Token: <b>${tokenName(signal)}</b>`,
+      `Reason: <code>${escapeHtml(reason)}</code>`,
+      "",
+      "🛑 The executor was halted and the position requires reconciliation. Check the wallet and dashboard before resuming.",
+    ].join("\n"));
     throw cause;
   }
 }
@@ -247,6 +321,13 @@ async function processOnce(): Promise<void> {
 
 export function startLiveExecutor(): void {
   console.log(`[live-executor] isolated AI mirror starting; armed=${runtimeArmed()} pollMs=${POLL_MS}; wallet=reused-existing-live-wallet`);
+  void notifyTelegram([
+    "✅ <b>REAL MONEY TELEGRAM ALERTS ACTIVE</b>",
+    "",
+    "The live executor is online. You will receive alerts for confirmed buys, confirmed sells with exact PnL, and failed live orders.",
+    "",
+    "This is a system-status message — no trade was executed.",
+  ].join("\n"));
   void processOnce().catch((error) => console.error("[live-executor] cycle failed", error));
   setInterval(() => void processOnce().catch((error) => console.error("[live-executor] cycle failed", error)), POLL_MS);
 }
