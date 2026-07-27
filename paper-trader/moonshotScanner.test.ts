@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   extractMoonshotCandidateMints,
   parseMoonshotProgramIds,
+  selectMoonshotSignatures,
 } from "./moonshotScanner";
 
 const WSOL = "So11111111111111111111111111111111111111112";
@@ -78,4 +79,21 @@ test("extractMoonshotCandidateMints respects the transaction cap", () => {
   } as any;
 
   assert.equal(extractMoonshotCandidateMints(transaction, 1).length, 1);
+});
+
+test("selectMoonshotSignatures filters failed and stale signatures and returns oldest first", () => {
+  const nowMs = 1_000_000;
+  const signatures = [
+    { signature: "newest", slot: 3, err: null, blockTime: 995 },
+    { signature: "failed", slot: 2, err: { InstructionError: [0, "x"] }, blockTime: 994 },
+    { signature: "oldest-fresh", slot: 1, err: null, blockTime: 990 },
+    { signature: "stale", slot: 0, err: null, blockTime: 800 },
+  ];
+
+  assert.deepEqual(
+    selectMoonshotSignatures(signatures, nowMs, 120_000).map(
+      (signature) => signature.signature
+    ),
+    ["oldest-fresh", "newest"]
+  );
 });
