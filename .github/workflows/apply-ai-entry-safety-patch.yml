@@ -19,8 +19,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
-      - name: Apply anchor-checked patch
+      - name: Apply anchor-checked entry patch
         run: node scripts/apply-ai-entry-safety-patch.mjs
+      - name: Apply anchor-checked typing fix
+        run: node scripts/fix-ai-entry-safety-types.mjs
       - name: Commit patched trader
         run: |
           if git diff --quiet -- paper-trader/aiDiscoveryTrader.ts; then
