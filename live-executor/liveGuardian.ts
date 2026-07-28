@@ -83,14 +83,18 @@ async function enforceHotWalletLimit(): Promise<void> {
   }
 }
 
-async function calculateConsecutiveLosses(): Promise<number> {
-  const { data, error } = await supabase
+async function calculateConsecutiveLosses(resetAt: string | null): Promise<number> {
+  let query = supabase
     .from("live_positions")
     .select("realized_pnl_sol,closed_at")
     .eq("status", "closed")
     .not("realized_pnl_sol", "is", null)
     .order("closed_at", { ascending: false })
     .limit(50);
+
+  if (resetAt) query = query.gte("closed_at", resetAt);
+
+  const { data, error } = await query;
   if (error) throw new Error(error.message);
 
   let streak = 0;
@@ -108,14 +112,16 @@ export async function runLiveGuardian(): Promise<void> {
 }
 
 export async function checkLiveLossStreak(): Promise<void> {
-  const consecutiveLosses = await calculateConsecutiveLosses();
   const { data: state, error } = await supabase
     .from("live_executor_state")
-    .select("max_consecutive_losses")
+    .select("max_consecutive_losses,loss_streak_reset_at")
     .eq("id", 1)
     .single();
   if (error) throw new Error(error.message);
 
+  const consecutiveLosses = await calculateConsecutiveLosses(
+    state?.loss_streak_reset_at ? String(state.loss_streak_reset_at) : null
+  );
   const maxLosses = Math.max(
     1,
     n(state?.max_consecutive_losses, DEFAULT_MAX_CONSECUTIVE_LOSSES)
