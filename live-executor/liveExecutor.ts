@@ -804,36 +804,36 @@ async function processOnce(): Promise<void> {
       return;
     }
 
-if (signal.side === "buy") {
-  const sourceTiming = evaluateLiveEntryTiming(
-    signal,
-    SOURCE_ENTRY_MAX_AGE_MS,
-    Date.now(),
-    SOURCE_ENTRY_CLOCK_SKEW_TOLERANCE_MS
-  );
-  console.log(
-    `[live-executor] entry timing ${signal.token_symbol ?? signal.mint}: ` +
-      `timestampField=${sourceTiming.field ?? "none"} ` +
-      `sourceTimestamp=${sourceTiming.timestamp ?? "invalid"} ` +
-      `sourceAgeMs=${sourceTiming.sourceAgeMs ?? "invalid"} ` +
-      `rawSourceAgeMs=${sourceTiming.rawAgeMs ?? "invalid"} ` +
-      `maximumAgeMs=${SOURCE_ENTRY_MAX_AGE_MS}`
-  );
-  if (
-    !sourceTiming.valid ||
-    sourceTiming.tooFarInFuture ||
-    sourceTiming.expired
-  ) {
-    await reject(signal, "entry_window_missed_no_chase", {
-      sourceTimestampField: sourceTiming.field,
-      sourceTimestamp: sourceTiming.timestamp,
-      sourceAgeMs: sourceTiming.sourceAgeMs,
-      rawSourceAgeMs: sourceTiming.rawAgeMs,
-      maximumAgeMs: SOURCE_ENTRY_MAX_AGE_MS,
-      clockSkewToleranceMs: SOURCE_ENTRY_CLOCK_SKEW_TOLERANCE_MS,
-    });
-    return;
-  }
+    if (signal.side === "buy") {
+      const sourceTiming = evaluateLiveEntryTiming(
+        signal,
+        SOURCE_ENTRY_MAX_AGE_MS,
+        Date.now(),
+        SOURCE_ENTRY_CLOCK_SKEW_TOLERANCE_MS
+      );
+      console.log(
+        `[live-executor] entry timing ${signal.token_symbol ?? signal.mint}: ` +
+          `timestampField=${sourceTiming.field ?? "none"} ` +
+          `sourceTimestamp=${sourceTiming.timestamp ?? "invalid"} ` +
+          `sourceAgeMs=${sourceTiming.sourceAgeMs ?? "invalid"} ` +
+          `rawSourceAgeMs=${sourceTiming.rawAgeMs ?? "invalid"} ` +
+          `maximumAgeMs=${SOURCE_ENTRY_MAX_AGE_MS}`
+      );
+      if (
+        !sourceTiming.valid ||
+        sourceTiming.tooFarInFuture ||
+        sourceTiming.expired
+      ) {
+        await reject(signal, "entry_window_missed_no_chase", {
+          sourceTimestampField: sourceTiming.field,
+          sourceTimestamp: sourceTiming.timestamp,
+          sourceAgeMs: sourceTiming.sourceAgeMs,
+          rawSourceAgeMs: sourceTiming.rawAgeMs,
+          maximumAgeMs: SOURCE_ENTRY_MAX_AGE_MS,
+          clockSkewToleranceMs: SOURCE_ENTRY_CLOCK_SKEW_TOLERANCE_MS,
+        });
+        return;
+      }
 
       const safety = await evaluateBuySignalSafety(signal);
       if (safety.reason) {
