@@ -7,6 +7,7 @@ import {
 const supabase = getSupabaseAdmin();
 const DEFAULT_MAX_CONSECUTIVE_LOSSES = 3;
 const DEFAULT_MAX_HOT_WALLET_SOL = 0.25;
+const LOSS_STREAK_HALT_ENABLED = process.env.LIVE_LOSS_STREAK_HALT_ENABLED === "true";
 
 const n = (value: unknown, fallback = 0): number => {
   const parsed = typeof value === "number" ? value : Number(value);
@@ -119,7 +120,15 @@ export async function checkLiveLossStreak(): Promise<void> {
     1,
     n(state?.max_consecutive_losses, DEFAULT_MAX_CONSECUTIVE_LOSSES)
   );
-  const shouldHalt = consecutiveLosses >= maxLosses;
+  const thresholdReached = consecutiveLosses >= maxLosses;
+  const shouldHalt = LOSS_STREAK_HALT_ENABLED && thresholdReached;
+
+  if (thresholdReached && !LOSS_STREAK_HALT_ENABLED) {
+    console.warn(
+      `[live-guardian] consecutive loss warning: ${consecutiveLosses} losses (halt disabled)`
+    );
+  }
+
   const { error: updateError } = await supabase
     .from("live_executor_state")
     .update({
