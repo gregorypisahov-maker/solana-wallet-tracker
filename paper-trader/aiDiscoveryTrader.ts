@@ -7,7 +7,7 @@ import {
   type JupiterQuoteOnlyResult,
 } from "../lib/jupiterQuote";
 import { PAPER_COST_MODEL } from "./executionCosts";
-import { checkTokenSafety } from "../lib/tokenSafety";
+import { checkTokenSafety, type TokenSafetyResult } from "../lib/tokenSafety";
 
 const supabase = getSupabaseAdmin();
 const VERSION = "ai_discovery_trader_v1_9_entry_safety_s2_s4_2026_07_28";
@@ -503,9 +503,9 @@ async function maybeSummary(): Promise<void> {
 }
 
 async function logEntryScreenRejection(
-  opportunity,
-  result
-) {
+  opportunity: any,
+  result: TokenSafetyResult
+): Promise<void> {
   const { error } = await supabase.from("ai_entry_screen_rejections").insert({
     mint: opportunity.mint,
     symbol: opportunity.token_symbol ?? null,
