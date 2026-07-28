@@ -9,7 +9,7 @@ import {
 import { PAPER_COST_MODEL } from "./executionCosts";
 
 const supabase = getSupabaseAdmin();
-const VERSION = "ai_discovery_trader_v1_7_quote_fail_streak_2026_07_28";
+const VERSION = "ai_discovery_trader_v1_8_dex_rate_limit_2026_07_28";
 const SHADOW_MODEL_VERSION = "baseline_v1_2026_07_24";
 const DEX_URL = "https://api.dexscreener.com/tokens/v1/solana";
 const FIXED_SIZE_SOL = 0.2;
@@ -28,6 +28,22 @@ const MAX_QUOTE_FAIL_STREAK = Math.max(
   Math.min(10, Number(process.env.AI_MAX_QUOTE_FAIL_STREAK) || 3)
 );
 const REQUEST_TIMEOUT_MS = 12_000;
+const DEX_MIN_INTERVAL_MS = Math.max(
+  250,
+  Math.min(5_000, Number(process.env.AI_DEX_MIN_INTERVAL_MS) || 750)
+);
+const DEX_CACHE_TTL_MS = Math.max(
+  1_000,
+  Math.min(60_000, Number(process.env.AI_DEX_CACHE_TTL_MS) || 15_000)
+);
+const DEX_MAX_RETRIES = Math.max(
+  0,
+  Math.min(5, Number(process.env.AI_DEX_MAX_RETRIES) || 2)
+);
+const OUTCOME_BATCH_SIZE = Math.max(
+  1,
+  Math.min(10, Number(process.env.AI_OUTCOME_BATCH_SIZE) || 3)
+);
 const OUTCOME_HORIZONS = [5, 15, 30, 45] as const;
 const LAMPORTS_PER_SOL = 1_000_000_000;
 const QUOTE_EXITS_ENABLED = process.env.AI_PAPER_QUOTE_EXITS_ENABLED !== "false";
@@ -44,6 +60,15 @@ let scanRunning = false;
 let positionRunning = false;
 let outcomeRunning = false;
 let lastSummaryAt = 0;
+let dexRequestTail: Promise<void> = Promise.resolve();
+let lastDexRequestAt = 0;
+let dexCooldownUntil = 0;
+
+const dexCache = new Map<
+  string,
+  { expiresAt: number; value: unknown }
+>();
+const dexInflight = new Map<string, Promise<any>>();
 
 type State = {
   enabled: boolean;
@@ -116,20 +141,120 @@ function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
 }
 
-async function fetchJson(url: string): Promise<any> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-  try {
-    const response = await fetch(url, {
-      cache: "no-store",
-      signal: controller.signal,
-      headers: { Accept: "application/json" },
-    });
-    if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
-    return await response.json();
-  } finally {
-    clearTimeout(timer);
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function retryAfterMs(response: Response, attempt: number): number {
+  const raw = response.headers.get("retry-after");
+  if (raw) {
+    const seconds = Number(raw);
+    if (Number.isFinite(seconds) && seconds >= 0) {
+      return Math.max(1_000, seconds * 1_000);
+    }
+    const dateMs = Date.parse(raw);
+    if (Number.isFinite(dateMs)) {
+      return Math.max(1_000, dateMs - Date.now());
+    }
   }
+  return Math.min(30_000, 1_500 * 2 ** attempt);
+}
+
+async function fetchDexJsonWithRetry(url: string): Promise<any> {
+  let lastError: Error | null = null;
+
+  for (let attempt = 0; attempt <= DEX_MAX_RETRIES; attempt += 1) {
+    const paceUntil = Math.max(
+      dexCooldownUntil,
+      lastDexRequestAt + DEX_MIN_INTERVAL_MS
+    );
+    const waitMs = paceUntil - Date.now();
+    if (waitMs > 0) await sleep(waitMs);
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+    try {
+      lastDexRequestAt = Date.now();
+      const response = await fetch(url, {
+        cache: "no-store",
+        signal: controller.signal,
+        headers: { Accept: "application/json" },
+      });
+
+      if (response.ok) {
+        return await response.json();
+      }
+
+      const error = new Error(`${response.status} ${response.statusText}`);
+      lastError = error;
+      const retryable = response.status === 429 || response.status >= 500;
+      if (!retryable || attempt >= DEX_MAX_RETRIES) throw error;
+
+      const backoffMs = retryAfterMs(response, attempt);
+      dexCooldownUntil = Math.max(dexCooldownUntil, Date.now() + backoffMs);
+      console.warn(
+        `[ai-discovery-trader] DexScreener ${response.status}; ` +
+          `backing off ${backoffMs}ms (attempt ${attempt + 1}/${DEX_MAX_RETRIES + 1})`
+      );
+    } catch (error) {
+      const normalized =
+        error instanceof Error ? error : new Error(String(error));
+      lastError = normalized;
+      const isAbort = normalized.name === "AbortError";
+      const isRetryableNetworkError =
+        isAbort || /fetch|network|timeout|socket/i.test(normalized.message);
+      if (!isRetryableNetworkError || attempt >= DEX_MAX_RETRIES) {
+        throw normalized;
+      }
+      const backoffMs = Math.min(30_000, 1_500 * 2 ** attempt);
+      dexCooldownUntil = Math.max(dexCooldownUntil, Date.now() + backoffMs);
+      console.warn(
+        `[ai-discovery-trader] DexScreener request failed; ` +
+          `backing off ${backoffMs}ms (attempt ${attempt + 1}/${DEX_MAX_RETRIES + 1})`,
+        normalized
+      );
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  throw lastError ?? new Error("DexScreener request failed");
+}
+
+async function fetchJson(url: string): Promise<any> {
+  const cached = dexCache.get(url);
+  if (cached && cached.expiresAt > Date.now()) return cached.value;
+  if (cached) dexCache.delete(url);
+
+  const existing = dexInflight.get(url);
+  if (existing) return existing;
+
+  let resolveTask!: (value: any) => void;
+  let rejectTask!: (reason?: unknown) => void;
+  const task = new Promise<any>((resolve, reject) => {
+    resolveTask = resolve;
+    rejectTask = reject;
+  });
+  dexInflight.set(url, task);
+
+  dexRequestTail = dexRequestTail
+    .catch(() => undefined)
+    .then(async () => {
+      try {
+        const value = await fetchDexJsonWithRetry(url);
+        dexCache.set(url, {
+          value,
+          expiresAt: Date.now() + DEX_CACHE_TTL_MS,
+        });
+        resolveTask(value);
+      } catch (error) {
+        rejectTask(error);
+      } finally {
+        dexInflight.delete(url);
+      }
+    });
+
+  return task;
 }
 
 async function pairFor(
@@ -536,7 +661,7 @@ async function trackCandidateOutcomes(): Promise<void> {
       .eq("outcome_complete", false)
       .gte("observed_at", oldest)
       .order("observed_at", { ascending: true })
-      .limit(20);
+      .limit(OUTCOME_BATCH_SIZE);
     if (error) throw new Error(error.message);
 
     for (const observation of data ?? []) {
@@ -1044,6 +1169,8 @@ export function startAiDiscoveryTrader(): void {
   console.log(
     `[ai-discovery-trader] ${VERSION} enabled; quote exits=${QUOTE_EXITS_ENABLED}; ` +
       `emergency floor=${EMERGENCY_EXIT_FLOOR_PCT}%; slippage=${QUOTE_SLIPPAGE_BPS}bps; ` +
+      `DexScreener interval=${DEX_MIN_INTERVAL_MS}ms cache=${DEX_CACHE_TTL_MS}ms ` +
+      `outcomeBatch=${OUTCOME_BATCH_SIZE}; ` +
       `size ${FIXED_SIZE_SOL.toFixed(2)} SOL; score ${MIN_SCORE}+`
   );
 
