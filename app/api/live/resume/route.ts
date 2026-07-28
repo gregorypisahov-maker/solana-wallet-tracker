@@ -14,6 +14,7 @@ export async function POST(request: NextRequest) {
         enabled: true,
         halted: false,
         halt_reason: "manual_resume_button",
+        consecutive_losses: 0,
         updated_at: now,
       })
       .eq("id", 1);
