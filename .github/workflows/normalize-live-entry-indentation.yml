@@ -1,0 +1,87 @@
+name: Normalize live entry timing formatting
+
+on:
+  pull_request:
+    branches:
+      - main
+    types: [synchronize]
+
+permissions:
+  contents: write
+
+jobs:
+  normalize-test-and-commit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/live-entry-timing
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Normalize guarded block indentation
+        shell: bash
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+
+          path = Path("live-executor/liveExecutor.ts")
+          text = path.read_text()
+          process_start = text.find("async function processOnce(): Promise<void>")
+          start = text.find('if (signal.side === "buy") {', process_start)
+          end = text.find("      const safety = await evaluateBuySignalSafety(signal);", start)
+          if start < 0 or end < 0:
+              raise SystemExit("Expected generated timing block boundaries were not found")
+          block = text[start:end]
+          if not block.startswith('if (signal.side === "buy") {'):
+              raise SystemExit("Timing block is not in the expected unindented state")
+          if "evaluateLiveEntryTiming" not in block or "entry_window_missed_no_chase" not in block:
+              raise SystemExit("Timing block anchors are incomplete")
+          normalized = "".join(
+              ("    " + line if line.strip() else line)
+              for line in block.splitlines(keepends=True)
+          )
+          path.write_text(text[:start] + normalized + text[end:])
+          PY
+
+      - run: npm ci
+
+      - name: Run focused timing tests
+        run: node --import tsx --test lib/liveEntryTiming.test.ts
+
+      - name: Run typecheck
+        run: npm run typecheck
+
+      - name: Run production build
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: https://example.supabase.co
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: build-validation-placeholder
+          SUPABASE_SERVICE_ROLE_KEY: build-validation-placeholder
+        run: npm run build
+
+      - name: Revert build-generated rewrites
+        shell: bash
+        run: |
+          git restore --source=HEAD --staged --worktree -- \
+            app/api/bot-control/route.ts \
+            app/api/compact-dashboard/route.ts \
+            app/page.tsx \
+            app/platform-v2.css \
+            worker/telegramBot.ts || true
+          git clean -fd -- public/
+
+      - name: Commit normalized validated code
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/normalize-live-entry-indentation.yml
+          git add live-executor/liveExecutor.ts
+          git diff --cached --check
+          git commit -m "style: normalize live entry timing block"
+          git push origin HEAD:fix/live-entry-timing
