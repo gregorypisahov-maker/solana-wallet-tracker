@@ -8,6 +8,7 @@ const DEX_URL = "https://api.dexscreener.com/tokens/v1/solana";
 const MIN_POOL_AGE_MS = Math.max(60_000, Number(process.env.LIVE_MIN_POOL_AGE_MS) || 15 * 60_000);
 const MIN_LIQUIDITY_USD = Math.max(25_000, Number(process.env.LIVE_MIN_LIQUIDITY_USD) || 75_000);
 const MIN_LIQUIDITY_TO_FDV = Math.min(1, Math.max(0.01, Number(process.env.LIVE_MIN_LIQUIDITY_TO_FDV) || 0.12));
+const LIQUIDITY_TO_FDV_ENFORCE = process.env.LIVE_LIQUIDITY_TO_FDV_ENFORCE === "true";
 const MIN_H24_VOLUME_USD = Math.max(0, Number(process.env.LIVE_MIN_H24_VOLUME_USD) || 50_000);
 const MIN_M5_TRANSACTIONS = Math.max(0, Number(process.env.LIVE_MIN_M5_TRANSACTIONS) || 8);
 const MIN_ROUND_TRIP_RECOVERY_PCT = Math.min(99, Math.max(70, Number(process.env.LIVE_MIN_ROUND_TRIP_RECOVERY_PCT) || 95));
@@ -84,9 +85,23 @@ export async function evaluateLiveEntrySafety(input: {
     const m5Transactions = m5Buys + m5Sells;
     const pairCreatedAt = n(pair?.pairCreatedAt);
     const poolAgeMs = pairCreatedAt > 0 ? Date.now() - pairCreatedAt : 0;
-    Object.assign(details, { liquidityUsd, fdv, liquidityToFdv, h24VolumeUsd, m5Buys, m5Sells, poolAgeMinutes: poolAgeMs / 60_000, pairAddress: pair?.pairAddress ?? null, dexId: pair?.dexId ?? null });
+    const liquidityToFdvPassed = fdv > 0 && liquidityToFdv >= MIN_LIQUIDITY_TO_FDV;
+    Object.assign(details, {
+      liquidityUsd,
+      fdv,
+      liquidityToFdv,
+      liquidityToFdvMinimum: MIN_LIQUIDITY_TO_FDV,
+      liquidityToFdvPassed,
+      liquidityToFdvEnforced: LIQUIDITY_TO_FDV_ENFORCE,
+      h24VolumeUsd,
+      m5Buys,
+      m5Sells,
+      poolAgeMinutes: poolAgeMs / 60_000,
+      pairAddress: pair?.pairAddress ?? null,
+      dexId: pair?.dexId ?? null,
+    });
     if (liquidityUsd < MIN_LIQUIDITY_USD) return reject("liquidity_below_live_minimum", details);
-    if (fdv <= 0 || liquidityToFdv < MIN_LIQUIDITY_TO_FDV) return reject("liquidity_to_fdv_too_low", details);
+    if (LIQUIDITY_TO_FDV_ENFORCE && !liquidityToFdvPassed) return reject("liquidity_to_fdv_too_low", details);
     if (h24VolumeUsd < MIN_H24_VOLUME_USD) return reject("volume_below_live_minimum", details);
     if (m5Transactions < MIN_M5_TRANSACTIONS) return reject("insufficient_recent_transactions", details);
     if (!pairCreatedAt || poolAgeMs < MIN_POOL_AGE_MS) return reject("pool_too_new", details);
