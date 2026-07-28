@@ -1,9 +1,10 @@
 name: Validate live entry timing fix
 
 on:
-  push:
+  pull_request:
     branches:
-      - fix/live-entry-timing
+      - main
+    types: [opened, synchronize, reopened]
 
 permissions:
   contents: write
@@ -105,8 +106,7 @@ jobs:
           executor = executor.replace(old_block, new_block, 1)
           executor_path.write_text(executor)
 
-          helper_path = Path("live-executor/liveEntryTiming.ts")
-          helper_path.write_text('''export type LiveEntryTimestampField =
+          Path("live-executor/liveEntryTiming.ts").write_text('''export type LiveEntryTimestampField =
             | "source_opened_at"
             | "decision_at"
             | "created_at";
@@ -145,8 +145,7 @@ jobs:
 
               const rawAgeMs = nowMs - parsedAtMs;
               const tooFarInFuture = rawAgeMs < -clockSkewToleranceMs;
-              const sourceAgeMs =
-                rawAgeMs < 0 && !tooFarInFuture ? 0 : rawAgeMs;
+              const sourceAgeMs = rawAgeMs < 0 && !tooFarInFuture ? 0 : rawAgeMs;
               return {
                 field,
                 timestamp: candidate,
@@ -170,8 +169,7 @@ jobs:
           }
           ''')
 
-          test_path = Path("lib/liveEntryTiming.test.ts")
-          test_path.write_text('''import assert from "node:assert/strict";
+          Path("lib/liveEntryTiming.test.ts").write_text('''import assert from "node:assert/strict";
           import test from "node:test";
           import { evaluateLiveEntryTiming } from "../live-executor/liveEntryTiming";
 
@@ -291,9 +289,7 @@ jobs:
           });
           ''')
 
-          migration_path = Path(
-              "supabase/migrations/20260728235900_fix_live_entry_signal_timestamp.sql"
-          )
+          migration_path = Path("supabase/migrations/20260728235900_fix_live_entry_signal_timestamp.sql")
           if migration_path.exists():
               raise SystemExit(f"Migration already exists: {migration_path}")
           migration_path.write_text('''create or replace function public.emit_ai_discovery_live_buy_signal()
@@ -362,9 +358,7 @@ jobs:
               "lib/liveEntryTiming.test.ts",
               "supabase/migrations/20260728235900_fix_live_entry_signal_timestamp.sql",
           }
-          output = subprocess.check_output(
-              ["git", "status", "--porcelain"], text=True
-          ).splitlines()
+          output = subprocess.check_output(["git", "status", "--porcelain"], text=True).splitlines()
           changed = {line[3:] for line in output if len(line) > 3}
           unexpected = sorted(changed - allowed)
           if unexpected:
