@@ -7,9 +7,11 @@ import {
   type JupiterQuoteOnlyResult,
 } from "../lib/jupiterQuote";
 import { PAPER_COST_MODEL } from "./executionCosts";
+import { checkTokenSafety } from "../lib/tokenSafety";
 
 const supabase = getSupabaseAdmin();
-const VERSION = "ai_discovery_trader_v1_8_dex_rate_limit_2026_07_28";
+const VERSION = "ai_discovery_trader_v1_9_entry_safety_s2_s4_2026_07_28";
+const ENTRY_SCREEN_ENABLED = process.env.AI_TOKEN_SAFETY_ENABLED !== "false";
 const SHADOW_MODEL_VERSION = "baseline_v1_2026_07_24";
 const DEX_URL = "https://api.dexscreener.com/tokens/v1/solana";
 const FIXED_SIZE_SOL = 0.2;
@@ -500,6 +502,24 @@ async function maybeSummary(): Promise<void> {
   );
 }
 
+async function logEntryScreenRejection(
+  opportunity,
+  result
+) {
+  const { error } = await supabase.from("ai_entry_screen_rejections").insert({
+    mint: opportunity.mint,
+    symbol: opportunity.token_symbol ?? null,
+    check_failed: result.checkFailed ?? "rpc_unknown",
+    observed_value: result.observedValue == null ? null : result.observedValue,
+    snapshot: result.snapshot,
+  });
+  if (error) throw new Error(`entry_screen_rejection_log_failed:${error.message}`);
+  console.warn(
+    `[ai-discovery-trader] entry rejected ${opportunity.token_symbol ?? opportunity.mint} ` +
+      `check=${result.checkFailed ?? "rpc_unknown"} observed=${JSON.stringify(result.observedValue)}`
+  );
+}
+
 async function paperEntryTokenAmount(
   mint: string,
   sizeSol: number
@@ -636,6 +656,16 @@ async function scanEntries(): Promise<void> {
       try {
         const market = await priceFor(opportunity.mint, opportunity.pair_address);
         if (!market || market.changeM5 < 0 || market.changeM5 > 15) continue;
+
+        if (ENTRY_SCREEN_ENABLED) {
+          const safety = await checkTokenSafety(opportunity.mint);
+          if (!safety.passed) {
+            await logEntryScreenRejection(opportunity, safety);
+            continue;
+          }
+          opportunity.entry_safety = safety.snapshot;
+        }
+
         await openTrade(state, opportunity, market, observationId);
         break;
       } catch (error) {
@@ -1171,7 +1201,7 @@ export function startAiDiscoveryTrader(): void {
       `emergency floor=${EMERGENCY_EXIT_FLOOR_PCT}%; slippage=${QUOTE_SLIPPAGE_BPS}bps; ` +
       `DexScreener interval=${DEX_MIN_INTERVAL_MS}ms cache=${DEX_CACHE_TTL_MS}ms ` +
       `outcomeBatch=${OUTCOME_BATCH_SIZE}; ` +
-      `size ${FIXED_SIZE_SOL.toFixed(2)} SOL; score ${MIN_SCORE}+`
+      `size ${FIXED_SIZE_SOL.toFixed(2)} SOL; score ${MIN_SCORE}+; entrySafety=${ENTRY_SCREEN_ENABLED}`
   );
 
   void scanEntries().catch((error) =>
