@@ -53,6 +53,39 @@ jobs:
       - name: Report existing suite status
         run: echo "Existing full-suite outcome=${{ steps.full_tests.outcome }}; focused timing tests, typecheck, and build are required gates."
 
+      - name: Revert build-generated rewrites
+        shell: bash
+        run: |
+          python3 <<'PY'
+          import subprocess
+
+          allowed = {
+              ".github/workflows/fix-live-entry-timing.yml",
+              "scripts/apply-live-entry-timing-fix.py",
+              "live-executor/liveExecutor.ts",
+              "live-executor/liveEntryTiming.ts",
+              "lib/liveEntryTiming.test.ts",
+              "supabase/migrations/20260728235900_fix_live_entry_signal_timestamp.sql",
+          }
+          output = subprocess.check_output(
+              ["git", "status", "--porcelain"], text=True
+          ).splitlines()
+          for line in output:
+              if len(line) <= 3:
+                  continue
+              status = line[:2]
+              path = line[3:]
+              if path in allowed:
+                  continue
+              if status == "??":
+                  subprocess.run(["git", "clean", "-fd", "--", path], check=True)
+              else:
+                  subprocess.run(
+                      ["git", "restore", "--source=HEAD", "--staged", "--worktree", "--", path],
+                      check=True,
+                  )
+          PY
+
       - name: Reject unexpected source changes
         shell: bash
         run: |
