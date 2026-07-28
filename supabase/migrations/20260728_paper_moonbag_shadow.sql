@@ -4,7 +4,7 @@
 
 create table if not exists public.ai_moonbag_shadow_positions (
   id uuid primary key default gen_random_uuid(),
-  source_trade_id uuid not null unique,
+  source_trade_id text not null unique,
   source_position_id text not null,
   mint text not null,
   token_symbol text not null,
@@ -26,7 +26,7 @@ create table if not exists public.ai_moonbag_shadow_positions (
 
 create table if not exists public.ai_moonbag_shadow_trades (
   id uuid primary key default gen_random_uuid(),
-  source_trade_id uuid not null unique,
+  source_trade_id text not null unique,
   source_position_id text not null,
   mint text not null,
   token_symbol text not null,
