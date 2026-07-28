@@ -9,7 +9,7 @@ import {
 import { PAPER_COST_MODEL } from "./executionCosts";
 
 const supabase = getSupabaseAdmin();
-const VERSION = "ai_discovery_trader_v1_6_quote_exits_2026_07_28";
+const VERSION = "ai_discovery_trader_v1_7_quote_fail_streak_2026_07_28";
 const SHADOW_MODEL_VERSION = "baseline_v1_2026_07_24";
 const DEX_URL = "https://api.dexscreener.com/tokens/v1/solana";
 const FIXED_SIZE_SOL = 0.2;
@@ -23,6 +23,10 @@ const TAKE_PROFIT_PCT = 10;
 const TRAIL_ARM_PCT = 6;
 const TRAIL_DISTANCE_PCT = 4;
 const MAX_HOLD_MS = 45 * 60_000;
+const MAX_QUOTE_FAIL_STREAK = Math.max(
+  1,
+  Math.min(10, Number(process.env.AI_MAX_QUOTE_FAIL_STREAK) || 3)
+);
 const REQUEST_TIMEOUT_MS = 12_000;
 const OUTCOME_HORIZONS = [5, 15, 30, 45] as const;
 const LAMPORTS_PER_SOL = 1_000_000_000;
@@ -64,6 +68,7 @@ type Position = {
   token_amount: string | null;
   quote_peak_value_sol: number | string | null;
   last_executable_value_sol: number | string | null;
+  quote_fail_streak: number | string | null;
   opened_at: string;
   entry_snapshot: Record<string, unknown>;
 };
@@ -92,6 +97,7 @@ type ExitValuation = {
   proceedsSol: number;
   impliedPriceUsd: number;
   entryValueSol: number;
+  quoteCallFailed?: boolean;
   quoteError?: string;
   rawQuote?: Record<string, unknown> | null;
 };
@@ -630,6 +636,7 @@ async function quoteExitValuation(
         proceedsSol: 0,
         impliedPriceUsd: 0,
         entryValueSol,
+        quoteCallFailed: true,
         quoteError: "quote_exits_disabled_and_market_unavailable",
       };
     }
@@ -661,6 +668,7 @@ async function quoteExitValuation(
       proceedsSol: 0,
       impliedPriceUsd: 0,
       entryValueSol,
+      quoteCallFailed: true,
       quoteError: "missing_raw_token_amount",
     };
   }
@@ -682,6 +690,7 @@ async function quoteExitValuation(
       proceedsSol: 0,
       impliedPriceUsd: 0,
       entryValueSol,
+      quoteCallFailed: true,
       quoteError: error instanceof Error ? error.message : String(error),
     };
   }
@@ -905,7 +914,37 @@ async function managePositions(): Promise<void> {
         const valuation = await quoteExitValuation(position, mirror);
         const entryValue = Math.max(valuation.entryValueSol, Number.EPSILON);
         const recoveryPct = (valuation.executableSol / entryValue) * 100;
+        const failStreak = n(position.quote_fail_streak);
 
+        // Could not obtain an executable value this cycle (transient Jupiter
+        // quote failure that survived the helper's retries, or a missing token
+        // amount). This is NOT evidence of a rug, so never book a loss on it.
+        // Hold and retry; only force-close once the failures persist or the
+        // position ages out, so a temporary quote blip can never realize a
+        // healthy position at ~-100%.
+        if (valuation.quoteCallFailed) {
+          const nextStreak = failStreak + 1;
+          if (nextStreak >= MAX_QUOTE_FAIL_STREAK || heldMs >= MAX_HOLD_MS) {
+            await closeTrade(position, valuation, "quote_unavailable_forced_exit");
+            continue;
+          }
+          const now = new Date().toISOString();
+          await supabase
+            .from("ai_discovery_positions")
+            .update({
+              quote_fail_streak: nextStreak,
+              last_checked_at: now,
+              updated_at: now,
+            })
+            .eq("position_id", position.position_id);
+          console.warn(
+            `[ai-discovery-trader] quote unavailable for ${position.token_symbol} ` +
+              `(streak ${nextStreak}/${MAX_QUOTE_FAIL_STREAK}); holding, error=${valuation.quoteError ?? "unknown"}`
+          );
+          continue;
+        }
+
+        // A successful quote that genuinely cannot route out is a real rug.
         if (!valuation.route) {
           await closeTrade(position, valuation, "liquidity_gone");
           continue;
@@ -948,36 +987,45 @@ async function managePositions(): Promise<void> {
                 valuation.executableSol
               ),
               last_executable_value_sol: valuation.executableSol,
+              quote_fail_streak: 0,
               last_checked_at: now,
               updated_at: now,
             })
             .eq("position_id", position.position_id);
         }
       } catch (error) {
-        console.warn(
-          `[ai-discovery-trader] position ${position.token_symbol} check failed closed`,
-          error
-        );
-        const entryValue = n(position.size_sol);
-        await closeTrade(
-          position,
-          {
-            source: "quote",
-            route: false,
-            outLamports: 0n,
-            executableSol: 0,
-            proceedsSol: 0,
-            impliedPriceUsd: 0,
-            entryValueSol: entryValue,
-            quoteError: error instanceof Error ? error.message : String(error),
-          },
-          "liquidity_gone"
-        ).catch((closeError) =>
-          console.error(
-            `[ai-discovery-trader] fail-closed exit failed for ${position.token_symbol}`,
-            closeError
-          )
-        );
+        // An unexpected error (DB/parse/network) is not evidence of a rug.
+        // Skip this position for this cycle rather than force-closing it at a
+        // loss. Only if it has aged past max-hold and still cannot be handled
+        // do we close it out, so transient faults never fabricate losses.
+        const heldMs = Date.now() - Date.parse(position.opened_at);
+        if (heldMs >= MAX_HOLD_MS) {
+          await closeTrade(
+            position,
+            {
+              source: "quote",
+              route: false,
+              outLamports: 0n,
+              executableSol: 0,
+              proceedsSol: 0,
+              impliedPriceUsd: 0,
+              entryValueSol: n(position.size_sol),
+              quoteCallFailed: true,
+              quoteError: error instanceof Error ? error.message : String(error),
+            },
+            "quote_unavailable_forced_exit"
+          ).catch((closeError) =>
+            console.error(
+              `[ai-discovery-trader] fail-closed exit failed for ${position.token_symbol}`,
+              closeError
+            )
+          );
+        } else {
+          console.warn(
+            `[ai-discovery-trader] position ${position.token_symbol} check skipped (transient error); not force-closing`,
+            error
+          );
+        }
       }
     }
   } finally {
