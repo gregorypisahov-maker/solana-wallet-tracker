@@ -36,6 +36,7 @@ const MAX_SELL_PRICE_IMPACT_PCT = Math.min(
   30,
   Math.max(0.1, Number(process.env.LIVE_MAX_SELL_PRICE_IMPACT_PCT) || 3)
 );
+const HOLDER_CONCENTRATION_ENFORCE = process.env.LIVE_HOLDER_CONCENTRATION_ENFORCE === "true";
 const MAX_TOP_HOLDER_PCT = Math.min(
   100,
   Math.max(1, Number(process.env.LIVE_MAX_TOP_HOLDER_PCT) || 12)
@@ -120,12 +121,10 @@ export async function evaluateLiveEntrySafety(input: {
       ) / 100;
     details.top1HolderPct = top1Pct;
     details.top5HolderPct = top5Pct;
-    if (top1Pct > MAX_TOP_HOLDER_PCT) {
-      return reject("top_holder_concentration", details);
-    }
-    if (top5Pct > MAX_TOP5_HOLDER_PCT) {
-      return reject("top5_holder_concentration", details);
-    }
+    details.holderConcentrationEnforced = HOLDER_CONCENTRATION_ENFORCE;
+    details.holderConcentrationCaveat = "raw largest token accounts include pool vaults and burn accounts until classified";
+    if (HOLDER_CONCENTRATION_ENFORCE && top1Pct > MAX_TOP_HOLDER_PCT) return reject("top_holder_concentration", details);
+    if (HOLDER_CONCENTRATION_ENFORCE && top5Pct > MAX_TOP5_HOLDER_PCT) return reject("top5_holder_concentration", details);
 
     const pairs = await fetchJson(`${DEX_URL}/${encodeURIComponent(input.mint)}`);
     const candidates = (Array.isArray(pairs) ? pairs : []).filter(

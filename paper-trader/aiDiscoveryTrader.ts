@@ -7,13 +7,17 @@ import {
   type JupiterQuoteOnlyResult,
 } from "../lib/jupiterQuote";
 import { PAPER_COST_MODEL } from "./executionCosts";
+import { evaluateLiveEntrySafety } from "../live-executor/liveSafety";
 
 const supabase = getSupabaseAdmin();
-const VERSION = "ai_discovery_trader_v1_8_dex_rate_limit_2026_07_28";
+const VERSION = "ai_discovery_trader_v1_9_shared_entry_safety_2026_07_28";
+const PAPER_ENTRY_SAFETY_ENABLED = process.env.AI_PAPER_ENTRY_SAFETY_ENABLED !== "false";
+const PAPER_ENTRY_SAFETY_ENFORCE = process.env.AI_PAPER_ENTRY_SAFETY_ENFORCE !== "false";
 const SHADOW_MODEL_VERSION = "baseline_v1_2026_07_24";
 const DEX_URL = "https://api.dexscreener.com/tokens/v1/solana";
 const FIXED_SIZE_SOL = 0.2;
-const MAX_CONSECUTIVE_LOSSES = 3;
+const MAX_CONSECUTIVE_LOSSES = Math.max(3, Number(process.env.AI_MAX_CONSECUTIVE_LOSSES) || 5);
+const CONSECUTIVE_LOSS_COOLDOWN_MS = Math.max(15 * 60_000, Number(process.env.AI_CONSECUTIVE_LOSS_COOLDOWN_MS) || 60 * 60_000);
 const DAILY_LOSS_LIMIT_SOL = 0.05;
 const MIN_SCORE = 82;
 const MAX_OPPORTUNITY_AGE_MS = 3 * 60_000;
@@ -79,6 +83,7 @@ type State = {
   daily_date: string;
   daily_realized_pnl_sol: number | string;
   consecutive_losses: number;
+  updated_at: string;
 };
 
 type Position = {
@@ -607,7 +612,16 @@ async function scanEntries(): Promise<void> {
 
     const cutoff = new Date(Date.now() - MAX_OPPORTUNITY_AGE_MS).toISOString();
     const opportunities = await collectCandidateObservations(cutoff);
-    if (!state.enabled || state.halted) return;
+    if (!state.enabled) return;
+    if (state.halted) {
+      const haltedForMs = Date.now() - Date.parse(state.updated_at);
+      if (state.halt_reason === "consecutive_loss_limit" && Number.isFinite(haltedForMs) && haltedForMs >= CONSECUTIVE_LOSS_COOLDOWN_MS) {
+        const resumedAt = new Date().toISOString();
+        await supabase.from("ai_discovery_state").update({ halted: false, halt_reason: null, consecutive_losses: 0, updated_at: resumedAt }).eq("id", 1);
+        state.halted = false; state.halt_reason = null; state.consecutive_losses = 0; state.updated_at = resumedAt;
+        console.warn("[ai-discovery-trader] auto-resumed after consecutive-loss cooldown");
+      } else return;
+    }
 
     if (
       n(state.daily_realized_pnl_sol) <= -DAILY_LOSS_LIMIT_SOL ||
@@ -636,6 +650,12 @@ async function scanEntries(): Promise<void> {
       try {
         const market = await priceFor(opportunity.mint, opportunity.pair_address);
         if (!market || market.changeM5 < 0 || market.changeM5 > 15) continue;
+        if (PAPER_ENTRY_SAFETY_ENABLED) {
+          const safety = await evaluateLiveEntrySafety({ mint: opportunity.mint, sizeSol: FIXED_SIZE_SOL, slippageBps: QUOTE_SLIPPAGE_BPS });
+          await supabase.from("ai_entry_screen_observations").insert({ mint: opportunity.mint, symbol: opportunity.token_symbol ?? null, passed: safety.passed, check_failed: safety.reason, snapshot: safety.details, enforcement_enabled: PAPER_ENTRY_SAFETY_ENFORCE });
+          opportunity.entry_safety = { passed: safety.passed, reason: safety.reason, ...safety.details };
+          if (!safety.passed && PAPER_ENTRY_SAFETY_ENFORCE) { console.warn(`[ai-discovery-trader] paper entry blocked ${opportunity.token_symbol ?? opportunity.mint}: ${safety.reason}`); continue; }
+        }
         await openTrade(state, opportunity, market, observationId);
         break;
       } catch (error) {
