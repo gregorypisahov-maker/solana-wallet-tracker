@@ -25,11 +25,9 @@ async function main(): Promise<void> {
     if (!isIntentionalGuardianHalt(error)) throw error;
 
     console.warn(
-      "[live-executor] guardian halted live trading; service will remain healthy and idle",
+      "[live-executor] guardian halted live trading; executor will stay running behind database safety gates",
       error instanceof Error ? error.message : String(error)
     );
-    startLiveGuardianMonitor();
-    return;
   }
 
   startLiveGuardianMonitor();
