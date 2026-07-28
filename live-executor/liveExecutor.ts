@@ -10,6 +10,7 @@ import {
   getWalletTokenRawAmount,
 } from "../lib/liveWallet";
 import { evaluateLiveEntrySafety } from "./liveSafety";
+import { evaluateLiveEntryTiming } from "./liveEntryTiming";
 
 const supabase = getSupabaseAdmin();
 const VERSION = "live_executor_v2_entry_safety_2026_07_28";
@@ -27,6 +28,7 @@ const SOURCE_ENTRY_MAX_AGE_MS = Math.max(
   10_000,
   Number(process.env.LIVE_SOURCE_ENTRY_MAX_AGE_MS) || 20_000
 );
+const SOURCE_ENTRY_CLOCK_SKEW_TOLERANCE_MS = 5_000;
 const MAX_DUPLICATE_SYMBOL_MINTS = Math.max(
   1,
   Math.min(20, Number(process.env.LIVE_MAX_DUPLICATE_SYMBOL_MINTS) || 3)
@@ -802,21 +804,36 @@ async function processOnce(): Promise<void> {
       return;
     }
 
-    if (signal.side === "buy") {
-      const sourceOpenedAt = String(
-        signal.metadata?.source_opened_at ?? ""
-      );
-      const sourceAgeMs = Date.now() - Date.parse(sourceOpenedAt);
-      if (
-        !Number.isFinite(sourceAgeMs) ||
-        sourceAgeMs > SOURCE_ENTRY_MAX_AGE_MS
-      ) {
-        await reject(signal, "entry_window_missed_no_chase", {
-          sourceAgeMs,
-          maximumAgeMs: SOURCE_ENTRY_MAX_AGE_MS,
-        });
-        return;
-      }
+if (signal.side === "buy") {
+  const sourceTiming = evaluateLiveEntryTiming(
+    signal,
+    SOURCE_ENTRY_MAX_AGE_MS,
+    Date.now(),
+    SOURCE_ENTRY_CLOCK_SKEW_TOLERANCE_MS
+  );
+  console.log(
+    `[live-executor] entry timing ${signal.token_symbol ?? signal.mint}: ` +
+      `timestampField=${sourceTiming.field ?? "none"} ` +
+      `sourceTimestamp=${sourceTiming.timestamp ?? "invalid"} ` +
+      `sourceAgeMs=${sourceTiming.sourceAgeMs ?? "invalid"} ` +
+      `rawSourceAgeMs=${sourceTiming.rawAgeMs ?? "invalid"} ` +
+      `maximumAgeMs=${SOURCE_ENTRY_MAX_AGE_MS}`
+  );
+  if (
+    !sourceTiming.valid ||
+    sourceTiming.tooFarInFuture ||
+    sourceTiming.expired
+  ) {
+    await reject(signal, "entry_window_missed_no_chase", {
+      sourceTimestampField: sourceTiming.field,
+      sourceTimestamp: sourceTiming.timestamp,
+      sourceAgeMs: sourceTiming.sourceAgeMs,
+      rawSourceAgeMs: sourceTiming.rawAgeMs,
+      maximumAgeMs: SOURCE_ENTRY_MAX_AGE_MS,
+      clockSkewToleranceMs: SOURCE_ENTRY_CLOCK_SKEW_TOLERANCE_MS,
+    });
+    return;
+  }
 
       const safety = await evaluateBuySignalSafety(signal);
       if (safety.reason) {
