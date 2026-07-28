@@ -29,6 +29,9 @@ const MAX_HOLD_MS = Math.max(
   Number(process.env.PAPER_MOONBAG_MAX_HOLD_MS) || 7 * 24 * 60 * 60_000
 );
 const LOOP_MS = Math.max(30_000, Number(process.env.PAPER_MOONBAG_LOOP_MS) || 60_000);
+const FETCH_TIMEOUT_MS = Math.max(3_000, Number(process.env.PAPER_MOONBAG_FETCH_TIMEOUT_MS) || 8_000);
+const POSITION_BATCH_SIZE = Math.max(10, Number(process.env.PAPER_MOONBAG_POSITION_BATCH_SIZE) || 100);
+const CHECK_CONCURRENCY = Math.min(12, Math.max(2, Number(process.env.PAPER_MOONBAG_CHECK_CONCURRENCY) || 8));
 const DEX_URL = "https://api.dexscreener.com/tokens/v1/solana";
 let running = false;
 
@@ -65,6 +68,7 @@ type ShadowPosition = {
   main_locked_proceeds_sol: number | string;
   source_closed_at: string;
   opened_at: string;
+  last_checked_at?: string | null;
 };
 
 function n(value: unknown, fallback = 0): number {
@@ -74,7 +78,7 @@ function n(value: unknown, fallback = 0): number {
 
 async function marketPrice(position: ShadowPosition): Promise<number | null> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 12_000);
+  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
   try {
     const response = await fetch(`${DEX_URL}/${encodeURIComponent(position.mint)}`, {
       cache: "no-store",
@@ -193,10 +197,7 @@ async function closeShadow(
   });
   if (error && error.code !== "23505") throw new Error(error.message);
 
-  await supabase
-    .from("ai_moonbag_shadow_positions")
-    .delete()
-    .eq("id", position.id);
+  await supabase.from("ai_moonbag_shadow_positions").delete().eq("id", position.id);
 
   await sendTelegramAlert([
     "🌙 <b>MOONBAG SHADOW CLOSED</b>",
@@ -212,47 +213,62 @@ async function closeShadow(
   ].join("\n"));
 }
 
+async function checkPosition(position: ShadowPosition): Promise<void> {
+  const checkedAt = new Date().toISOString();
+  try {
+    const price = await marketPrice(position);
+    const heldMs = Date.now() - Date.parse(position.source_closed_at);
+    const previousPeak = n(position.peak_price_usd);
+    const peak = price ? Math.max(previousPeak, price) : previousPeak;
+    const armPrice = n(position.original_entry_price_usd) * TRAIL_ARM_MULTIPLE;
+    const floorPrice = n(position.retention_started_price_usd) * (RETENTION_FLOOR_PCT / 100);
+    const trailPrice = peak * (1 - TRAIL_DISTANCE_PCT / 100);
+
+    let reason: string | null = null;
+    if (!price && heldMs >= MAX_HOLD_MS) reason = "market_unavailable_max_hold";
+    else if (price && price <= floorPrice) reason = "retention_floor";
+    else if (price && peak >= armPrice && price <= trailPrice) reason = "wide_trailing_stop";
+    else if (heldMs >= MAX_HOLD_MS) reason = "seven_day_max_hold";
+
+    if (reason) {
+      await closeShadow(position, price ?? 0, peak, reason);
+      return;
+    }
+
+    const update: Record<string, unknown> = {
+      last_checked_at: checkedAt,
+      updated_at: checkedAt,
+    };
+    if (price) {
+      update.last_price_usd = price;
+      update.peak_price_usd = peak;
+    }
+    await supabase.from("ai_moonbag_shadow_positions").update(update).eq("id", position.id);
+  } catch (error) {
+    await supabase
+      .from("ai_moonbag_shadow_positions")
+      .update({ last_checked_at: checkedAt, updated_at: checkedAt })
+      .eq("id", position.id);
+    console.warn(`[moonbag-shadow] ${position.token_symbol} check skipped`, error);
+  }
+}
+
 async function managePositions(): Promise<void> {
   const { data, error } = await supabase
     .from("ai_moonbag_shadow_positions")
     .select("*")
-    .order("opened_at", { ascending: true })
-    .limit(25);
+    .order("last_checked_at", { ascending: true, nullsFirst: true })
+    .limit(POSITION_BATCH_SIZE);
   if (error) throw new Error(error.message);
 
-  for (const position of (data ?? []) as ShadowPosition[]) {
-    try {
-      const price = await marketPrice(position);
-      const heldMs = Date.now() - Date.parse(position.source_closed_at);
-      const previousPeak = n(position.peak_price_usd);
-      const peak = price ? Math.max(previousPeak, price) : previousPeak;
-      const armPrice = n(position.original_entry_price_usd) * TRAIL_ARM_MULTIPLE;
-      const floorPrice = n(position.retention_started_price_usd) * (RETENTION_FLOOR_PCT / 100);
-      const trailPrice = peak * (1 - TRAIL_DISTANCE_PCT / 100);
+  const positions = (data ?? []) as ShadowPosition[];
+  for (let index = 0; index < positions.length; index += CHECK_CONCURRENCY) {
+    const chunk = positions.slice(index, index + CHECK_CONCURRENCY);
+    await Promise.allSettled(chunk.map((position) => checkPosition(position)));
+  }
 
-      let reason: string | null = null;
-      if (!price && heldMs >= MAX_HOLD_MS) reason = "market_unavailable_max_hold";
-      else if (price && price <= floorPrice) reason = "retention_floor";
-      else if (price && peak >= armPrice && price <= trailPrice) reason = "wide_trailing_stop";
-      else if (heldMs >= MAX_HOLD_MS) reason = "seven_day_max_hold";
-
-      if (reason) {
-        await closeShadow(position, price ?? 0, peak, reason);
-      } else if (price) {
-        const now = new Date().toISOString();
-        await supabase
-          .from("ai_moonbag_shadow_positions")
-          .update({
-            last_price_usd: price,
-            peak_price_usd: peak,
-            last_checked_at: now,
-            updated_at: now,
-          })
-          .eq("id", position.id);
-      }
-    } catch (error) {
-      console.warn(`[moonbag-shadow] ${position.token_symbol} check skipped`, error);
-    }
+  if (positions.length > 0) {
+    console.log(`[moonbag-shadow] refreshed ${positions.length} open position(s)`);
   }
 }
 
