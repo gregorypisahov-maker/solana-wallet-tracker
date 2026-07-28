@@ -5,36 +5,48 @@ import { getLiveConnection } from "../lib/liveWallet";
 const LAMPORTS_PER_SOL = 1_000_000_000;
 const DEX_URL = "https://api.dexscreener.com/tokens/v1/solana";
 const MIN_POOL_AGE_MS = Math.max(
-  30_000,
-  Number(process.env.LIVE_MIN_POOL_AGE_MS) || 60_000
+  60_000,
+  Number(process.env.LIVE_MIN_POOL_AGE_MS) || 15 * 60_000
 );
 const MIN_LIQUIDITY_USD = Math.max(
   25_000,
-  Number(process.env.LIVE_MIN_LIQUIDITY_USD) || 40_000
+  Number(process.env.LIVE_MIN_LIQUIDITY_USD) || 75_000
+);
+const MIN_LIQUIDITY_TO_FDV = Math.min(
+  1,
+  Math.max(0.01, Number(process.env.LIVE_MIN_LIQUIDITY_TO_FDV) || 0.12)
+);
+const MIN_H24_VOLUME_USD = Math.max(
+  0,
+  Number(process.env.LIVE_MIN_H24_VOLUME_USD) || 50_000
+);
+const MIN_M5_TRANSACTIONS = Math.max(
+  0,
+  Number(process.env.LIVE_MIN_M5_TRANSACTIONS) || 8
 );
 const MIN_ROUND_TRIP_RECOVERY_PCT = Math.min(
   99,
-  Math.max(70, Number(process.env.LIVE_MIN_ROUND_TRIP_RECOVERY_PCT) || 90)
+  Math.max(70, Number(process.env.LIVE_MIN_ROUND_TRIP_RECOVERY_PCT) || 95)
 );
 const MAX_BUY_PRICE_IMPACT_PCT = Math.min(
   20,
-  Math.max(0.1, Number(process.env.LIVE_MAX_BUY_PRICE_IMPACT_PCT) || 3)
+  Math.max(0.1, Number(process.env.LIVE_MAX_BUY_PRICE_IMPACT_PCT) || 2)
 );
 const MAX_SELL_PRICE_IMPACT_PCT = Math.min(
   30,
-  Math.max(0.1, Number(process.env.LIVE_MAX_SELL_PRICE_IMPACT_PCT) || 5)
+  Math.max(0.1, Number(process.env.LIVE_MAX_SELL_PRICE_IMPACT_PCT) || 3)
 );
 const MAX_TOP_HOLDER_PCT = Math.min(
   100,
-  Math.max(1, Number(process.env.LIVE_MAX_TOP_HOLDER_PCT) || 20)
+  Math.max(1, Number(process.env.LIVE_MAX_TOP_HOLDER_PCT) || 12)
 );
 const MAX_TOP5_HOLDER_PCT = Math.min(
   100,
-  Math.max(5, Number(process.env.LIVE_MAX_TOP5_HOLDER_PCT) || 60)
+  Math.max(5, Number(process.env.LIVE_MAX_TOP5_HOLDER_PCT) || 35)
 );
 const MIN_EXPECTED_TOKEN_OUTPUT_PCT = Math.min(
   100,
-  Math.max(70, Number(process.env.LIVE_MIN_EXPECTED_TOKEN_OUTPUT_PCT) || 92)
+  Math.max(70, Number(process.env.LIVE_MIN_EXPECTED_TOKEN_OUTPUT_PCT) || 94)
 );
 const REQUEST_TIMEOUT_MS = Math.max(
   3_000,
@@ -99,11 +111,8 @@ export async function evaluateLiveEntrySafety(input: {
     if (supply <= 0n) return reject("invalid_token_supply", details);
 
     const largest = await connection.getTokenLargestAccounts(mint, "confirmed");
-    const topAmounts = largest.value
-      .slice(0, 5)
-      .map((item) => BigInt(item.amount));
-    const top1Pct =
-      Number(((topAmounts[0] ?? 0n) * 10_000n) / supply) / 100;
+    const topAmounts = largest.value.slice(0, 5).map((item) => BigInt(item.amount));
+    const top1Pct = Number(((topAmounts[0] ?? 0n) * 10_000n) / supply) / 100;
     const top5Pct =
       Number(
         (topAmounts.reduce((sum, amount) => sum + amount, 0n) * 10_000n) /
@@ -118,9 +127,7 @@ export async function evaluateLiveEntrySafety(input: {
       return reject("top5_holder_concentration", details);
     }
 
-    const pairs = await fetchJson(
-      `${DEX_URL}/${encodeURIComponent(input.mint)}`
-    );
+    const pairs = await fetchJson(`${DEX_URL}/${encodeURIComponent(input.mint)}`);
     const candidates = (Array.isArray(pairs) ? pairs : []).filter(
       (pair: any) =>
         pair?.chainId === "solana" && pair?.baseToken?.address === input.mint
@@ -131,21 +138,41 @@ export async function evaluateLiveEntrySafety(input: {
     if (!pair) return reject("dex_pair_not_found", details);
 
     const liquidityUsd = n(pair?.liquidity?.usd);
+    const fdv = n(pair?.fdv || pair?.marketCap);
+    const liquidityToFdv = fdv > 0 ? liquidityUsd / fdv : 0;
+    const h24VolumeUsd = n(pair?.volume?.h24);
+    const m5Buys = n(pair?.txns?.m5?.buys);
+    const m5Sells = n(pair?.txns?.m5?.sells);
+    const m5Transactions = m5Buys + m5Sells;
     const pairCreatedAt = n(pair?.pairCreatedAt);
     const poolAgeMs = pairCreatedAt > 0 ? Date.now() - pairCreatedAt : 0;
+
     details.liquidityUsd = liquidityUsd;
+    details.fdv = fdv;
+    details.liquidityToFdv = liquidityToFdv;
+    details.h24VolumeUsd = h24VolumeUsd;
+    details.m5Buys = m5Buys;
+    details.m5Sells = m5Sells;
     details.poolAgeMinutes = poolAgeMs / 60_000;
     details.pairAddress = pair?.pairAddress ?? null;
+
     if (liquidityUsd < MIN_LIQUIDITY_USD) {
       return reject("liquidity_below_live_minimum", details);
+    }
+    if (fdv <= 0 || liquidityToFdv < MIN_LIQUIDITY_TO_FDV) {
+      return reject("liquidity_to_fdv_too_low", details);
+    }
+    if (h24VolumeUsd < MIN_H24_VOLUME_USD) {
+      return reject("volume_below_live_minimum", details);
+    }
+    if (m5Transactions < MIN_M5_TRANSACTIONS) {
+      return reject("insufficient_recent_transactions", details);
     }
     if (!pairCreatedAt || poolAgeMs < MIN_POOL_AGE_MS) {
       return reject("pool_too_new", details);
     }
 
-    const inputLamports = BigInt(
-      Math.floor(input.sizeSol * LAMPORTS_PER_SOL)
-    );
+    const inputLamports = BigInt(Math.floor(input.sizeSol * LAMPORTS_PER_SOL));
     const buy = await getJupiterQuote({
       inputMint: JUPITER_SOL_MINT,
       outputMint: input.mint,
