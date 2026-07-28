@@ -3,6 +3,7 @@ import { startMarketDiscoveryAgent } from "../paper-trader/marketDiscoveryAgent"
 import { startAiDiscoveryTrader } from "../paper-trader/aiDiscoveryTrader";
 import { startAiCapitalMirror } from "../paper-trader/aiCapitalMirror";
 import { startAiTradeAutopsyEngine } from "../paper-trader/aiTradeAutopsy";
+import { startAiMoonbagShadow } from "../paper-trader/aiMoonbagShadow";
 
 // Paper-only AI runtime. AI Discovery and its AI Capital mirror remain controlled
 // by their Supabase state rows. Real-money execution runs only in the dedicated
@@ -12,3 +13,4 @@ startMarketDiscoveryAgent();
 startAiDiscoveryTrader();
 startAiCapitalMirror();
 startAiTradeAutopsyEngine();
+startAiMoonbagShadow();
