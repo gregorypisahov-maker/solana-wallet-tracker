@@ -1,5 +1,5 @@
 import "dotenv/config";
-import "./geckoTerminalFetchGuard";
+import "../lib/geckoFetch";
 import { startMarketDiscoveryAgent } from "../paper-trader/marketDiscoveryAgent";
 import { startAiDiscoveryTrader } from "../paper-trader/aiDiscoveryTrader";
 import { startAiCapitalMirror } from "../paper-trader/aiCapitalMirror";
