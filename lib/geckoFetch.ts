@@ -1,3 +1,5 @@
+const originalFetch = globalThis.fetch.bind(globalThis);
+const GECKO_HOST = "api.geckoterminal.com";
 const MIN_INTERVAL_MS = Math.max(1_000, Number(process.env.GECKO_FETCH_MIN_INTERVAL_MS ?? 2_500));
 const CACHE_MS = Math.max(0, Number(process.env.GECKO_FETCH_CACHE_MS ?? 20_000));
 const MAX_RETRIES = Math.max(0, Math.min(5, Number(process.env.GECKO_FETCH_MAX_RETRIES ?? 3)));
@@ -55,7 +57,7 @@ async function requestJson(url: string): Promise<unknown> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
     try {
-      const response = await fetch(url, {
+      const response = await originalFetch(url, {
         cache: "no-store",
         signal: controller.signal,
         headers: {
@@ -103,5 +105,25 @@ export async function geckoFetchJson<T = any>(url: string): Promise<T> {
   inFlight.set(url, request);
   return request as Promise<T>;
 }
+
+function requestUrl(input: RequestInfo | URL): URL | null {
+  try {
+    if (input instanceof Request) return new URL(input.url);
+    return new URL(String(input));
+  } catch {
+    return null;
+  }
+}
+
+globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+  const url = requestUrl(input);
+  if (!url || url.hostname !== GECKO_HOST) return originalFetch(input, init);
+  return geckoFetchJson(url.toString()).then((value) =>
+    new Response(JSON.stringify(value), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    })
+  );
+}) as typeof fetch;
 
 console.log(`[gecko-gateway] active; minInterval=${MIN_INTERVAL_MS}ms cache=${CACHE_MS}ms retries=${MAX_RETRIES}`);
