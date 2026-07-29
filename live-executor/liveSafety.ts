@@ -14,14 +14,16 @@ const MIN_M5_TRANSACTIONS = Math.max(0, Number(process.env.LIVE_MIN_M5_TRANSACTI
 const MIN_ROUND_TRIP_RECOVERY_PCT = Math.min(99, Math.max(70, Number(process.env.LIVE_MIN_ROUND_TRIP_RECOVERY_PCT) || 95));
 const MAX_BUY_PRICE_IMPACT_PCT = Math.min(20, Math.max(0.1, Number(process.env.LIVE_MAX_BUY_PRICE_IMPACT_PCT) || 2));
 const MAX_SELL_PRICE_IMPACT_PCT = Math.min(30, Math.max(0.1, Number(process.env.LIVE_MAX_SELL_PRICE_IMPACT_PCT) || 3));
-const HOLDER_CONCENTRATION_ENFORCE = process.env.LIVE_HOLDER_CONCENTRATION_ENFORCE === "true";
-const MAX_TOP_HOLDER_PCT = Math.min(100, Math.max(1, Number(process.env.LIVE_MAX_TOP_HOLDER_PCT) || 12));
-const MAX_TOP5_HOLDER_PCT = Math.min(100, Math.max(5, Number(process.env.LIVE_MAX_TOP5_HOLDER_PCT) || 35));
+// Fail closed only on catastrophic raw concentration. Lower thresholds require
+// classifying AMM vaults/burn accounts first or they create false positives.
+const HOLDER_CONCENTRATION_ENFORCE = process.env.LIVE_HOLDER_CONCENTRATION_ENFORCE !== "false";
+const MAX_TOP_HOLDER_PCT = Math.min(100, Math.max(1, Number(process.env.LIVE_MAX_TOP_HOLDER_PCT) || 80));
+const MAX_TOP5_HOLDER_PCT = Math.min(100, Math.max(5, Number(process.env.LIVE_MAX_TOP5_HOLDER_PCT) || 95));
 const MIN_EXPECTED_TOKEN_OUTPUT_PCT = Math.min(100, Math.max(70, Number(process.env.LIVE_MIN_EXPECTED_TOKEN_OUTPUT_PCT) || 94));
 const REQUEST_TIMEOUT_MS = Math.max(3_000, Number(process.env.LIVE_SAFETY_REQUEST_TIMEOUT_MS) || 10_000);
 const LP_SAFETY_ENABLED = process.env.LP_SAFETY_ENABLED !== "false";
 const LIVE_LP_SAFETY_ENFORCE = process.env.LIVE_LP_SAFETY_ENFORCE !== "false";
-const PAPER_LP_SAFETY_ENFORCE = process.env.AI_PAPER_LP_SAFETY_ENFORCE === "true";
+const PAPER_LP_SAFETY_ENFORCE = process.env.AI_PAPER_LP_SAFETY_ENFORCE !== "false";
 
 export type LiveEntrySafetyResult = { passed: boolean; reason: string | null; details: Record<string, unknown> };
 
@@ -68,9 +70,15 @@ export async function evaluateLiveEntrySafety(input: {
     const topAmounts = largest.value.slice(0, 5).map((item) => BigInt(item.amount));
     const top1Pct = Number(((topAmounts[0] ?? 0n) * 10_000n) / supply) / 100;
     const top5Pct = Number((topAmounts.reduce((sum, amount) => sum + amount, 0n) * 10_000n) / supply) / 100;
-    Object.assign(details, { top1HolderPct: top1Pct, top5HolderPct: top5Pct, holderConcentrationEnforced: HOLDER_CONCENTRATION_ENFORCE, holderConcentrationCaveat: "raw largest token accounts include pool vaults and burn accounts until classified" });
-    if (HOLDER_CONCENTRATION_ENFORCE && top1Pct > MAX_TOP_HOLDER_PCT) return reject("top_holder_concentration", details);
-    if (HOLDER_CONCENTRATION_ENFORCE && top5Pct > MAX_TOP5_HOLDER_PCT) return reject("top5_holder_concentration", details);
+    Object.assign(details, {
+      top1HolderPct: top1Pct,
+      top5HolderPct: top5Pct,
+      holderConcentrationEnforced: HOLDER_CONCENTRATION_ENFORCE,
+      holderConcentrationThresholds: { top1Pct: MAX_TOP_HOLDER_PCT, top5Pct: MAX_TOP5_HOLDER_PCT },
+      holderConcentrationCaveat: "Raw largest token accounts can include pool vaults and burn accounts; only catastrophic concentration is blocked here.",
+    });
+    if (HOLDER_CONCENTRATION_ENFORCE && top1Pct > MAX_TOP_HOLDER_PCT) return reject("extreme_top_holder_concentration", details);
+    if (HOLDER_CONCENTRATION_ENFORCE && top5Pct > MAX_TOP5_HOLDER_PCT) return reject("extreme_top5_holder_concentration", details);
 
     const pairs = await fetchJson(`${DEX_URL}/${encodeURIComponent(input.mint)}`);
     const candidates = (Array.isArray(pairs) ? pairs : []).filter((pair: any) => pair?.chainId === "solana" && pair?.baseToken?.address === input.mint);
@@ -86,20 +94,7 @@ export async function evaluateLiveEntrySafety(input: {
     const pairCreatedAt = n(pair?.pairCreatedAt);
     const poolAgeMs = pairCreatedAt > 0 ? Date.now() - pairCreatedAt : 0;
     const liquidityToFdvPassed = fdv > 0 && liquidityToFdv >= MIN_LIQUIDITY_TO_FDV;
-    Object.assign(details, {
-      liquidityUsd,
-      fdv,
-      liquidityToFdv,
-      liquidityToFdvMinimum: MIN_LIQUIDITY_TO_FDV,
-      liquidityToFdvPassed,
-      liquidityToFdvEnforced: LIQUIDITY_TO_FDV_ENFORCE,
-      h24VolumeUsd,
-      m5Buys,
-      m5Sells,
-      poolAgeMinutes: poolAgeMs / 60_000,
-      pairAddress: pair?.pairAddress ?? null,
-      dexId: pair?.dexId ?? null,
-    });
+    Object.assign(details, { liquidityUsd, fdv, liquidityToFdv, liquidityToFdvMinimum: MIN_LIQUIDITY_TO_FDV, liquidityToFdvPassed, liquidityToFdvEnforced: LIQUIDITY_TO_FDV_ENFORCE, h24VolumeUsd, m5Buys, m5Sells, poolAgeMinutes: poolAgeMs / 60_000, pairAddress: pair?.pairAddress ?? null, dexId: pair?.dexId ?? null });
     if (liquidityUsd < MIN_LIQUIDITY_USD) return reject("liquidity_below_live_minimum", details);
     if (LIQUIDITY_TO_FDV_ENFORCE && !liquidityToFdvPassed) return reject("liquidity_to_fdv_too_low", details);
     if (h24VolumeUsd < MIN_H24_VOLUME_USD) return reject("volume_below_live_minimum", details);
