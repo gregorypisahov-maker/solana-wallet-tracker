@@ -1,6 +1,7 @@
 import { PublicKey } from "@solana/web3.js";
 import { getJupiterQuote, JUPITER_SOL_MINT } from "../lib/jupiterQuote";
 import { getLiveConnection } from "../lib/liveWallet";
+import { getSupabaseAdmin } from "../lib/supabase";
 import { evaluateLiquiditySafety } from "./liquiditySafety";
 
 const LAMPORTS_PER_SOL = 1_000_000_000;
@@ -14,8 +15,6 @@ const MIN_M5_TRANSACTIONS = Math.max(0, Number(process.env.LIVE_MIN_M5_TRANSACTI
 const MIN_ROUND_TRIP_RECOVERY_PCT = Math.min(99, Math.max(70, Number(process.env.LIVE_MIN_ROUND_TRIP_RECOVERY_PCT) || 95));
 const MAX_BUY_PRICE_IMPACT_PCT = Math.min(20, Math.max(0.1, Number(process.env.LIVE_MAX_BUY_PRICE_IMPACT_PCT) || 2));
 const MAX_SELL_PRICE_IMPACT_PCT = Math.min(30, Math.max(0.1, Number(process.env.LIVE_MAX_SELL_PRICE_IMPACT_PCT) || 3));
-// Fail closed only on catastrophic raw concentration. Lower thresholds require
-// classifying AMM vaults/burn accounts first or they create false positives.
 const HOLDER_CONCENTRATION_ENFORCE = process.env.LIVE_HOLDER_CONCENTRATION_ENFORCE !== "false";
 const MAX_TOP_HOLDER_PCT = Math.min(100, Math.max(1, Number(process.env.LIVE_MAX_TOP_HOLDER_PCT) || 80));
 const MAX_TOP5_HOLDER_PCT = Math.min(100, Math.max(5, Number(process.env.LIVE_MAX_TOP5_HOLDER_PCT) || 95));
@@ -24,6 +23,8 @@ const REQUEST_TIMEOUT_MS = Math.max(3_000, Number(process.env.LIVE_SAFETY_REQUES
 const LP_SAFETY_ENABLED = process.env.LP_SAFETY_ENABLED !== "false";
 const LIVE_LP_SAFETY_ENFORCE = process.env.LIVE_LP_SAFETY_ENFORCE !== "false";
 const PAPER_LP_SAFETY_ENFORCE = process.env.AI_PAPER_LP_SAFETY_ENFORCE !== "false";
+const PAPER_HELIUS_ENFORCE = process.env.AI_PAPER_HELIUS_ENFORCE === "true";
+const PAPER_HELIUS_MAX_AGE_MS = Math.max(60_000, Number(process.env.AI_PAPER_HELIUS_MAX_AGE_MS) || 15 * 60_000);
 
 export type LiveEntrySafetyResult = { passed: boolean; reason: string | null; details: Record<string, unknown> };
 
@@ -44,6 +45,40 @@ async function fetchJson(url: string): Promise<any> {
 
 function reject(reason: string, details: Record<string, unknown>): LiveEntrySafetyResult { return { passed: false, reason, details }; }
 
+async function enforcePaperHelius(mint: string, details: Record<string, unknown>): Promise<LiveEntrySafetyResult | null> {
+  if (!PAPER_HELIUS_ENFORCE) return null;
+
+  const supabase = getSupabaseAdmin();
+  const cutoff = new Date(Date.now() - PAPER_HELIUS_MAX_AGE_MS).toISOString();
+  const { data, error } = await supabase
+    .from("token_intelligence_snapshots")
+    .select("observed_at,mode,recommendation,snapshot")
+    .eq("mint", mint)
+    .gte("observed_at", cutoff)
+    .order("observed_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (error) return reject("helius_intelligence_query_failed", { ...details, heliusError: error.message });
+  if (!data) return reject("helius_intelligence_missing_or_stale", { ...details, heliusEnforced: true, heliusMaxAgeMs: PAPER_HELIUS_MAX_AGE_MS });
+
+  const snapshot = (data.snapshot ?? {}) as Record<string, any>;
+  const tradeEligible = snapshot.trade_eligible === true;
+  Object.assign(details, {
+    heliusEnforced: true,
+    heliusObservedAt: data.observed_at,
+    heliusMode: data.mode,
+    heliusRecommendation: data.recommendation,
+    heliusTradeEligible: tradeEligible,
+    heliusSignalScore: snapshot.signal_score ?? null,
+    heliusSignalReasons: snapshot.signal_reasons ?? [],
+    heliusMissingEvidence: snapshot.missing_for_trade_eligibility ?? [],
+  });
+
+  if (!tradeEligible) return reject("helius_trade_not_eligible", details);
+  return null;
+}
+
 export async function evaluateLiveEntrySafety(input: {
   mint: string;
   sizeSol: number;
@@ -63,6 +98,12 @@ export async function evaluateLiveEntrySafety(input: {
     details.supply = info.supply ?? null;
     if (info.mintAuthority) return reject("mint_authority_active", details);
     if (info.freezeAuthority) return reject("freeze_authority_active", details);
+
+    const paperCall = input.mode === "paper" || (input.mode == null && input.expectedTokenAmount == null);
+    if (paperCall) {
+      const heliusRejection = await enforcePaperHelius(input.mint, details);
+      if (heliusRejection) return heliusRejection;
+    }
 
     const supply = BigInt(String(info.supply ?? "0"));
     if (supply <= 0n) return reject("invalid_token_supply", details);
