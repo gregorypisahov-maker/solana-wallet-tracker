@@ -20,6 +20,8 @@ export const intelligenceConfig = {
   candidateMaxAgeMinutes: numberEnv("INTELLIGENCE_CANDIDATE_MAX_AGE_MINUTES", 5, 1, 60),
   cacheTtlSeconds: numberEnv("INTELLIGENCE_CACHE_TTL_SECONDS", 120, 15, 3600),
   requestTimeoutMs: numberEnv("HELIUS_REQUEST_TIMEOUT_MS", 8_000, 1_000, 30_000),
+  maxHolderOwners: Math.floor(numberEnv("INTELLIGENCE_MAX_HOLDER_OWNERS", 10, 4, 20)),
+  maxFundingLookups: Math.floor(numberEnv("INTELLIGENCE_MAX_FUNDING_LOOKUPS", 6, 0, 12)),
   monthlyCreditLimit: numberEnv("HELIUS_MONTHLY_CREDIT_LIMIT", 8_500_000, 1_000, 100_000_000),
   dailyCreditLimit: numberEnv("HELIUS_DAILY_CREDIT_LIMIT", 275_000, 100, 10_000_000),
   hourlyCreditLimit: numberEnv("HELIUS_HOURLY_CREDIT_LIMIT", 12_000, 10, 1_000_000),
