@@ -4,6 +4,7 @@ import path from "node:path";
 const file = path.resolve(process.cwd(), "paper-trader/aiDiscoveryTrader.ts");
 let source = fs.readFileSync(file, "utf8");
 const marker = "ai_discovery_trader_v2_split_exit_2026_07_29";
+const L = (...lines) => lines.join("\n");
 
 if (source.includes(marker)) {
   console.log("[patch-ai-split-exit] already applied");
@@ -24,80 +25,312 @@ replaceOnce(
 );
 
 replaceOnce(
-  `const TRAIL_DISTANCE_PCT = 4;\nconst MAX_HOLD_MS = 45 * 60_000;`,
-  `const TRAIL_DISTANCE_PCT = 4;\nconst SPLIT_EXIT_ENABLED = process.env.AI_PAPER_SPLIT_EXIT_ENABLED !== "false";\nconst SPLIT_MIN_SCORE = Math.max(82, Number(process.env.AI_PAPER_SPLIT_MIN_SCORE) || 90);\nconst SPLIT_PARTIAL_FRACTION = 0.5;\nconst SPLIT_TRAIL_DISTANCE_PCT = Math.max(4, Number(process.env.AI_PAPER_SPLIT_TRAIL_PCT) || 6);\nconst MAX_HOLD_MS = 45 * 60_000;`,
+  L("const TRAIL_DISTANCE_PCT = 4;", "const MAX_HOLD_MS = 45 * 60_000;"),
+  L(
+    "const TRAIL_DISTANCE_PCT = 4;",
+    'const SPLIT_EXIT_ENABLED = process.env.AI_PAPER_SPLIT_EXIT_ENABLED !== "false";',
+    "const SPLIT_MIN_SCORE = Math.max(82, Number(process.env.AI_PAPER_SPLIT_MIN_SCORE) || 90);",
+    "const SPLIT_PARTIAL_FRACTION = 0.5;",
+    "const SPLIT_TRAIL_DISTANCE_PCT = Math.max(4, Number(process.env.AI_PAPER_SPLIT_TRAIL_PCT) || 6);",
+    "const MAX_HOLD_MS = 45 * 60_000;"
+  ),
   "split constants"
 );
 
 replaceOnce(
-  `  size_sol: number | string;\n  token_amount: string | null;`,
-  `  size_sol: number | string;\n  original_size_sol: number | string | null;\n  remaining_cost_sol: number | string | null;\n  remaining_fraction: number | string | null;\n  partial_tp_taken: boolean | null;\n  partial_tp_price_usd: number | string | null;\n  partial_tp_proceeds_sol: number | string | null;\n  partial_tp_pnl_sol: number | string | null;\n  partial_tp_at: string | null;\n  token_amount: string | null;`,
+  L("  size_sol: number | string;", "  token_amount: string | null;"),
+  L(
+    "  size_sol: number | string;",
+    "  original_size_sol: number | string | null;",
+    "  remaining_cost_sol: number | string | null;",
+    "  remaining_fraction: number | string | null;",
+    "  partial_tp_taken: boolean | null;",
+    "  partial_tp_price_usd: number | string | null;",
+    "  partial_tp_proceeds_sol: number | string | null;",
+    "  partial_tp_pnl_sol: number | string | null;",
+    "  partial_tp_at: string | null;",
+    "  token_amount: string | null;"
+  ),
   "position fields"
 );
 
 replaceOnce(
-  `    size_sol: sizeSol,\n    token_amount: entryQuote.tokenAmount,`,
-  `    size_sol: sizeSol,\n    original_size_sol: sizeSol,\n    remaining_cost_sol: sizeSol,\n    remaining_fraction: 1,\n    partial_tp_taken: false,\n    partial_tp_proceeds_sol: 0,\n    partial_tp_pnl_sol: 0,\n    token_amount: entryQuote.tokenAmount,`,
+  L("    size_sol: sizeSol,", "    token_amount: entryQuote.tokenAmount,"),
+  L(
+    "    size_sol: sizeSol,",
+    "    original_size_sol: sizeSol,",
+    "    remaining_cost_sol: sizeSol,",
+    "    remaining_fraction: 1,",
+    "    partial_tp_taken: false,",
+    "    partial_tp_proceeds_sol: 0,",
+    "    partial_tp_pnl_sol: 0,",
+    "    token_amount: entryQuote.tokenAmount,"
+  ),
   "open position split fields"
 );
 
 replaceOnce(
-  `async function syncPositionTokenAmount(\n  position: Position,\n  mirror: LiveMirror | null\n): Promise<string | null> {\n  if (mirror?.token_amount && mirror.token_amount !== position.token_amount) {\n    await supabase\n      .from("ai_discovery_positions")\n      .update({ token_amount: mirror.token_amount, updated_at: new Date().toISOString() })\n      .eq("position_id", position.position_id);\n    position.token_amount = mirror.token_amount;\n  }\n  return position.token_amount;\n}`,
-  `async function syncPositionTokenAmount(\n  position: Position,\n  mirror: LiveMirror | null\n): Promise<string | null> {\n  // Once the paper-only split exit has happened, never copy the full live token\n  // balance back into the half-sized paper remainder.\n  if (!position.partial_tp_taken && mirror?.token_amount && mirror.token_amount !== position.token_amount) {\n    await supabase\n      .from("ai_discovery_positions")\n      .update({ token_amount: mirror.token_amount, updated_at: new Date().toISOString() })\n      .eq("position_id", position.position_id);\n    position.token_amount = mirror.token_amount;\n  }\n  return position.token_amount;\n}`,
+  L(
+    "async function syncPositionTokenAmount(",
+    "  position: Position,",
+    "  mirror: LiveMirror | null",
+    "): Promise<string | null> {",
+    "  if (mirror?.token_amount && mirror.token_amount !== position.token_amount) {",
+    "    await supabase",
+    '      .from("ai_discovery_positions")',
+    "      .update({ token_amount: mirror.token_amount, updated_at: new Date().toISOString() })",
+    '      .eq("position_id", position.position_id);',
+    "    position.token_amount = mirror.token_amount;",
+    "  }",
+    "  return position.token_amount;",
+    "}"
+  ),
+  L(
+    "async function syncPositionTokenAmount(",
+    "  position: Position,",
+    "  mirror: LiveMirror | null",
+    "): Promise<string | null> {",
+    "  // Once the paper-only split exit has happened, never copy the full live token",
+    "  // balance back into the half-sized paper remainder.",
+    "  if (!position.partial_tp_taken && mirror?.token_amount && mirror.token_amount !== position.token_amount) {",
+    "    await supabase",
+    '      .from("ai_discovery_positions")',
+    "      .update({ token_amount: mirror.token_amount, updated_at: new Date().toISOString() })",
+    '      .eq("position_id", position.position_id);',
+    "    position.token_amount = mirror.token_amount;",
+    "  }",
+    "  return position.token_amount;",
+    "}"
+  ),
   "live token sync isolation"
 );
 
 replaceOnce(
-  `async function quoteExitValuation(\n  position: Position,\n  mirror: LiveMirror | null\n): Promise<ExitValuation> {\n  const entryValueSol = Math.max(0, n(mirror?.spent_sol, n(position.size_sol)));\n  const tokenAmount = await syncPositionTokenAmount(position, mirror);`,
-  `async function quoteExitValuation(\n  position: Position,\n  mirror: LiveMirror | null,\n  options?: { tokenAmount?: string; entryValueSol?: number; ignoreLiveMirror?: boolean }\n): Promise<ExitValuation> {\n  const paperEntryValue = n(position.remaining_cost_sol, n(position.size_sol));\n  const mirrorEntryValue = options?.ignoreLiveMirror || position.partial_tp_taken\n    ? paperEntryValue\n    : n(mirror?.spent_sol, paperEntryValue);\n  const entryValueSol = Math.max(0, options?.entryValueSol ?? mirrorEntryValue);\n  const tokenAmount = options?.tokenAmount ?? await syncPositionTokenAmount(position, mirror);`,
+  L(
+    "async function quoteExitValuation(",
+    "  position: Position,",
+    "  mirror: LiveMirror | null",
+    "): Promise<ExitValuation> {",
+    "  const entryValueSol = Math.max(0, n(mirror?.spent_sol, n(position.size_sol)));",
+    "  const tokenAmount = await syncPositionTokenAmount(position, mirror);"
+  ),
+  L(
+    "async function quoteExitValuation(",
+    "  position: Position,",
+    "  mirror: LiveMirror | null,",
+    "  options?: { tokenAmount?: string; entryValueSol?: number; ignoreLiveMirror?: boolean }",
+    "): Promise<ExitValuation> {",
+    "  const paperEntryValue = n(position.remaining_cost_sol, n(position.size_sol));",
+    "  const mirrorEntryValue = options?.ignoreLiveMirror || position.partial_tp_taken",
+    "    ? paperEntryValue",
+    "    : n(mirror?.spent_sol, paperEntryValue);",
+    "  const entryValueSol = Math.max(0, options?.entryValueSol ?? mirrorEntryValue);",
+    "  const tokenAmount = options?.tokenAmount ?? await syncPositionTokenAmount(position, mirror);"
+  ),
   "quote override support"
 );
 
+const helperCode = L(
+  "function entryScore(position: Position): number {",
+  "  return n((position.entry_snapshot as any)?.opportunity?.score);",
+  "}",
+  "",
+  "async function currentMomentumM5(position: Position): Promise<number> {",
+  "  const { data, error } = await supabase",
+  '    .from("market_opportunities")',
+  '    .select("price_change_m5")',
+  '    .eq("mint", position.mint)',
+  "    .maybeSingle();",
+  "  if (error) {",
+  "    console.warn(`[ai-discovery-trader] split momentum unavailable for ${position.token_symbol}: ${error.message}`);",
+  "    return 0;",
+  "  }",
+  "  return n(data?.price_change_m5);",
+  "}",
+  "",
+  "async function takePartialProfit(position: Position, peakPriceUsd: number): Promise<boolean> {",
+  "  const raw = position.token_amount;",
+  "  if (!raw || !/^\\d+$/.test(raw)) return false;",
+  "  const totalRaw = BigInt(raw);",
+  "  const soldRaw = totalRaw / 2n;",
+  "  const remainingRaw = totalRaw - soldRaw;",
+  "  if (soldRaw <= 0n || remainingRaw <= 0n) return false;",
+  "",
+  "  const originalSize = n(position.original_size_sol, n(position.size_sol));",
+  "  const partialCost = originalSize * SPLIT_PARTIAL_FRACTION;",
+  "  const valuation = await quoteExitValuation(position, null, {",
+  "    tokenAmount: soldRaw.toString(),",
+  "    entryValueSol: partialCost,",
+  "    ignoreLiveMirror: true,",
+  "  });",
+  "  if (valuation.quoteCallFailed || !valuation.route) return false;",
+  "",
+  "  const partialProceeds = Math.max(0, valuation.proceedsSol);",
+  "  const partialPnl = partialProceeds - partialCost;",
+  "  const partialNetPct = partialCost > 0 ? (partialPnl / partialCost) * 100 : 0;",
+  '  const { data, error } = await supabase.rpc("apply_ai_discovery_partial_tp", {',
+  "    p_position_id: position.position_id,",
+  "    p_remaining_token_amount: remainingRaw.toString(),",
+  "    p_partial_price_usd: valuation.impliedPriceUsd,",
+  "    p_partial_proceeds_sol: partialProceeds,",
+  "    p_partial_pnl_sol: partialPnl,",
+  "    p_remaining_cost_sol: originalSize * (1 - SPLIT_PARTIAL_FRACTION),",
+  "    p_peak_price_usd: peakPriceUsd,",
+  "    p_last_executable_value_sol: valuation.executableSol,",
+  "  });",
+  "  if (error) throw new Error(error.message);",
+  "  if (data !== true) return false;",
+  "",
+  "  await sendTelegramAlert([",
+  '    "✅ <b>AI DISCOVERY PAPER PROFIT LOCKED</b>",',
+  '    "",',
+  "    `Token: <b>${position.token_symbol}</b>`,",
+  '    "Sold: <b>50%</b>",',
+  "    `Locked net: <b>${partialNetPct >= 0 ? \"+\" : \"\"}${partialNetPct.toFixed(2)}%</b>`,",
+  "    `Locked PnL: <b>${partialPnl >= 0 ? \"+\" : \"\"}${partialPnl.toFixed(5)} SOL</b>`,",
+  "    `Remainder: <b>50% trailing ${SPLIT_TRAIL_DISTANCE_PCT.toFixed(0)}% from peak</b>`,",
+  '    "",',
+  '    "🧪 Paper only — live execution exits fully at the first take-profit.",',
+  '  ].join("\\n"));',
+  "  return true;",
+  "}",
+  "",
+  "async function closeTrade(",
+  "  position: Position,"
+);
+
 replaceOnce(
-  `async function closeTrade(\n  position: Position,`,
-  `function entryScore(position: Position): number {\n  return n((position.entry_snapshot as any)?.opportunity?.score);\n}\n\nasync function currentMomentumM5(position: Position): Promise<number> {\n  const { data, error } = await supabase\n    .from("market_opportunities")\n    .select("price_change_m5")\n    .eq("mint", position.mint)\n    .maybeSingle();\n  if (error) {\n    console.warn(`[ai-discovery-trader] split momentum unavailable for ${position.token_symbol}: ${error.message}`);\n    return 0;\n  }\n  return n(data?.price_change_m5);\n}\n\nasync function takePartialProfit(position: Position, peakPriceUsd: number): Promise<boolean> {\n  const raw = position.token_amount;\n  if (!raw || !/^\\d+$/.test(raw)) return false;\n  const totalRaw = BigInt(raw);\n  const soldRaw = totalRaw / 2n;\n  const remainingRaw = totalRaw - soldRaw;\n  if (soldRaw <= 0n || remainingRaw <= 0n) return false;\n\n  const originalSize = n(position.original_size_sol, n(position.size_sol));\n  const partialCost = originalSize * SPLIT_PARTIAL_FRACTION;\n  const valuation = await quoteExitValuation(position, null, {\n    tokenAmount: soldRaw.toString(),\n    entryValueSol: partialCost,\n    ignoreLiveMirror: true,\n  });\n  if (valuation.quoteCallFailed || !valuation.route) return false;\n\n  const partialProceeds = Math.max(0, valuation.proceedsSol);\n  const partialPnl = partialProceeds - partialCost;\n  const partialNetPct = partialCost > 0 ? (partialPnl / partialCost) * 100 : 0;\n  const { data, error } = await supabase.rpc("apply_ai_discovery_partial_tp", {\n    p_position_id: position.position_id,\n    p_remaining_token_amount: remainingRaw.toString(),\n    p_partial_price_usd: valuation.impliedPriceUsd,\n    p_partial_proceeds_sol: partialProceeds,\n    p_partial_pnl_sol: partialPnl,\n    p_remaining_cost_sol: originalSize * (1 - SPLIT_PARTIAL_FRACTION),\n    p_peak_price_usd: peakPriceUsd,\n    p_last_executable_value_sol: valuation.executableSol,\n  });\n  if (error) throw new Error(error.message);\n  if (data !== true) return false;\n\n  await sendTelegramAlert([\n    "✅ <b>AI DISCOVERY PAPER PROFIT LOCKED</b>",\n    "",\n    `Token: <b>${position.token_symbol}</b>`,\n    "Sold: <b>50%</b>",\n    `Locked net: <b>${partialNetPct >= 0 ? "+" : ""}${partialNetPct.toFixed(2)}%</b>`,\n    `Locked PnL: <b>${partialPnl >= 0 ? "+" : ""}${partialPnl.toFixed(5)} SOL</b>`,\n    `Remainder: <b>50% trailing ${SPLIT_TRAIL_DISTANCE_PCT.toFixed(0)}% from peak</b>`,\n    "",\n    "🧪 Paper only — live execution exits fully at the first take-profit.",\n  ].join("\\n"));\n  return true;\n}\n\nasync function closeTrade(\n  position: Position,`,
+  L("async function closeTrade(", "  position: Position,"),
+  helperCode,
   "partial take-profit helpers"
 );
 
 replaceOnce(
-  `  const sizeSol = n(position.size_sol);\n  const proceeds = Math.max(0, valuation.proceedsSol);\n  const pnlSol = proceeds - sizeSol;\n  const grossPct = sizeSol > 0 ? ((valuation.executableSol / sizeSol) - 1) * 100 : -100;\n  const netPct = sizeSol > 0 ? (pnlSol / sizeSol) * 100 : -100;`,
-  `  const partialTaken = Boolean(position.partial_tp_taken);\n  const sizeSol = n(position.original_size_sol, n(position.size_sol));\n  const remainingCost = n(position.remaining_cost_sol, sizeSol);\n  const lockedProceeds = n(position.partial_tp_proceeds_sol);\n  const lockedPnl = n(position.partial_tp_pnl_sol);\n  const finalProceeds = Math.max(0, valuation.proceedsSol);\n  const finalPnl = finalProceeds - remainingCost;\n  const proceeds = lockedProceeds + finalProceeds;\n  const pnlSol = proceeds - sizeSol;\n  const grossPct = sizeSol > 0 ? ((proceeds / sizeSol) - 1) * 100 : -100;\n  const netPct = sizeSol > 0 ? (pnlSol / sizeSol) * 100 : -100;`,
+  L(
+    "  const sizeSol = n(position.size_sol);",
+    "  const proceeds = Math.max(0, valuation.proceedsSol);",
+    "  const pnlSol = proceeds - sizeSol;",
+    "  const grossPct = sizeSol > 0 ? ((valuation.executableSol / sizeSol) - 1) * 100 : -100;",
+    "  const netPct = sizeSol > 0 ? (pnlSol / sizeSol) * 100 : -100;"
+  ),
+  L(
+    "  const partialTaken = Boolean(position.partial_tp_taken);",
+    "  const sizeSol = n(position.original_size_sol, n(position.size_sol));",
+    "  const remainingCost = n(position.remaining_cost_sol, sizeSol);",
+    "  const lockedProceeds = n(position.partial_tp_proceeds_sol);",
+    "  const lockedPnl = n(position.partial_tp_pnl_sol);",
+    "  const finalProceeds = Math.max(0, valuation.proceedsSol);",
+    "  const finalPnl = finalProceeds - remainingCost;",
+    "  const proceeds = lockedProceeds + finalProceeds;",
+    "  const pnlSol = proceeds - sizeSol;",
+    "  const grossPct = sizeSol > 0 ? ((proceeds / sizeSol) - 1) * 100 : -100;",
+    "  const netPct = sizeSol > 0 ? (pnlSol / sizeSol) * 100 : -100;"
+  ),
   "combined split accounting"
 );
 
 replaceOnce(
-  `    execution_source: valuation.source,`,
-  `    execution_source: partialTaken ? "quote_split" : valuation.source,`,
+  "    execution_source: valuation.source,",
+  '    execution_source: partialTaken ? "quote_split" : valuation.source,',
   "split execution source"
 );
 
 replaceOnce(
-  `      peakPriceUsd: n(position.peak_price_usd),\n    },`,
-  `      peakPriceUsd: n(position.peak_price_usd),\n      splitExit: {\n        enabled: SPLIT_EXIT_ENABLED,\n        partialTaken,\n        partialFraction: partialTaken ? SPLIT_PARTIAL_FRACTION : 0,\n        partialPriceUsd: n(position.partial_tp_price_usd),\n        partialProceedsSol: lockedProceeds,\n        partialPnlSol: lockedPnl,\n        partialTakenAt: position.partial_tp_at ?? null,\n        finalProceedsSol: finalProceeds,\n        trailDistancePct: partialTaken ? SPLIT_TRAIL_DISTANCE_PCT : null,\n      },\n    },`,
+  L("      peakPriceUsd: n(position.peak_price_usd),", "    },"),
+  L(
+    "      peakPriceUsd: n(position.peak_price_usd),",
+    "      splitExit: {",
+    "        enabled: SPLIT_EXIT_ENABLED,",
+    "        partialTaken,",
+    "        partialFraction: partialTaken ? SPLIT_PARTIAL_FRACTION : 0,",
+    "        partialPriceUsd: n(position.partial_tp_price_usd),",
+    "        partialProceedsSol: lockedProceeds,",
+    "        partialPnlSol: lockedPnl,",
+    "        partialTakenAt: position.partial_tp_at ?? null,",
+    "        finalProceedsSol: finalProceeds,",
+    "        trailDistancePct: partialTaken ? SPLIT_TRAIL_DISTANCE_PCT : null,",
+    "      },",
+    "    },"
+  ),
   "split exit snapshot"
 );
 
 replaceOnce(
-  `      bankroll_sol: n(state.bankroll_sol) + proceeds,\n      daily_realized_pnl_sol: n(state.daily_realized_pnl_sol) + pnlSol,`,
-  `      // The first half was already credited atomically when profit was locked.\n      bankroll_sol: n(state.bankroll_sol) + finalProceeds,\n      daily_realized_pnl_sol: n(state.daily_realized_pnl_sol) + finalPnl,`,
+  L(
+    "      bankroll_sol: n(state.bankroll_sol) + proceeds,",
+    "      daily_realized_pnl_sol: n(state.daily_realized_pnl_sol) + pnlSol,"
+  ),
+  L(
+    "      // The first half was already credited atomically when profit was locked.",
+    "      bankroll_sol: n(state.bankroll_sol) + finalProceeds,",
+    "      daily_realized_pnl_sol: n(state.daily_realized_pnl_sol) + finalPnl,"
+  ),
   "final-leg state accounting"
 );
 
 replaceOnce(
-  `    if (!trade || trade.execution_source === "live_mirror") continue;`,
-  `    if (\n      !trade ||\n      trade.execution_source === "live_mirror" ||\n      trade.execution_source === "quote_split" ||\n      Boolean(trade.exit_snapshot?.splitExit?.partialTaken)\n    ) continue;`,
+  '    if (!trade || trade.execution_source === "live_mirror") continue;',
+  L(
+    "    if (",
+    "      !trade ||",
+    '      trade.execution_source === "live_mirror" ||',
+    '      trade.execution_source === "quote_split" ||',
+    "      Boolean(trade.exit_snapshot?.splitExit?.partialTaken)",
+    "    ) continue;"
+  ),
   "live mirror split isolation"
 );
 
 replaceOnce(
-  `        let reason: string | null = null;\n        if (grossPct <= HARD_STOP_PCT) reason = "hard_stop";\n        else if (grossPct >= TAKE_PROFIT_PCT) reason = "take_profit";\n        else if (\n          peakPct >= TRAIL_ARM_PCT &&\n          pullbackPct <= -TRAIL_DISTANCE_PCT\n        ) {\n          reason = "trailing_stop";\n        } else if (heldMs >= MAX_HOLD_MS) {\n          reason = "max_hold";\n        }`,
-  `        const partialTaken = Boolean(position.partial_tp_taken);\n        let reason: string | null = null;\n        if (grossPct <= HARD_STOP_PCT) {\n          reason = "hard_stop";\n        } else if (!partialTaken && grossPct >= TAKE_PROFIT_PCT) {\n          const strongEnough = SPLIT_EXIT_ENABLED && entryScore(position) >= SPLIT_MIN_SCORE;\n          const momentumM5 = strongEnough ? await currentMomentumM5(position) : 0;\n          if (strongEnough && momentumM5 > 0) {\n            const partialDone = await takePartialProfit(position, peak);\n            if (partialDone) continue;\n          }\n          // If the split quote cannot execute, preserve the original safe full exit.\n          reason = "take_profit";\n        } else if (\n          partialTaken &&\n          peakPct >= TAKE_PROFIT_PCT &&\n          pullbackPct <= -SPLIT_TRAIL_DISTANCE_PCT\n        ) {\n          reason = "trailing_stop";\n        } else if (\n          !partialTaken &&\n          peakPct >= TRAIL_ARM_PCT &&\n          pullbackPct <= -TRAIL_DISTANCE_PCT\n        ) {\n          reason = "trailing_stop";\n        } else if (heldMs >= MAX_HOLD_MS) {\n          reason = "max_hold";\n        }`,
+  L(
+    "        let reason: string | null = null;",
+    '        if (grossPct <= HARD_STOP_PCT) reason = "hard_stop";',
+    '        else if (grossPct >= TAKE_PROFIT_PCT) reason = "take_profit";',
+    "        else if (",
+    "          peakPct >= TRAIL_ARM_PCT &&",
+    "          pullbackPct <= -TRAIL_DISTANCE_PCT",
+    "        ) {",
+    '          reason = "trailing_stop";',
+    "        } else if (heldMs >= MAX_HOLD_MS) {",
+    '          reason = "max_hold";',
+    "        }"
+  ),
+  L(
+    "        const partialTaken = Boolean(position.partial_tp_taken);",
+    "        let reason: string | null = null;",
+    "        if (grossPct <= HARD_STOP_PCT) {",
+    '          reason = "hard_stop";',
+    "        } else if (!partialTaken && grossPct >= TAKE_PROFIT_PCT) {",
+    "          const strongEnough = SPLIT_EXIT_ENABLED && entryScore(position) >= SPLIT_MIN_SCORE;",
+    "          const momentumM5 = strongEnough ? await currentMomentumM5(position) : 0;",
+    "          if (strongEnough && momentumM5 > 0) {",
+    "            const partialDone = await takePartialProfit(position, peak);",
+    "            if (partialDone) continue;",
+    "          }",
+    "          // If the split quote cannot execute, preserve the original safe full exit.",
+    '          reason = "take_profit";',
+    "        } else if (",
+    "          partialTaken &&",
+    "          peakPct >= TAKE_PROFIT_PCT &&",
+    "          pullbackPct <= -SPLIT_TRAIL_DISTANCE_PCT",
+    "        ) {",
+    '          reason = "trailing_stop";',
+    "        } else if (",
+    "          !partialTaken &&",
+    "          peakPct >= TRAIL_ARM_PCT &&",
+    "          pullbackPct <= -TRAIL_DISTANCE_PCT",
+    "        ) {",
+    '          reason = "trailing_stop";',
+    "        } else if (heldMs >= MAX_HOLD_MS) {",
+    '          reason = "max_hold";',
+    "        }"
+  ),
   "split exit decision"
 );
 
 replaceOnce(
-  `      \`size ${FIXED_SIZE_SOL.toFixed(2)} SOL; score ${MIN_SCORE}+\``,
-  `      \`size ${FIXED_SIZE_SOL.toFixed(2)} SOL; score ${MIN_SCORE}+; splitExit=${SPLIT_EXIT_ENABLED} minScore=${SPLIT_MIN_SCORE} trail=${SPLIT_TRAIL_DISTANCE_PCT}%\``,
+  "      `size ${FIXED_SIZE_SOL.toFixed(2)} SOL; score ${MIN_SCORE}+`",
+  "      `size ${FIXED_SIZE_SOL.toFixed(2)} SOL; score ${MIN_SCORE}+; splitExit=${SPLIT_EXIT_ENABLED} minScore=${SPLIT_MIN_SCORE} trail=${SPLIT_TRAIL_DISTANCE_PCT}%`",
   "startup split status"
 );
 
