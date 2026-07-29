@@ -18,14 +18,25 @@ async function usageSince(since: string): Promise<number> {
   return (data || []).reduce((sum, row: any) => sum + Number(row.estimated_credits || 0), 0);
 }
 
+async function analysesThisHour(): Promise<number> {
+  const { count, error } = await supabase.from("token_intelligence_snapshots")
+    .select("id", { count: "exact", head: true }).gte("observed_at", startOfHour());
+  if (error) throw error;
+  return count || 0;
+}
+
 async function budgetState() {
-  const [hour, day, month] = await Promise.all([usageSince(startOfHour()), usageSince(startOfDay()), usageSince(startOfMonth())]);
+  const [hour, day, month, analyses] = await Promise.all([
+    usageSince(startOfHour()), usageSince(startOfDay()), usageSince(startOfMonth()), analysesThisHour(),
+  ]);
   const ratio = Math.max(hour / config.hourlyCreditLimit, day / config.dailyCreditLimit, month / config.monthlyCreditLimit);
-  return { hour, day, month, ratio, stopped: ratio >= config.stopRatio, reduced: ratio >= config.reduceRatio };
+  const analysisCapReached = analyses >= config.maxDeepAnalysesPerHour;
+  return { hour, day, month, analyses, ratio, analysisCapReached, stopped: ratio >= config.stopRatio, reduced: ratio >= config.reduceRatio };
 }
 
 async function recordUsage(operation: string, mint: string, estimatedCredits = 1) {
-  await supabase.from("helius_credit_usage").insert({ service: VERSION, operation, mint, estimated_credits: estimatedCredits });
+  const { error } = await supabase.from("helius_credit_usage").insert({ service: VERSION, operation, mint, estimated_credits: estimatedCredits });
+  if (error) throw error;
 }
 
 async function heliusRpc<T>(method: string, params: unknown[], mint: string, estimatedCredits = 1): Promise<T> {
@@ -50,7 +61,8 @@ async function heliusRpc<T>(method: string, params: unknown[], mint: string, est
 
 async function alreadyFresh(mint: string): Promise<boolean> {
   const cutoff = new Date(Date.now() - config.cacheTtlSeconds * 1000).toISOString();
-  const { data } = await supabase.from("token_intelligence_snapshots").select("id").eq("mint", mint).gte("observed_at", cutoff).limit(1);
+  const { data, error } = await supabase.from("token_intelligence_snapshots").select("id").eq("mint", mint).gte("observed_at", cutoff).limit(1);
+  if (error) throw error;
   return Boolean(data?.length);
 }
 
@@ -58,8 +70,8 @@ async function analyze(candidate: any, reduced: boolean) {
   const mint = String(candidate.mint || "");
   if (!mint || await alreadyFresh(mint)) return;
 
-  const largest = await heliusRpc<any[]>("getTokenLargestAccounts", [mint, { commitment: "confirmed" }], mint, 1);
-  const values = Array.isArray((largest as any)?.value) ? (largest as any).value : [];
+  const largest = await heliusRpc<any>("getTokenLargestAccounts", [mint, { commitment: "confirmed" }], mint, 1);
+  const values = Array.isArray(largest?.value) ? largest.value : [];
   const amounts = values.map((x: any) => Number(x.uiAmountString || x.uiAmount || 0)).filter(Number.isFinite);
   const totalTop = amounts.reduce((a: number, b: number) => a + b, 0);
   const top1Share = totalTop > 0 ? amounts[0] / totalTop : null;
@@ -67,7 +79,8 @@ async function analyze(candidate: any, reduced: boolean) {
 
   let asset: any = null;
   if (!reduced) {
-    try { asset = await heliusRpc<any>("getAsset", [{ id: mint }], mint, 1); } catch (error) { console.warn("[helius-intelligence] getAsset failed", mint, error); }
+    try { asset = await heliusRpc<any>("getAsset", [{ id: mint }], mint, 1); }
+    catch (error) { console.warn("[helius-intelligence] getAsset failed", mint, error); }
   }
 
   const snapshot = {
@@ -87,7 +100,7 @@ async function analyze(candidate: any, reduced: boolean) {
     note: "Raw largest-account shares are observation-only and must not be enforced until pool vaults/burn accounts are classified.",
   };
 
-  const recommendation = Number(candidate.score || 0) >= 82 && !(snapshot.raw_holder_warning) ? "would_consider" : "would_watch";
+  const recommendation = Number(candidate.score || 0) >= 82 && !snapshot.raw_holder_warning ? "would_consider" : "would_watch";
   const { error } = await supabase.from("token_intelligence_snapshots").insert({
     mint,
     symbol: candidate.token_symbol,
@@ -106,20 +119,29 @@ async function cycle() {
   try {
     if (!HELIUS_RPC_URL) throw new Error("HELIUS_API_KEY_or_HELIUS_RPC_URL_missing");
     const budget = await budgetState();
+    const status = budget.stopped ? "credit_stop" : budget.analysisCapReached ? "hourly_analysis_cap" : budget.reduced ? "reduced" : "active";
     await supabase.from("intelligence_worker_state").upsert({
       service: VERSION,
       mode: config.mode,
-      status: budget.stopped ? "credit_stop" : budget.reduced ? "reduced" : "active",
+      status,
       hourly_credits: budget.hour,
       daily_credits: budget.day,
       monthly_credits: budget.month,
       last_heartbeat_at: new Date().toISOString(),
-      details: { limits: { hourly: config.hourlyCreditLimit, daily: config.dailyCreditLimit, monthly: config.monthlyCreditLimit }, ratio: budget.ratio },
+      updated_at: new Date().toISOString(),
+      details: {
+        limits: { hourly: config.hourlyCreditLimit, daily: config.dailyCreditLimit, monthly: config.monthlyCreditLimit, analyses_per_hour: config.maxDeepAnalysesPerHour },
+        usage: { analyses_this_hour: budget.analyses },
+        ratio: budget.ratio,
+      },
     }, { onConflict: "service" });
-    if (budget.stopped) return;
+    if (budget.stopped || budget.analysisCapReached) return;
 
     const cutoff = new Date(Date.now() - config.candidateMaxAgeMinutes * 60_000).toISOString();
-    const limit = budget.reduced ? 1 : config.maxCandidatesPerCycle;
+    const remainingAnalysisSlots = Math.max(0, config.maxDeepAnalysesPerHour - budget.analyses);
+    const limit = Math.min(budget.reduced ? 1 : config.maxCandidatesPerCycle, remainingAnalysisSlots);
+    if (limit < 1) return;
+
     const { data, error } = await supabase.from("market_opportunities")
       .select("mint,token_symbol,pair_address,score,status,market_regime,liquidity_usd,market_cap_usd,last_seen_at")
       .gte("score", config.minimumAiScore).gte("last_seen_at", cutoff).order("score", { ascending: false }).limit(limit);
