@@ -1,10 +1,11 @@
 import { getSupabaseAdmin } from "../lib/supabase";
 import { intelligenceConfig as config } from "./config";
+import { computeFlowSignal } from "./flowSignal";
 
 const supabase = getSupabaseAdmin();
 const HELIUS_API_KEY = process.env.HELIUS_API_KEY || "";
 const HELIUS_RPC_URL = process.env.HELIUS_RPC_URL || (HELIUS_API_KEY ? `https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}` : "");
-const VERSION = "helius_intelligence_shadow_v1_1_2026_07_29";
+const VERSION = "helius_intelligence_shadow_v1_2_2026_07_29";
 let running = false;
 
 function sleep(ms: number) { return new Promise((resolve) => setTimeout(resolve, ms)); }
@@ -66,10 +67,22 @@ async function alreadyFresh(mint: string): Promise<boolean> {
   return Boolean(data?.length);
 }
 
+async function previousSnapshot(mint: string): Promise<any | null> {
+  const { data, error } = await supabase.from("token_intelligence_snapshots")
+    .select("snapshot,observed_at")
+    .eq("mint", mint)
+    .order("observed_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error) throw error;
+  return data?.snapshot || null;
+}
+
 async function analyze(candidate: any, reduced: boolean) {
   const mint = String(candidate.mint || "");
   if (!mint || await alreadyFresh(mint)) return;
 
+  const previous = await previousSnapshot(mint);
   const largest = await heliusRpc<any>("getTokenLargestAccounts", [mint, { commitment: "confirmed" }], mint, 1);
   const values = Array.isArray(largest?.value) ? largest.value : [];
   const amounts = values.map((x: any) => Number(x.uiAmountString || x.uiAmount || 0)).filter(Number.isFinite);
@@ -83,10 +96,26 @@ async function analyze(candidate: any, reduced: boolean) {
     catch (error) { console.warn("[helius-intelligence] getAsset failed", mint, error); }
   }
 
+  const signal = await computeFlowSignal({
+    rpc: heliusRpc,
+    mint,
+    largestValues: values,
+    authorities: Array.isArray(asset?.authorities) ? asset.authorities : null,
+    previousSnapshot: previous,
+    reduced,
+    maxOwners: config.maxHolderOwners,
+    maxFundingLookups: reduced ? 0 : config.maxFundingLookups,
+  });
+
   const snapshot = {
     model_version: VERSION,
-    signal_version: "placeholder_not_tradeable",
-    trade_eligible: false,
+    signal_version: signal.signal_version,
+    trade_eligible: signal.trade_eligible,
+    signal_score: signal.signal_score,
+    signal_reasons: signal.reasons,
+    missing_for_trade_eligibility: signal.missing_evidence,
+    flow_features: signal.features,
+    holder_samples: signal.holder_samples,
     source_score: Number(candidate.score || 0),
     source_status: candidate.status,
     source_market_regime: candidate.market_regime,
@@ -99,15 +128,7 @@ async function analyze(candidate: any, reduced: boolean) {
     mutable: asset?.mutable ?? null,
     authorities: asset?.authorities ?? null,
     reduced_mode: reduced,
-    missing_for_trade_eligibility: [
-      "classified_pool_vaults_and_burn_accounts",
-      "independent_buyer_count",
-      "shared_funder_cluster_ratio",
-      "creator_linked_flow",
-      "net_sol_inflow_window",
-      "early_wallet_sell_pressure",
-    ],
-    note: "Observation plumbing only. Raw largest-account concentration is noisy and is not a trading signal.",
+    note: "Signal v1 is bounded and conservative. Raw largest-account concentration is observation-only; eligibility requires independent funding evidence plus a second time-series snapshot.",
   };
 
   const { error } = await supabase.from("token_intelligence_snapshots").insert({
@@ -116,7 +137,7 @@ async function analyze(candidate: any, reduced: boolean) {
     pair_address: candidate.pair_address,
     observed_at: new Date().toISOString(),
     mode: config.mode,
-    recommendation: "observation_only",
+    recommendation: signal.recommendation,
     snapshot,
   });
   if (error) throw error;
@@ -139,7 +160,14 @@ async function cycle() {
       last_heartbeat_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
       details: {
-        limits: { hourly: config.hourlyCreditLimit, daily: config.dailyCreditLimit, monthly: config.monthlyCreditLimit, analyses_per_hour: config.maxDeepAnalysesPerHour },
+        limits: {
+          hourly: config.hourlyCreditLimit,
+          daily: config.dailyCreditLimit,
+          monthly: config.monthlyCreditLimit,
+          analyses_per_hour: config.maxDeepAnalysesPerHour,
+          holder_owners: config.maxHolderOwners,
+          funding_lookups: config.maxFundingLookups,
+        },
         usage: { analyses_this_hour: budget.analyses },
         ratio: budget.ratio,
       },
@@ -168,7 +196,7 @@ async function cycle() {
 
 async function main() {
   console.log(`[helius-intelligence] ${VERSION} mode=${config.mode}`);
-  if (config.mode === "enforce") console.warn("[helius-intelligence] ENFORCE is intentionally observation-only in v1");
+  if (config.mode === "enforce") console.warn("[helius-intelligence] ENFORCE still affects only the isolated flow-paper consumer");
   while (true) { await cycle(); await sleep(config.pollMs); }
 }
 
