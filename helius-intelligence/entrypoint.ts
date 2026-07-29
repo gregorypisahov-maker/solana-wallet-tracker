@@ -4,7 +4,7 @@ import { intelligenceConfig as config } from "./config";
 const supabase = getSupabaseAdmin();
 const HELIUS_API_KEY = process.env.HELIUS_API_KEY || "";
 const HELIUS_RPC_URL = process.env.HELIUS_RPC_URL || (HELIUS_API_KEY ? `https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}` : "");
-const VERSION = "helius_intelligence_shadow_v1_2026_07_29";
+const VERSION = "helius_intelligence_shadow_v1_1_2026_07_29";
 let running = false;
 
 function sleep(ms: number) { return new Promise((resolve) => setTimeout(resolve, ms)); }
@@ -85,6 +85,8 @@ async function analyze(candidate: any, reduced: boolean) {
 
   const snapshot = {
     model_version: VERSION,
+    signal_version: "placeholder_not_tradeable",
+    trade_eligible: false,
     source_score: Number(candidate.score || 0),
     source_status: candidate.status,
     source_market_regime: candidate.market_regime,
@@ -97,17 +99,24 @@ async function analyze(candidate: any, reduced: boolean) {
     mutable: asset?.mutable ?? null,
     authorities: asset?.authorities ?? null,
     reduced_mode: reduced,
-    note: "Raw largest-account shares are observation-only and must not be enforced until pool vaults/burn accounts are classified.",
+    missing_for_trade_eligibility: [
+      "classified_pool_vaults_and_burn_accounts",
+      "independent_buyer_count",
+      "shared_funder_cluster_ratio",
+      "creator_linked_flow",
+      "net_sol_inflow_window",
+      "early_wallet_sell_pressure",
+    ],
+    note: "Observation plumbing only. Raw largest-account concentration is noisy and is not a trading signal.",
   };
 
-  const recommendation = Number(candidate.score || 0) >= 82 && !snapshot.raw_holder_warning ? "would_consider" : "would_watch";
   const { error } = await supabase.from("token_intelligence_snapshots").insert({
     mint,
     symbol: candidate.token_symbol,
     pair_address: candidate.pair_address,
     observed_at: new Date().toISOString(),
     mode: config.mode,
-    recommendation,
+    recommendation: "observation_only",
     snapshot,
   });
   if (error) throw error;
