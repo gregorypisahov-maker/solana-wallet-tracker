@@ -11,6 +11,7 @@ let positionRunning = false;
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const solToLamports = (sol: number) => String(Math.floor(sol * LAMPORTS_PER_SOL));
 const lamportsToSol = (lamports: bigint) => Number(lamports) / LAMPORTS_PER_SOL;
+const normalizeSymbol = (symbol: unknown) => String(symbol || "").trim().toLowerCase();
 
 async function state() {
   const { data, error } = await supabase.from("helius_flow_paper_state").select("*").eq("service", config.service).single();
@@ -30,10 +31,21 @@ async function recentlyTraded(mint: string) {
   return Boolean(data?.length);
 }
 
+async function symbolRugBlocked(symbol: unknown) {
+  const normalized = normalizeSymbol(symbol);
+  if (!normalized) return false;
+  const { data, error } = await supabase.from("ai_symbol_rug_cooldown_blocks")
+    .select("id").eq("normalized_symbol", normalized).gt("cooldown_until", new Date().toISOString()).limit(1);
+  if (error) {
+    if (String((error as any)?.code || "") === "42P01") return false;
+    throw error;
+  }
+  return Boolean(data?.length);
+}
+
 async function nextCandidate() {
   const cutoff = new Date(Date.now() - config.snapshotMaxAgeSeconds * 1000).toISOString();
-  const { data, error } = await supabase
-    .from("token_intelligence_snapshots")
+  const { data, error } = await supabase.from("token_intelligence_snapshots")
     .select("id,mint,symbol,pair_address,observed_at,recommendation,snapshot")
     .eq("recommendation", "would_consider")
     .gte("observed_at", cutoff)
@@ -43,7 +55,9 @@ async function nextCandidate() {
   for (const row of data || []) {
     const snap = (row as any).snapshot || {};
     if (Number(snap.source_score || 0) < config.minimumSourceScore) continue;
-    if (snap.raw_holder_warning === true) continue;
+    if (snap.trade_eligible !== true) continue;
+    if (snap.signal_version !== "helius_flow_signal_v1") continue;
+    if (await symbolRugBlocked((row as any).symbol)) continue;
     if (await recentlyTraded((row as any).mint)) continue;
     return row as any;
   }
@@ -101,6 +115,7 @@ async function enterCycle() {
       entry_value_lamports: solToLamports(config.positionSizeSol),
       peak_executable_sol: executableSol,
       last_executable_sol: executableSol,
+      quote_fail_streak: 0,
       entry_snapshot: entrySnapshot,
     });
     if (positionError) throw positionError;
@@ -170,6 +185,25 @@ async function closePosition(position: any, proceedsSol: number, reason: string,
   console.log(`[helius-flow-paper] closed ${position.symbol || position.mint} ${reason} pnl=${pnlSol.toFixed(5)} SOL`);
 }
 
+async function registerQuoteFailure(position: any, failure: string) {
+  const nextStreak = Number(position.quote_fail_streak || 0) + 1;
+  if (nextStreak >= config.maxQuoteFailStreak) {
+    await closePosition(position, 0, "liquidity_gone", {
+      route: false,
+      failure,
+      quote_fail_streak: nextStreak,
+      policy: "honest_total_loss_after_consecutive_no_route",
+    });
+    return;
+  }
+  await supabase.from("helius_flow_paper_positions").update({
+    quote_fail_streak: nextStreak,
+    first_quote_fail_at: position.first_quote_fail_at || new Date().toISOString(),
+    last_quote_failure: failure,
+    last_checked_at: new Date().toISOString(),
+  }).eq("position_id", position.position_id);
+}
+
 async function manageCycle() {
   if (positionRunning || !config.enabled) return;
   positionRunning = true;
@@ -182,7 +216,10 @@ async function manageCycle() {
           rawTokenAmount: position.token_raw_amount,
           slippageBps: config.slippageBps,
         });
-        if (!sell.route || sell.outLamports <= 0n) continue;
+        if (!sell.route || sell.outLamports <= 0n) {
+          await registerQuoteFailure(position, "no_sell_route");
+          continue;
+        }
         const executableSol = lamportsToSol(sell.outLamports);
         const peak = Math.max(Number(position.peak_executable_sol || 0), executableSol);
         const reason = exitReason({ ...position, peak_executable_sol: peak }, executableSol);
@@ -190,10 +227,14 @@ async function manageCycle() {
         else await supabase.from("helius_flow_paper_positions").update({
           peak_executable_sol: peak,
           last_executable_sol: executableSol,
+          quote_fail_streak: 0,
+          first_quote_fail_at: null,
+          last_quote_failure: null,
           last_checked_at: new Date().toISOString(),
         }).eq("position_id", position.position_id);
       } catch (error) {
         console.error("[helius-flow-paper] position check failed", position.mint, error);
+        await registerQuoteFailure(position, error instanceof Error ? error.message : String(error));
       }
     }
   } catch (error) {
