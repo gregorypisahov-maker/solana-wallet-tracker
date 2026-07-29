@@ -10,8 +10,40 @@ const TELEGRAM_TIMEOUT_MS = Number.isFinite(configuredTelegramTimeoutMs)
   ? Math.max(3_000, configuredTelegramTimeoutMs)
   : 10_000;
 
+const TELEGRAM_ALERT_MODE = (process.env.TELEGRAM_ALERT_MODE ?? 'trades_only')
+  .trim()
+  .toLowerCase();
+
 function cleanEnv(value: string | undefined): string {
   return (value ?? '').trim().replace(/^[\'\"]|[\'\"]$/g, '').trim();
+}
+
+function isTradeLifecycleAlert(message: string): boolean {
+  const normalized = message
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+
+  const opened =
+    normalized.includes('trade opened') ||
+    normalized.includes('position opened') ||
+    normalized.includes('live buy executed') ||
+    normalized.includes('live trade buy');
+
+  const closed =
+    normalized.includes('trade closed') ||
+    normalized.includes('position closed') ||
+    normalized.includes('live sell executed') ||
+    normalized.includes('live trade sell');
+
+  return opened || closed;
+}
+
+function shouldDeliverTelegramAlert(message: string): boolean {
+  if (TELEGRAM_ALERT_MODE === 'all') return true;
+  if (TELEGRAM_ALERT_MODE === 'off' || TELEGRAM_ALERT_MODE === 'none') return false;
+  return isTradeLifecycleAlert(message);
 }
 
 async function enqueueTelegramAlert(message: string, reason: string): Promise<boolean> {
@@ -33,6 +65,10 @@ async function enqueueTelegramAlert(message: string, reason: string): Promise<bo
 }
 
 export async function sendTelegramAlert(message: string): Promise<void> {
+  if (!shouldDeliverTelegramAlert(message)) {
+    return;
+  }
+
   // One shared token for alerts and inbound commands when available on this service.
   const token = cleanEnv(process.env.TELEGRAM_BOT_TOKEN);
   const chatId = cleanEnv(process.env.TELEGRAM_CHAT_ID);
