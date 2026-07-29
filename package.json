@@ -13,6 +13,7 @@
     "moonshot-scanner": "tsx worker/moonshotScannerEntrypoint.ts",
     "live-executor": "tsx live-executor/entrypoint.ts",
     "helius-intelligence": "tsx helius-intelligence/entrypoint.ts",
+    "helius-flow-paper": "tsx helius-flow-paper/entrypoint.ts",
     "test": "node --import tsx --test lib/*.test.ts worker/*.test.ts paper-trader/*.test.ts",
     "typecheck": "tsc --noEmit"
   },
