@@ -5,7 +5,7 @@ import { computeFlowSignal } from "./flowSignal";
 const supabase = getSupabaseAdmin();
 const HELIUS_API_KEY = process.env.HELIUS_API_KEY || "";
 const HELIUS_RPC_URL = process.env.HELIUS_RPC_URL || (HELIUS_API_KEY ? `https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}` : "");
-const VERSION = "helius_intelligence_shadow_v1_2_2026_07_29";
+const VERSION = "helius_intelligence_v1_3_getasset_params_2026_07_29";
 let running = false;
 
 function sleep(ms: number) { return new Promise((resolve) => setTimeout(resolve, ms)); }
@@ -40,7 +40,7 @@ async function recordUsage(operation: string, mint: string, estimatedCredits = 1
   if (error) throw error;
 }
 
-async function heliusRpc<T>(method: string, params: unknown[], mint: string, estimatedCredits = 1): Promise<T> {
+async function heliusRpc<T>(method: string, params: unknown, mint: string, estimatedCredits = 1): Promise<T> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), config.requestTimeoutMs);
   try {
@@ -52,7 +52,10 @@ async function heliusRpc<T>(method: string, params: unknown[], mint: string, est
     });
     if (!response.ok) throw new Error(`helius_http_${response.status}`);
     const body: any = await response.json();
-    if (body.error) throw new Error(`helius_rpc_${body.error.code || "unknown"}`);
+    if (body.error) {
+      const detail = body.error?.message ? `_${String(body.error.message).replace(/\s+/g, "_").slice(0, 120)}` : "";
+      throw new Error(`helius_rpc_${body.error.code || "unknown"}${detail}`);
+    }
     await recordUsage(method, mint, estimatedCredits);
     return body.result as T;
   } finally {
@@ -92,8 +95,12 @@ async function analyze(candidate: any, reduced: boolean) {
 
   let asset: any = null;
   if (!reduced) {
-    try { asset = await heliusRpc<any>("getAsset", [{ id: mint }], mint, 1); }
-    catch (error) { console.warn("[helius-intelligence] getAsset failed", mint, error); }
+    try {
+      asset = await heliusRpc<any>("getAsset", { id: mint }, mint, 1);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.warn(`[helius-intelligence] getAsset unavailable mint=${mint} reason=${message}`);
+    }
   }
 
   const signal = await computeFlowSignal({
@@ -196,7 +203,6 @@ async function cycle() {
 
 async function main() {
   console.log(`[helius-intelligence] ${VERSION} mode=${config.mode}`);
-  if (config.mode === "enforce") console.warn("[helius-intelligence] ENFORCE still affects only the isolated flow-paper consumer");
   while (true) { await cycle(); await sleep(config.pollMs); }
 }
 
