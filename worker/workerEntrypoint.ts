@@ -3,6 +3,7 @@ import { startMarketDiscoveryAgent } from "../paper-trader/marketDiscoveryAgent"
 import { startAiDiscoveryTrader } from "../paper-trader/aiDiscoveryTrader";
 import { startAiCapitalMirror } from "../paper-trader/aiCapitalMirror";
 import { startAiTradeAutopsyEngine } from "../paper-trader/aiTradeAutopsy";
+import { startAiOutcomeTrackerV10 } from "../paper-trader/aiOutcomeTrackerV10";
 
 // Paper-only AI runtime. AI Discovery and its AI Capital mirror remain controlled
 // by their Supabase state rows. Real-money execution runs only in the dedicated
@@ -10,5 +11,6 @@ import { startAiTradeAutopsyEngine } from "../paper-trader/aiTradeAutopsy";
 console.log("[worker] paper-only AI runtime starting; live execution is isolated in its dedicated service");
 startMarketDiscoveryAgent();
 startAiDiscoveryTrader();
+startAiOutcomeTrackerV10();
 startAiCapitalMirror();
 startAiTradeAutopsyEngine();
