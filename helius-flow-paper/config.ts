@@ -18,5 +18,6 @@ export const flowPaperConfig = {
   trailDistancePct: numberEnv("HELIUS_FLOW_TRAIL_DISTANCE_PCT", 4, 1, 30),
   maxHoldMinutes: numberEnv("HELIUS_FLOW_MAX_HOLD_MINUTES", 45, 1, 240),
   cooldownMinutes: numberEnv("HELIUS_FLOW_COOLDOWN_MINUTES", 120, 1, 1440),
+  maxQuoteFailStreak: Math.floor(numberEnv("HELIUS_FLOW_MAX_QUOTE_FAIL_STREAK", 3, 1, 10)),
   slippageBps: Math.floor(numberEnv("HELIUS_FLOW_SLIPPAGE_BPS", 100, 10, 200)),
 };
