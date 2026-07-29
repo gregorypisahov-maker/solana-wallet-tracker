@@ -11,6 +11,15 @@ import {
   handleResume,
   handleScalpStats,
 } from "../paper-trader/telegramCommands";
+import {
+  handleHeliusCredit,
+  handleHeliusFlowStats,
+  handleHeliusPause,
+  handleHeliusPnl,
+  handleHeliusPositions,
+  handleHeliusResume,
+  handleHeliusTrades,
+} from "../paper-trader/heliusTelegramCommands";
 import { handleAiStats } from "../paper-trader/aiDiscoveryStats";
 import { handleBinanceFuturesStats } from "../paper-trader/binanceFuturesStats";
 import { handleWalletScan } from "./walletScanCommand";
@@ -56,7 +65,7 @@ const AUTHORIZED_CHAT_IDS = new Set([TELEGRAM_CHAT_ID, ...EXTRA_CHAT_IDS].filter
 const POLL_TIMEOUT_SECONDS = 30;
 const CONFLICT_BACKOFF_MIN_MS = 65_000;
 const CONFLICT_BACKOFF_JITTER_MS = 30_000;
-const TELEGRAM_WORKER_VERSION = "2026-07-25-ai-stats";
+const TELEGRAM_WORKER_VERSION = "2026-07-29-helius-flow-commands";
 
 if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
   console.error("[telegram-bot] TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID must be set. Exiting.");
@@ -169,7 +178,15 @@ async function handleHelp(): Promise<string> {
     "/aistats — AI discovery paper trading performance",
     "/binancestats — BTCUSDT futures paper bot",
     "/readiness — Bot readiness check",
-    "/heliusstats — Helius credit usage", "",
+    "/heliusstats — Existing Helius monitor usage", "",
+    "<b>🧠 Helius flow paper</b>",
+    "/helius_stats — Intelligence worker and paper status",
+    "/helius_positions — Open Helius paper positions",
+    "/helius_trades — Last 10 closed Helius paper trades",
+    "/helius_pnl — Helius paper bankroll and performance",
+    "/helius_credit — Intelligence credit usage",
+    "/helius_pause — Pause new Helius paper entries",
+    "/helius_resume — Resume Helius paper entries", "",
     "<b>📈 Analytics</b>",
     "/walletstats — Wallet performance",
     "/scorestats — Performance by score range",
@@ -195,6 +212,7 @@ function helpKeyboard(): InlineKeyboard {
   rows.push(
     [{ text: "📊 Paper Stats", callback_data: "/paperstats" }, { text: "⚡ Scalp Stats", callback_data: "/scalpstats" }],
     [{ text: "🧠 AI Stats", callback_data: "/aistats" }, { text: "📉 Binance Paper", callback_data: "/binancestats" }],
+    [{ text: "🧠 Helius Flow", callback_data: "/helius_stats" }, { text: "💰 Helius PnL", callback_data: "/helius_pnl" }],
     [{ text: "✅ Readiness", callback_data: "/readiness" }],
     [{ text: "▶️ Resume Paper", callback_data: "/resume" }, { text: "⚡ Resume Scalp", callback_data: "/resume_scalp" }],
     [{ text: "🧠 Auto Wallets", callback_data: "/auto_wallets" }, { text: "🔄 Wallet Scan", callback_data: "/walletscan" }],
@@ -220,8 +238,20 @@ const COMMAND_HANDLERS: Record<string, () => Promise<string>> = {
   "/exitstats": handleExitStats,
   "/scorestats": handleScoreStats,
   "/heliusstats": handleHeliusStats,
-  "/helius_stats": handleHeliusStats,
   "/helius": handleHeliusStats,
+  "/helius_stats": handleHeliusFlowStats,
+  "/helius_positions": handleHeliusPositions,
+  "/heliuspositions": handleHeliusPositions,
+  "/helius_trades": handleHeliusTrades,
+  "/heliustrades": handleHeliusTrades,
+  "/helius_pnl": handleHeliusPnl,
+  "/heliuspnl": handleHeliusPnl,
+  "/helius_credit": handleHeliusCredit,
+  "/heliuscredit": handleHeliusCredit,
+  "/helius_pause": handleHeliusPause,
+  "/heliuspause": handleHeliusPause,
+  "/helius_resume": handleHeliusResume,
+  "/heliusresume": handleHeliusResume,
   "/readiness": handleReadiness,
   "/resume": handleResume,
   "/resume_scalp": handleResumeScalper,
@@ -296,7 +326,7 @@ async function sleep(ms: number): Promise<void> {
 
 async function pollLoop(): Promise<void> {
   console.log(`[telegram-bot] Starting inbound command listener (${TELEGRAM_WORKER_VERSION})...`);
-  console.log("[telegram-bot] Commands ready: /paperstats /scalpstats /aistats /binancestats /walletstats /exitstats /scorestats /heliusstats /readiness /resume /resume_scalp");
+  console.log("[telegram-bot] Helius commands ready: /helius_stats /helius_positions /helius_trades /helius_pnl /helius_credit /helius_pause /helius_resume");
   await validateToken();
   while (true) {
     try {
