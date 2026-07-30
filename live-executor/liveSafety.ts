@@ -22,8 +22,14 @@ const MIN_EXPECTED_TOKEN_OUTPUT_PCT = Math.min(100, Math.max(70, Number(process.
 const REQUEST_TIMEOUT_MS = Math.max(3_000, Number(process.env.LIVE_SAFETY_REQUEST_TIMEOUT_MS) || 10_000);
 const LP_SAFETY_ENABLED = process.env.LP_SAFETY_ENABLED !== "false";
 const LIVE_LP_SAFETY_ENFORCE = process.env.LIVE_LP_SAFETY_ENFORCE !== "false";
-const PAPER_LP_SAFETY_ENFORCE = process.env.AI_PAPER_LP_SAFETY_ENFORCE !== "false";
+const LP_LOCK_ENFORCE = process.env.LP_LOCK_ENFORCE === "true";
+const LP_LOCK_BLOCK_ON_UNKNOWN = process.env.LP_LOCK_BLOCK_ON_UNKNOWN === "true";
 const PAPER_HELIUS_MAX_AGE_MS = Math.max(60_000, Number(process.env.AI_PAPER_HELIUS_MAX_AGE_MS) || 15 * 60_000);
+
+console.log(
+  `[entry-safety] lp_lock config enforce=${LP_LOCK_ENFORCE} ` +
+    `blockOnUnknown=${LP_LOCK_BLOCK_ON_UNKNOWN}`
+);
 
 export type LiveEntrySafetyResult = { passed: boolean; reason: string | null; details: Record<string, unknown> };
 
@@ -177,12 +183,46 @@ export async function evaluateLiveEntrySafety(input: {
     if (m5Transactions < MIN_M5_TRANSACTIONS) return reject("insufficient_recent_transactions", details);
     if (!pairCreatedAt || poolAgeMs < MIN_POOL_AGE_MS) return reject("pool_too_new", details);
 
-    if (LP_SAFETY_ENABLED) {
+    const liveCall = !paperCall;
+    if (paperCall || LP_SAFETY_ENABLED) {
       const liquiditySafety = await evaluateLiquiditySafety({ mint: input.mint, pairAddress: pair?.pairAddress ?? null, dexId: pair?.dexId ?? null });
-      const liveCall = input.mode === "live" || (input.mode == null && input.expectedTokenAmount != null);
-      const enforce = liveCall ? LIVE_LP_SAFETY_ENFORCE : PAPER_LP_SAFETY_ENFORCE;
-      details.liquiditySafety = { ...liquiditySafety, enforced: enforce, mode: liveCall ? "live" : "paper" };
-      if (!liquiditySafety.passed && enforce) return reject(liquiditySafety.reason || "liquidity_safety_rejected", details);
+      const enforce = liveCall ? LIVE_LP_SAFETY_ENFORCE : LP_LOCK_ENFORCE;
+      const blockOnUnknown = liveCall ? true : LP_LOCK_BLOCK_ON_UNKNOWN;
+      const action = !enforce
+        ? liquiditySafety.verdict === "LOCKED" ? "pass" : "shadow_would_block"
+        : liquiditySafety.verdict === "UNLOCKED" || (liquiditySafety.verdict === "UNKNOWN" && blockOnUnknown)
+          ? "block"
+          : "pass";
+      const lpLock = {
+        verdict: liquiditySafety.verdict,
+        method: liquiditySafety.method,
+        pctLocked: liquiditySafety.pctLocked,
+        action,
+        poolAddress: liquiditySafety.poolAddress,
+        unlockTime: liquiditySafety.unlockTime,
+        rawError: liquiditySafety.rawError,
+        enforce,
+        blockOnUnknown,
+      };
+      details.lp_lock = lpLock;
+      details.liquiditySafety = { ...liquiditySafety, enforced: enforce, blockOnUnknown, action, mode: liveCall ? "live" : "paper" };
+
+      if (paperCall) {
+        const symbol = String(pair?.baseToken?.symbol ?? input.mint);
+        const pctLocked = liquiditySafety.pctLocked == null ? "unknown" : liquiditySafety.pctLocked.toFixed(2);
+        console.log(
+          `[ai-discovery-trader] lp_lock ${symbol} verdict=${liquiditySafety.verdict} ` +
+            `method=${liquiditySafety.method} pctLocked=${pctLocked} enforce=${enforce} ` +
+            `action=${action} pool=${liquiditySafety.poolAddress ?? "unknown"}`
+        );
+      }
+
+      if (action === "block") {
+        return reject(
+          liquiditySafety.verdict === "UNLOCKED" ? "liquidity_unlocked" : "liquidity_lock_unknown",
+          details
+        );
+      }
     }
 
     const inputLamports = BigInt(Math.floor(input.sizeSol * LAMPORTS_PER_SOL));
