@@ -1,16 +1,44 @@
+import { geckoFetchJson } from "../lib/geckoFetch";
 import { getSupabaseAdmin } from "../lib/supabase";
+import { FetchPriority, fetchJsonQueued } from "./fetchQueue";
 
 const supabase = getSupabaseAdmin();
-const VERSION = "ai_outcome_tracker_v10_2026_07_29";
+const VERSION = "ai_outcome_tracker_v11_2026_07_30";
 const DEX_URL = "https://api.dexscreener.com/tokens/v1/solana";
+const GECKO_POOL_URL = "https://api.geckoterminal.com/api/v2/networks/solana/pools";
 const SAMPLE_RATE = Math.min(1, Math.max(0, Number(process.env.AI_OUTCOME_SAMPLE_RATE) || 0.1));
-const BATCH_SIZE = Math.max(1, Math.min(100, Number(process.env.AI_OUTCOME_BATCH_SIZE) || 25));
+const BATCH_SIZE = Math.max(1, Math.min(25, Number(process.env.AI_OUTCOME_BATCH_SIZE) || 8));
 const HORIZONS = [5, 15, 30, 45] as const;
-const TOLERANCE_MS: Record<(typeof HORIZONS)[number], number> = {
+const TOLERANCE_MS: Record<Horizon, number> = {
   5: 90_000,
   15: 120_000,
   30: 180_000,
   45: 180_000,
+};
+const CYCLE_MS = Math.max(15_000, Number(process.env.AI_OUTCOME_CYCLE_MS) || 30_000);
+
+type Horizon = (typeof HORIZONS)[number];
+type HorizonState = "pending" | "due" | "missed";
+type PriceSource = "dexscreener" | "geckoterminal";
+type PriceMeasurement = {
+  priceUsd: number;
+  measuredAt: string;
+  source: PriceSource;
+};
+type MeasurementAttempt = {
+  measurement: PriceMeasurement | null;
+  error: string | null;
+  dex429: boolean;
+  usedFallback: boolean;
+};
+type CycleStats = {
+  due: number;
+  measured: number;
+  missed: number;
+  failed: number;
+  dexRequests: number;
+  dex429: number;
+  geckoFallbacks: number;
 };
 
 let running = false;
@@ -20,28 +48,126 @@ function n(value: unknown, fallback = 0): number {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
-async function pairPrice(mint: string, pairAddress: string): Promise<number | null> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 10_000);
+function positivePrice(value: unknown): number | null {
+  const parsed = n(value, Number.NaN);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
+function formatError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function relationMatchesMint(id: unknown, mint: string): boolean {
+  const value = String(id ?? "");
+  return value === mint || value.endsWith(`_${mint}`) || value.endsWith(`:${mint}`);
+}
+
+export function horizonState(
+  observedAt: string,
+  horizon: Horizon,
+  atMs = Date.now()
+): HorizonState {
+  const observedMs = Date.parse(observedAt);
+  if (!Number.isFinite(observedMs)) return "missed";
+  const targetMs = observedMs + horizon * 60_000;
+  const tolerance = TOLERANCE_MS[horizon];
+  if (atMs < targetMs - tolerance) return "pending";
+  if (atMs > targetMs + tolerance) return "missed";
+  return "due";
+}
+
+function parseDexPrice(body: unknown, mint: string, pairAddress: string): number | null {
+  const pairs = Array.isArray(body) ? body : [];
+  const pair = pairs.find(
+    (item: any) =>
+      item?.chainId === "solana" &&
+      String(item?.pairAddress ?? "") === pairAddress &&
+      item?.baseToken?.address === mint
+  );
+  return positivePrice(pair?.priceUsd);
+}
+
+function parseGeckoPrice(body: any, mint: string): number | null {
+  const attributes = body?.data?.attributes ?? null;
+  const relationships = body?.data?.relationships ?? null;
+  if (!attributes) return null;
+
+  const baseId = relationships?.base_token?.data?.id;
+  if (relationMatchesMint(baseId, mint)) {
+    return positivePrice(attributes.base_token_price_usd);
+  }
+
+  const quoteId = relationships?.quote_token?.data?.id;
+  if (relationMatchesMint(quoteId, mint)) {
+    return positivePrice(attributes.quote_token_price_usd);
+  }
+
+  return null;
+}
+
+async function dexPrice(mint: string, pairAddress: string): Promise<PriceMeasurement | null> {
+  const body = await fetchJsonQueued(`${DEX_URL}/${encodeURIComponent(mint)}`, {
+    priority: FetchPriority.LOW,
+    timeoutMs: 12_000,
+    cacheTtlMs: 0,
+    headers: { Accept: "application/json" },
+  });
+  const priceUsd = parseDexPrice(body, mint, pairAddress);
+  return priceUsd == null
+    ? null
+    : { priceUsd, measuredAt: new Date().toISOString(), source: "dexscreener" };
+}
+
+async function geckoPrice(mint: string, pairAddress: string): Promise<PriceMeasurement | null> {
+  const body = await geckoFetchJson<any>(
+    `${GECKO_POOL_URL}/${encodeURIComponent(pairAddress)}`
+  );
+  const priceUsd = parseGeckoPrice(body, mint);
+  return priceUsd == null
+    ? null
+    : { priceUsd, measuredAt: new Date().toISOString(), source: "geckoterminal" };
+}
+
+async function pairMeasurement(
+  mint: string,
+  pairAddress: string,
+  stats?: CycleStats
+): Promise<MeasurementAttempt> {
+  let dexError: string | null = null;
+  if (stats) stats.dexRequests += 1;
+
   try {
-    const response = await fetch(`${DEX_URL}/${encodeURIComponent(mint)}`, {
-      cache: "no-store",
-      signal: controller.signal,
-      headers: { Accept: "application/json" },
-    });
-    if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
-    const body = await response.json();
-    const pairs = Array.isArray(body) ? body : [];
-    const pair = pairs.find(
-      (item: any) =>
-        item?.chainId === "solana" &&
-        String(item?.pairAddress ?? "") === pairAddress &&
-        item?.baseToken?.address === mint
-    );
-    const price = n(pair?.priceUsd, Number.NaN);
-    return Number.isFinite(price) && price > 0 ? price : null;
-  } finally {
-    clearTimeout(timer);
+    const measurement = await dexPrice(mint, pairAddress);
+    if (measurement) {
+      return { measurement, error: null, dex429: false, usedFallback: false };
+    }
+    dexError = "DexScreener pair price unavailable";
+  } catch (error) {
+    dexError = formatError(error);
+  }
+
+  const dex429 = /(^|\s)429(\s|$)|too many requests/i.test(dexError ?? "");
+  if (stats && dex429) stats.dex429 += 1;
+
+  try {
+    const measurement = await geckoPrice(mint, pairAddress);
+    if (measurement) {
+      if (stats) stats.geckoFallbacks += 1;
+      return { measurement, error: dexError, dex429, usedFallback: true };
+    }
+    return {
+      measurement: null,
+      error: [dexError, "GeckoTerminal pair price unavailable"].filter(Boolean).join("; "),
+      dex429,
+      usedFallback: true,
+    };
+  } catch (error) {
+    return {
+      measurement: null,
+      error: [dexError, `GeckoTerminal: ${formatError(error)}`].filter(Boolean).join("; "),
+      dex429,
+      usedFallback: true,
+    };
   }
 }
 
@@ -54,7 +180,7 @@ async function decideNewSamples(): Promise<void> {
     .is("outcome_quality", null)
     .gte("observed_at", cutoff)
     .order("observed_at", { ascending: true })
-    .limit(100);
+    .limit(40);
   if (error) throw new Error(error.message);
 
   for (const row of data ?? []) {
@@ -68,20 +194,30 @@ async function decideNewSamples(): Promise<void> {
       continue;
     }
 
-    const now = new Date().toISOString();
     let price = forced ? n(row.entry_price_usd, 0) : 0;
+    let measuredAt = forced ? row.observed_at : null;
+    let source = forced ? "entered_trade" : "random";
+    let baselineError: string | null = null;
+
     if (price <= 0 && row.pair_address) {
-      price = n(await pairPrice(row.mint, row.pair_address).catch(() => null), 0);
+      const attempt = await pairMeasurement(row.mint, row.pair_address);
+      price = attempt.measurement?.priceUsd ?? 0;
+      measuredAt = attempt.measurement?.measuredAt ?? null;
+      baselineError = attempt.error;
+      if (attempt.measurement) source = `random_${attempt.measurement.source}`;
     }
+
+    const now = new Date().toISOString();
     await supabase
       .from("ai_candidate_observations")
       .update({
         outcome_tracked: price > 0,
-        outcome_sample_source: forced ? "entered_trade" : "random",
+        outcome_sample_source: source,
         observed_price_usd: price > 0 ? price : null,
-        observed_price_at: price > 0 ? now : null,
+        observed_price_at: price > 0 ? measuredAt ?? now : null,
         outcome_quality: price > 0 ? null : "missing_baseline",
         outcome_complete: price <= 0,
+        last_outcome_error: price > 0 ? null : baselineError,
         updated_at: now,
       })
       .eq("id", row.id);
@@ -92,12 +228,13 @@ async function promoteEnteredRows(): Promise<void> {
   const cutoff = new Date(Date.now() - 60 * 60_000).toISOString();
   const { data, error } = await supabase
     .from("ai_candidate_observations")
-    .select("id,entry_price_usd")
+    .select("id,entry_price_usd,observed_at")
     .eq("entered", true)
     .eq("outcome_tracked", false)
     .gte("observed_at", cutoff)
     .limit(50);
   if (error) throw new Error(error.message);
+
   const now = new Date().toISOString();
   for (const row of data ?? []) {
     const price = n(row.entry_price_usd, 0);
@@ -108,7 +245,7 @@ async function promoteEnteredRows(): Promise<void> {
         outcome_tracked: true,
         outcome_sample_source: "entered_trade",
         observed_price_usd: price,
-        observed_price_at: now,
+        observed_price_at: row.observed_at ?? now,
         outcome_quality: null,
         outcome_complete: false,
         updated_at: now,
@@ -117,8 +254,19 @@ async function promoteEnteredRows(): Promise<void> {
   }
 }
 
+function rowResolved(
+  row: any,
+  updates: Record<string, unknown>,
+  misses: Set<string>,
+  horizon: Horizon
+): boolean {
+  return updates[`price_${horizon}m_usd`] != null ||
+    row[`price_${horizon}m_usd`] != null ||
+    misses.has(`${horizon}m`);
+}
+
 async function trackDueOutcomes(): Promise<void> {
-  const cutoff = new Date(Date.now() - 60 * 60_000).toISOString();
+  const cutoff = new Date(Date.now() - 2 * 60 * 60_000).toISOString();
   const { data, error } = await supabase
     .from("ai_candidate_observations")
     .select("*")
@@ -132,73 +280,98 @@ async function trackDueOutcomes(): Promise<void> {
   const nowMs = Date.now();
   const actionable = (data ?? [])
     .map((row: any) => {
-      const observedMs = Date.parse(row.observed_at);
-      const misses = Array.isArray(row.horizon_misses) ? row.horizon_misses : [];
-      const horizon = HORIZONS.find(
-        (minutes) => row[`price_${minutes}m_usd`] == null && !misses.includes(`${minutes}m`)
+      const misses = new Set<string>(Array.isArray(row.horizon_misses) ? row.horizon_misses : []);
+      const unresolved = HORIZONS.filter(
+        (horizon) => row[`price_${horizon}m_usd`] == null && !misses.has(`${horizon}m`)
       );
-      if (!horizon || !Number.isFinite(observedMs)) return null;
-      const targetMs = observedMs + horizon * 60_000;
-      if (nowMs < targetMs - TOLERANCE_MS[horizon]) return null;
-      return { row, horizon, targetMs };
+      const firstActionable = unresolved.find(
+        (horizon) => horizonState(row.observed_at, horizon, nowMs) !== "pending"
+      );
+      if (!firstActionable) return null;
+      return {
+        row,
+        targetMs: Date.parse(row.observed_at) + firstActionable * 60_000,
+      };
     })
     .filter(Boolean)
     .sort((a: any, b: any) => a.targetMs - b.targetMs)
-    .slice(0, BATCH_SIZE) as Array<any>;
+    .slice(0, BATCH_SIZE) as Array<{ row: any; targetMs: number }>;
 
-  const prices = new Map<string, number | null>();
-  let measured = 0;
-  let missed = 0;
-  let rateLimited = 0;
+  const stats: CycleStats = {
+    due: 0,
+    measured: 0,
+    missed: 0,
+    failed: 0,
+    dexRequests: 0,
+    dex429: 0,
+    geckoFallbacks: 0,
+  };
 
-  for (const item of actionable) {
-    const { row, horizon, targetMs } = item;
-    const now = new Date().toISOString();
-    const misses = Array.isArray(row.horizon_misses) ? [...row.horizon_misses] : [];
-    const updates: Record<string, unknown> = {
-      updated_at: now,
-      last_outcome_attempt_at: now,
-      outcome_fetch_attempts: n(row.outcome_fetch_attempts) + 1,
-    };
+  for (const { row } of actionable) {
+    const misses = new Set<string>(Array.isArray(row.horizon_misses) ? row.horizon_misses : []);
+    const updates: Record<string, unknown> = { updated_at: new Date().toISOString() };
+    let dueHorizon: Horizon | null = null;
+    let newlyMissed = 0;
 
-    if (Date.now() > targetMs + TOLERANCE_MS[horizon]) {
+    for (const horizon of HORIZONS) {
       const label = `${horizon}m`;
-      if (!misses.includes(label)) misses.push(label);
-      updates.horizon_misses = misses;
-      missed += 1;
-    } else {
-      const key = `${row.mint}:${row.pair_address}`;
-      let price = prices.get(key);
-      if (price === undefined) {
-        try {
-          price = await pairPrice(row.mint, row.pair_address);
-        } catch (fetchError) {
-          const message = fetchError instanceof Error ? fetchError.message : String(fetchError);
-          if (/429/.test(message)) rateLimited += 1;
-          updates.last_outcome_error = message.slice(0, 500);
-          price = null;
-        }
-        prices.set(key, price);
-      }
-      if (price && price > 0) {
-        const base = n(row.observed_price_usd, 0);
-        updates[`price_${horizon}m_usd`] = price;
-        updates[`price_${horizon}m_at`] = now;
-        updates[`return_${horizon}m_pct`] =
-          base > 0 ? Number((((price / base) - 1) * 100).toFixed(4)) : null;
-        updates.last_outcome_error = null;
-        measured += 1;
+      if (row[`price_${horizon}m_usd`] != null || misses.has(label)) continue;
+      const state = horizonState(row.observed_at, horizon);
+      if (state === "missed") {
+        misses.add(label);
+        newlyMissed += 1;
+      } else if (state === "due" && dueHorizon == null) {
+        dueHorizon = horizon;
       }
     }
 
-    const resolved = HORIZONS.map((minutes) => {
-      const measuredNow = minutes === horizon && updates[`price_${minutes}m_usd`] != null;
-      const missedNow = minutes === horizon && (updates.horizon_misses as string[] | undefined)?.includes(`${minutes}m`);
-      return measuredNow || missedNow || row[`price_${minutes}m_usd`] != null || misses.includes(`${minutes}m`);
-    });
-    if (resolved.every(Boolean) || Date.now() > Date.parse(row.observed_at) + 48 * 60_000) {
-      const measuredCount = HORIZONS.filter((minutes) =>
-        minutes === horizon ? updates[`price_${minutes}m_usd`] != null : row[`price_${minutes}m_usd`] != null
+    if (newlyMissed > 0) {
+      stats.missed += newlyMissed;
+      updates.horizon_misses = [...misses];
+      updates.last_outcome_error = `missed_horizon_window:${[...misses].join(",")}`;
+    }
+
+    if (dueHorizon != null) {
+      stats.due += 1;
+      const attemptAt = new Date().toISOString();
+      updates.last_outcome_attempt_at = attemptAt;
+      updates.outcome_fetch_attempts = n(row.outcome_fetch_attempts) + 1;
+
+      const attempt = await pairMeasurement(row.mint, row.pair_address, stats);
+      const measurement = attempt.measurement;
+      if (measurement) {
+        const measuredMs = Date.parse(measurement.measuredAt);
+        const targetMs = Date.parse(row.observed_at) + dueHorizon * 60_000;
+        const tolerance = TOLERANCE_MS[dueHorizon];
+        if (!Number.isFinite(measuredMs) || measuredMs > targetMs + tolerance) {
+          const label = `${dueHorizon}m`;
+          if (!misses.has(label)) {
+            misses.add(label);
+            stats.missed += 1;
+          }
+          updates.horizon_misses = [...misses];
+          updates.last_outcome_error = `late_measurement_rejected:${label}:${measurement.source}`;
+        } else {
+          const base = n(row.observed_price_usd, 0);
+          updates[`price_${dueHorizon}m_usd`] = measurement.priceUsd;
+          updates[`price_${dueHorizon}m_at`] = measurement.measuredAt;
+          updates[`return_${dueHorizon}m_pct`] =
+            base > 0
+              ? Number((((measurement.priceUsd / base) - 1) * 100).toFixed(4))
+              : null;
+          updates.last_outcome_error = null;
+          stats.measured += 1;
+        }
+      } else {
+        updates.last_outcome_error = (attempt.error ?? "all price providers unavailable").slice(0, 500);
+        stats.failed += 1;
+      }
+    }
+
+    const resolved = HORIZONS.every((horizon) => rowResolved(row, updates, misses, horizon));
+    if (resolved) {
+      const measuredCount = HORIZONS.filter(
+        (horizon) => updates[`price_${horizon}m_usd`] != null || row[`price_${horizon}m_usd`] != null
       ).length;
       updates.outcome_complete = true;
       updates.outcome_quality = measuredCount === 4 ? "on_time" : measuredCount > 0 ? "partial" : "missed";
@@ -219,8 +392,9 @@ async function trackDueOutcomes(): Promise<void> {
     .lt("observed_at", new Date(Date.now() - 60 * 60_000).toISOString());
 
   console.log(
-    `[outcome-tracker] version=${VERSION} due=${actionable.length} measured=${measured} ` +
-      `missed=${missed} pairsFetched=${prices.size} 429=${rateLimited} backlog=${backlog ?? 0}`
+    `[outcome-tracker] version=${VERSION} due=${stats.due} measured=${stats.measured} ` +
+      `missed=${stats.missed} failed=${stats.failed} dexRequests=${stats.dexRequests} ` +
+      `429=${stats.dex429} geckoFallback=${stats.geckoFallbacks} backlog=${backlog ?? 0}`
   );
 }
 
@@ -239,7 +413,9 @@ async function cycle(): Promise<void> {
 }
 
 export function startAiOutcomeTrackerV10(): void {
-  console.log(`[outcome-tracker] ${VERSION} enabled sampleRate=${SAMPLE_RATE} batch=${BATCH_SIZE}`);
+  console.log(
+    `[outcome-tracker] ${VERSION} enabled sampleRate=${SAMPLE_RATE} batch=${BATCH_SIZE} cycleMs=${CYCLE_MS}`
+  );
   void cycle();
-  setInterval(() => void cycle(), 60_000);
+  setInterval(() => void cycle(), CYCLE_MS);
 }
