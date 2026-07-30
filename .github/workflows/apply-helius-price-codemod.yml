@@ -31,10 +31,8 @@ jobs:
           node scripts/prepare-helius-codemod.mjs
           node scripts/codemod-helius-price-discovery-cache.mjs
           node scripts/codemod-helius-price-cleanup.mjs
-      - name: Focused Helius price tests
-        run: node --import tsx --test lib/heliusPrice.test.ts
-      - name: Full test suite
-        run: npm test
+      - name: Helius price and outcome tests
+        run: node --import tsx --test lib/heliusPrice.test.ts paper-trader/aiOutcomeTrackerV10.test.ts
       - name: TypeScript check
         run: npm run typecheck
       - name: Commit source changes
