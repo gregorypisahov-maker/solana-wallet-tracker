@@ -2,17 +2,32 @@ import "dotenv/config";
 import "../lib/geckoFetch";
 import "../scripts/lpLockShadowAudit";
 import { startMarketDiscoveryAgent } from "../paper-trader/marketDiscoveryAgent";
-import { startAiDiscoveryTrader } from "../paper-trader/aiDiscoveryTrader";
-import { startAiCapitalMirror } from "../paper-trader/aiCapitalMirror";
 import { startAiTradeAutopsyEngine } from "../paper-trader/aiTradeAutopsy";
 import { startAiOutcomeTrackerV10 } from "../paper-trader/aiOutcomeTrackerV10";
 
-// Paper-only AI runtime. AI Discovery and its AI Capital mirror remain controlled
-// by their Supabase state rows. Real-money execution runs only in the dedicated
-// live-executor Railway service and is never started by this worker.
-console.log("[worker] paper-only AI runtime starting; live execution is isolated in its dedicated service");
-startMarketDiscoveryAgent();
-startAiDiscoveryTrader();
-startAiOutcomeTrackerV10();
-startAiCapitalMirror();
-startAiTradeAutopsyEngine();
+// Paper trading must keep testing the proven AI strategy. The new live-style
+// safety screen still runs and records every result, but it must not block a
+// paper entry unless enforcement is explicitly re-enabled later.
+process.env.AI_PAPER_ENTRY_SAFETY_ENABLED ??= "true";
+process.env.AI_PAPER_ENTRY_SAFETY_ENFORCE = "false";
+
+async function startPaperRuntime(): Promise<void> {
+  const [{ startAiDiscoveryTrader }, { startAiCapitalMirror }] = await Promise.all([
+    import("../paper-trader/aiDiscoveryTrader"),
+    import("../paper-trader/aiCapitalMirror"),
+  ]);
+
+  console.log(
+    "[worker] paper-only AI runtime starting; safety checks are observation-only and live execution remains isolated"
+  );
+  startMarketDiscoveryAgent();
+  startAiDiscoveryTrader();
+  startAiOutcomeTrackerV10();
+  startAiCapitalMirror();
+  startAiTradeAutopsyEngine();
+}
+
+void startPaperRuntime().catch((error) => {
+  console.error("[worker] paper runtime failed to start", error);
+  process.exitCode = 1;
+});
