@@ -8,6 +8,7 @@ import {
   type JupiterQuoteOnlyResult,
 } from "../lib/jupiterQuote";
 import { PAPER_COST_MODEL } from "./executionCosts";
+import { buildAiEntryFeatureSnapshot } from "./aiEntryFeatures";
 import { evaluateLiveEntrySafety } from "../live-executor/liveSafety";
 
 const supabase = getSupabaseAdmin();
@@ -109,6 +110,8 @@ type Market = {
   liquidityUsd: number;
   marketCapUsd: number;
   changeM5: number;
+  priceSource?: "helius" | "gecko" | "dex" | "cache" | null;
+  poolProgram?: string | null;
 };
 
 type LiveMirror = {
@@ -272,7 +275,14 @@ async function pairFor(
     const helius = await getPriceViaHelius(mint, pairAddress);
     if (helius) {
       console.log(`[ai-discovery-trader] price ${mint} src=${helius.source} poolProgram=${helius.poolProgram}`);
-      return { priceUsd: helius.priceUsd, liquidityUsd: 0, marketCapUsd: 0, changeM5: 0 };
+      return {
+        priceUsd: helius.priceUsd,
+        liquidityUsd: 0,
+        marketCapUsd: 0,
+        changeM5: 0,
+        priceSource: helius.source,
+        poolProgram: helius.poolProgram,
+      };
     }
   }
 
@@ -302,6 +312,8 @@ async function pairFor(
     liquidityUsd,
     marketCapUsd: n(pair?.marketCap ?? pair?.fdv, 0),
     changeM5: n(pair?.priceChange?.m5, 0),
+    priceSource: "dex",
+    poolProgram: null,
   };
 }
 
@@ -317,6 +329,8 @@ async function priceForOpportunity(opportunity: any): Promise<Market | null> {
       liquidityUsd,
       marketCapUsd: n(opportunity.market_cap_usd, 0),
       changeM5: n(opportunity.price_change_m5, 0),
+      priceSource: helius.source,
+      poolProgram: helius.poolProgram,
     };
   }
 
@@ -411,20 +425,8 @@ function ruleAssessment(opportunity: any): { passed: boolean; reasons: string[] 
   return { passed: reasons.length === 0, reasons };
 }
 
-async function recordObservation(
-  opportunity: any,
-  assessment: { passed: boolean; reasons: string[] }
-): Promise<number | null> {
-  const cutoff = new Date(Date.now() - 2 * 60_000).toISOString();
-  const { data: existing } = await supabase
-    .from("ai_candidate_observations")
-    .select("id")
-    .eq("mint", opportunity.mint)
-    .gte("observed_at", cutoff)
-    .limit(1);
-  if (existing?.length) return Number(existing[0].id);
-
-  const features = {
+function observationFeatures(opportunity: any): Record<string, unknown> {
+  return {
     score: n(opportunity.score),
     confidence: opportunity.confidence,
     status: opportunity.status,
@@ -441,7 +443,24 @@ async function recordObservation(
     poolAgeMinutes: n(opportunity.pool_age_minutes),
     reasons: opportunity.reasons ?? [],
     risks: opportunity.risks ?? [],
+    discoverySignal: opportunity.signal_snapshot ?? {},
   };
+}
+
+async function recordObservation(
+  opportunity: any,
+  assessment: { passed: boolean; reasons: string[] }
+): Promise<number | null> {
+  const cutoff = new Date(Date.now() - 2 * 60_000).toISOString();
+  const { data: existing } = await supabase
+    .from("ai_candidate_observations")
+    .select("id")
+    .eq("mint", opportunity.mint)
+    .gte("observed_at", cutoff)
+    .limit(1);
+  if (existing?.length) return Number(existing[0].id);
+
+  const features = observationFeatures(opportunity);
 
   const { data, error } = await supabase
     .from("ai_candidate_observations")
@@ -465,18 +484,37 @@ async function recordObservation(
 
 async function markObservationEntered(
   id: number | null,
-  entryPriceUsd: number
+  entryPriceUsd: number,
+  entryId: string,
+  entryTs: string,
+  entrySnapshot: Record<string, unknown>,
+  opportunity: any
 ): Promise<void> {
   if (!id) return;
-  await supabase
+  const features = {
+    ...observationFeatures(opportunity),
+    entry_id: entryId,
+    entry_ts: entryTs,
+    entry_snapshot: entrySnapshot,
+  };
+  const { error } = await supabase
     .from("ai_candidate_observations")
     .update({
       entered: true,
       decision: "enter",
       entry_price_usd: entryPriceUsd,
+      entry_id: entryId,
+      entry_ts: entryTs,
+      features,
       updated_at: new Date().toISOString(),
     })
     .eq("id", id);
+  if (error) {
+    console.error(
+      "[ai-discovery-trader] entry feature join failed entry_id=" + entryId + " observation_id=" + id,
+      error
+    );
+  }
 }
 
 async function collectCandidateObservations(cutoff: string): Promise<any[]> {
@@ -561,8 +599,14 @@ async function openTrade(
   if (sizeSol < FIXED_SIZE_SOL) return;
 
   const now = new Date().toISOString();
-  const positionId = `ai_${randomUUID()}`;
+  const positionId = "ai_" + randomUUID();
   const entryQuote = await paperEntryTokenAmount(opportunity.mint, sizeSol);
+  const entryFeatures = buildAiEntryFeatureSnapshot({
+    entryId: positionId,
+    entryTs: now,
+    opportunity,
+    market,
+  });
   const snapshot = {
     version: VERSION,
     opportunity,
@@ -570,6 +614,7 @@ async function openTrade(
     observationId,
     quoteExitAccounting: true,
     entryQuote: entryQuote.quote,
+    ...entryFeatures,
   };
 
   const { error } = await supabase.from("ai_discovery_positions").insert({
@@ -602,18 +647,34 @@ async function openTrade(
     })
     .eq("id", 1);
 
-  await markObservationEntered(observationId, market.priceUsd);
+  await markObservationEntered(
+    observationId,
+    market.priceUsd,
+    positionId,
+    now,
+    snapshot,
+    opportunity
+  );
+  console.log(
+    "[ai-discovery-trader] features " + (opportunity.token_symbol ?? opportunity.mint) + " " +
+      "score=" + (entryFeatures.discovery_score ?? "null") + " " +
+      "liq=" + (entryFeatures.liquidity_usd ?? "null") + " " +
+      "age=" + (entryFeatures.token_age_sec ?? "null") + "s " +
+      "holders=" + (entryFeatures.holder_count ?? "null") + " " +
+      "vol5m=" + (entryFeatures.vol_5m ?? "null") + " " +
+      "captured=" + entryFeatures.capture.nonnull + "/" + entryFeatures.capture.total
+  );
   await sendTelegramAlert(
     [
       "🧠⚡ <b>AI DISCOVERY PAPER TRADE OPENED</b>",
       "",
-      `Token: <b>${opportunity.token_symbol}</b>`,
-      `Score: <b>${opportunity.score}/100</b>`,
-      `Size: <b>${sizeSol.toFixed(3)} SOL</b>`,
-      `Liquidity: <b>$${Math.round(market.liquidityUsd).toLocaleString()}</b>`,
-      `Reasons: ${(opportunity.reasons ?? []).slice(0, 3).join(", ")}`,
+      "Token: <b>" + opportunity.token_symbol + "</b>",
+      "Score: <b>" + opportunity.score + "/100</b>",
+      "Size: <b>" + sizeSol.toFixed(3) + " SOL</b>",
+      "Liquidity: <b>$" + Math.round(market.liquidityUsd).toLocaleString() + "</b>",
+      "Reasons: " + (opportunity.reasons ?? []).slice(0, 3).join(", "),
       "",
-      `<a href="https://dexscreener.com/solana/${opportunity.pair_address}">Open chart</a>`,
+      '<a href="https://dexscreener.com/solana/' + opportunity.pair_address + '">Open chart</a>',
       "",
       "🧪 Paper only — no real SOL used.",
     ].join("\n")

@@ -31,18 +31,27 @@ type Candidate = {
   priceUsd: number;
   liquidityUsd: number;
   marketCapUsd: number;
+  fdvUsd: number | null;
   changeM5: number;
   changeH1: number;
+  changeH24: number | null;
   volumeM5: number;
   volumeH1: number;
+  volumeH24: number | null;
   buysM5: number;
   sellsM5: number;
   buyersM5: number;
+  uniqueMakersM5: number | null;
+  holderCount: number | null;
   poolAgeMinutes: number;
+  poolCreatedAt: string | null;
+  dexId: string | null;
 };
 
 type Ranked = Candidate & {
   score: number;
+  rawScore: number;
+  subScores: Record<string, number>;
   confidence: "low" | "medium" | "high";
   status: "watching" | "armed";
   reasons: string[];
@@ -108,10 +117,17 @@ function parse(row: any): Candidate | null {
       attributes.market_cap_usd ?? attributes.fdv_usd,
       Number.NaN
     ),
+    fdvUsd: Number.isFinite(Number(attributes.fdv_usd)) ? Number(attributes.fdv_usd) : null,
     changeM5: num(attributes.price_change_percentage?.m5, Number.NaN),
     changeH1: num(attributes.price_change_percentage?.h1, Number.NaN),
+    changeH24: Number.isFinite(Number(attributes.price_change_percentage?.h24))
+      ? Number(attributes.price_change_percentage.h24)
+      : null,
     volumeM5: num(attributes.volume_usd?.m5, Number.NaN),
     volumeH1: num(attributes.volume_usd?.h1, Number.NaN),
+    volumeH24: Number.isFinite(Number(attributes.volume_usd?.h24))
+      ? Number(attributes.volume_usd.h24)
+      : null,
     buysM5: Math.max(
       0,
       Math.floor(num(attributes.transactions?.m5?.buys, Number.NaN))
@@ -124,9 +140,21 @@ function parse(row: any): Candidate | null {
       0,
       Math.floor(num(attributes.transactions?.m5?.buyers, Number.NaN))
     ),
+    uniqueMakersM5: Number.isFinite(Number(
+      attributes.transactions?.m5?.makers ?? attributes.transactions?.m5?.unique_makers
+    ))
+      ? Math.max(0, Math.floor(Number(
+          attributes.transactions?.m5?.makers ?? attributes.transactions?.m5?.unique_makers
+        )))
+      : null,
+    holderCount: Number.isFinite(Number(attributes.holder_count ?? attributes.holders?.count))
+      ? Math.max(0, Math.floor(Number(attributes.holder_count ?? attributes.holders?.count)))
+      : null,
     poolAgeMinutes: Number.isFinite(createdAt)
       ? Math.max(0, Date.now() - createdAt) / 60_000
       : Number.NaN,
+    poolCreatedAt: Number.isFinite(createdAt) ? new Date(createdAt).toISOString() : null,
+    dexId: stripId(row?.relationships?.dex?.data?.id) || null,
   };
 
   const values = Object.values(candidate).filter(
@@ -302,6 +330,18 @@ function rank(candidate: Candidate): Ranked {
     risks.push("outside_primary_discovery_range");
   }
 
+  const subScores = {
+    liquidity: candidate.liquidityUsd >= 150_000 ? 22 : candidate.liquidityUsd >= 60_000 ? 17 : candidate.liquidityUsd >= 25_000 ? 10 : 0,
+    volume: candidate.volumeM5 >= 75_000 ? 18 : candidate.volumeM5 >= 25_000 ? 12 : candidate.volumeM5 >= 8_000 ? 6 : 0,
+    buyPressure: buyRatio >= 0.68 && candidate.buysM5 >= 20 ? 16 : buyRatio >= 0.58 && candidate.buysM5 >= 10 ? 10 : 0,
+    buyerBreadth: candidate.buyersM5 >= 35 ? 14 : candidate.buyersM5 >= 15 ? 8 : 0,
+    momentum5m: candidate.changeM5 >= 2 && candidate.changeM5 <= 12 ? 12 : candidate.changeM5 > 12 && candidate.changeM5 <= 25 ? 5 : candidate.changeM5 > 25 ? -12 : 0,
+    momentum1h: candidate.changeH1 >= 5 && candidate.changeH1 <= 60 ? 8 : candidate.changeH1 > 100 ? -8 : 0,
+    liquidityToCap: liquidityToCap >= 0.15 ? 6 : 0,
+    turnover: turnover >= 0.15 && turnover <= 2.5 ? 4 : 0,
+    poolAge: candidate.poolAgeMinutes >= 20 && candidate.poolAgeMinutes <= 720 ? 6 : candidate.poolAgeMinutes < 5 ? -10 : 0,
+  };
+  const rawScore = score;
   score = Math.max(0, Math.min(100, Math.round(score)));
   const confidence =
     score >= 78 ? "high" : score >= 62 ? "medium" : "low";
@@ -311,6 +351,8 @@ function rank(candidate: Candidate): Ranked {
   return {
     ...candidate,
     score,
+    rawScore,
+    subScores,
     confidence,
     status,
     reasons,
@@ -339,6 +381,7 @@ async function persist(
 ): Promise<void> {
   const now = new Date().toISOString();
   const top = ranked.slice(0, TOP_LIMIT);
+  const discoveryFeatureSource = discoveryMeta.servedFrom === "cache" ? "cache" : "gecko";
 
   if (top.length > 0) {
     const { error } = await supabase.from("market_opportunities").upsert(
@@ -366,9 +409,45 @@ async function persist(
         signal_snapshot: {
           version: VERSION,
           buyRatio: item.buysM5 / Math.max(1, item.buysM5 + item.sellsM5),
+          rawScore: item.rawScore,
+          subScores: item.subScores,
+          fdvUsd: item.fdvUsd,
+          marketCapUsd: item.marketCapUsd,
+          volumeM5Usd: item.volumeM5,
+          volumeH1Usd: item.volumeH1,
+          volumeH24Usd: item.volumeH24,
+          priceChangeM5: item.changeM5,
+          priceChangeH1: item.changeH1,
+          priceChangeH24: item.changeH24,
+          buysM5: item.buysM5,
+          sellsM5: item.sellsM5,
+          buyersM5: item.buyersM5,
+          uniqueMakersM5: item.uniqueMakersM5,
+          holderCount: item.holderCount,
+          poolAgeMinutes: item.poolAgeMinutes,
+          poolCreatedAt: item.poolCreatedAt,
+          dexId: item.dexId,
           discoveryStale: discoveryMeta.stale,
           discoveryServedFrom: discoveryMeta.servedFrom,
           discoveryCacheAgeMs: discoveryMeta.cacheAgeMs,
+          featureSources: {
+            discovery_score: discoveryFeatureSource,
+            discovery_sub_scores: discoveryFeatureSource,
+            regime: discoveryFeatureSource,
+            liquidity_usd: discoveryFeatureSource,
+            fdv_usd: discoveryFeatureSource,
+            market_cap_usd: discoveryFeatureSource,
+            token_age_sec: discoveryFeatureSource,
+            vol_5m: discoveryFeatureSource,
+            vol_1h: discoveryFeatureSource,
+            vol_24h: discoveryFeatureSource,
+            price_change_5m: discoveryFeatureSource,
+            price_change_1h: discoveryFeatureSource,
+            price_change_24h: discoveryFeatureSource,
+            txns_5m_buys: discoveryFeatureSource,
+            txns_5m_sells: discoveryFeatureSource,
+            unique_makers_5m: item.uniqueMakersM5 == null ? null : discoveryFeatureSource,
+          },
         },
         last_seen_at: now,
         updated_at: now,

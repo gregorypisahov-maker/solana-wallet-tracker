@@ -201,7 +201,7 @@ async function decideNewSamples(): Promise<void> {
   const cutoff = new Date(Date.now() - 3 * 60_000).toISOString();
   const { data, error } = await supabase
     .from("ai_candidate_observations")
-    .select("id,mint,pair_address,entered,entry_price_usd,observed_at,outcome_quality")
+    .select("id,mint,pair_address,entered,entry_id,entry_ts,entry_price_usd,observed_at,outcome_quality")
     .eq("outcome_tracked", false)
     .is("outcome_quality", null)
     .gte("observed_at", cutoff)
@@ -221,7 +221,7 @@ async function decideNewSamples(): Promise<void> {
     }
 
     let price = forced ? n(row.entry_price_usd, 0) : 0;
-    let measuredAt = forced ? row.observed_at : null;
+    let measuredAt = forced ? row.entry_ts ?? row.observed_at : null;
     let source = forced ? "entered_trade" : "random";
     let baselineError: string | null = null;
 
@@ -254,7 +254,7 @@ async function promoteEnteredRows(): Promise<void> {
   const cutoff = new Date(Date.now() - 60 * 60_000).toISOString();
   const { data, error } = await supabase
     .from("ai_candidate_observations")
-    .select("id,entry_price_usd,observed_at")
+    .select("id,entry_id,entry_ts,entry_price_usd,observed_at")
     .eq("entered", true)
     .eq("outcome_tracked", false)
     .gte("observed_at", cutoff)
@@ -271,13 +271,17 @@ async function promoteEnteredRows(): Promise<void> {
         outcome_tracked: true,
         outcome_sample_source: "entered_trade",
         observed_price_usd: price,
-        observed_price_at: row.observed_at ?? now,
+        observed_price_at: row.entry_ts ?? row.observed_at ?? now,
         outcome_quality: null,
         outcome_complete: false,
         updated_at: now,
       })
       .eq("id", row.id);
   }
+}
+
+function outcomeAnchor(row: any): string {
+  return row.entry_ts ?? row.observed_at;
 }
 
 function rowResolved(
@@ -311,12 +315,12 @@ async function trackDueOutcomes(): Promise<void> {
         (horizon) => row[`price_${horizon}m_usd`] == null && !misses.has(`${horizon}m`)
       );
       const firstActionable = unresolved.find(
-        (horizon) => horizonState(row.observed_at, horizon, nowMs) !== "pending"
+        (horizon) => horizonState(outcomeAnchor(row), horizon, nowMs) !== "pending"
       );
       if (!firstActionable) return null;
       return {
         row,
-        targetMs: Date.parse(row.observed_at) + firstActionable * 60_000,
+        targetMs: Date.parse(outcomeAnchor(row)) + firstActionable * 60_000,
       };
     })
     .filter(Boolean)
@@ -345,7 +349,7 @@ async function trackDueOutcomes(): Promise<void> {
     for (const horizon of HORIZONS) {
       const label = `${horizon}m`;
       if (row[`price_${horizon}m_usd`] != null || misses.has(label)) continue;
-      const state = horizonState(row.observed_at, horizon);
+      const state = horizonState(outcomeAnchor(row), horizon);
       if (state === "missed") {
         misses.add(label);
         newlyMissed += 1;
@@ -370,7 +374,7 @@ async function trackDueOutcomes(): Promise<void> {
       const measurement = attempt.measurement;
       if (measurement) {
         const measuredMs = Date.parse(measurement.measuredAt);
-        const targetMs = Date.parse(row.observed_at) + dueHorizon * 60_000;
+        const targetMs = Date.parse(outcomeAnchor(row)) + dueHorizon * 60_000;
         const tolerance = TOLERANCE_MS[dueHorizon];
         if (!Number.isFinite(measuredMs) || measuredMs > targetMs + tolerance) {
           const label = `${dueHorizon}m`;

@@ -149,12 +149,15 @@ export async function evaluateLiveEntrySafety(input: {
     const supply = BigInt(String(info.supply ?? "0"));
     if (supply <= 0n) return reject("invalid_token_supply", details);
     const largest = await connection.getTokenLargestAccounts(mint, "confirmed");
-    const topAmounts = largest.value.slice(0, 5).map((item) => BigInt(item.amount));
+    const topAmounts = largest.value.slice(0, 10).map((item) => BigInt(item.amount));
     const top1Pct = Number(((topAmounts[0] ?? 0n) * 10_000n) / supply) / 100;
-    const top5Pct = Number((topAmounts.reduce((sum, amount) => sum + amount, 0n) * 10_000n) / supply) / 100;
+    const top5Pct = Number((topAmounts.slice(0, 5).reduce((sum, amount) => sum + amount, 0n) * 10_000n) / supply) / 100;
+    const top10Pct = Number((topAmounts.reduce((sum, amount) => sum + amount, 0n) * 10_000n) / supply) / 100;
     Object.assign(details, {
       top1HolderPct: top1Pct,
       top5HolderPct: top5Pct,
+      top10HolderPct: top10Pct,
+      largestAccountsSampled: topAmounts.length,
       holderConcentrationEnforced: HOLDER_CONCENTRATION_ENFORCE,
       holderConcentrationThresholds: { top1Pct: MAX_TOP_HOLDER_PCT, top5Pct: MAX_TOP5_HOLDER_PCT },
       holderConcentrationCaveat: "Raw largest token accounts can include pool vaults and burn accounts; only catastrophic concentration is blocked here.",
