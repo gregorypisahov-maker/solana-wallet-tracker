@@ -59,14 +59,7 @@ select
 from public.live_positions lp
 where lp.status = 'closed';
 
--- Canary defaults. They remain inert unless both runtime flags and the DB gate are enabled.
-update public.live_executor_state
-set max_position_sol = least(coalesce(max_position_sol, 0.02), 0.02),
-    max_open_positions = 1,
-    enabled = false,
-    halted = true,
-    halt_reason = 'real_readiness_validation_required',
-    updated_at = now()
-where id = 1;
+-- Execution parity is observational only. It must never disable an already-authorized
+-- live executor or overwrite its position size and risk configuration.
 
 commit;
