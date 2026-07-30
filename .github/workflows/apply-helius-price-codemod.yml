@@ -1,0 +1,47 @@
+name: Apply Helius price source codemod
+
+on:
+  push:
+    branches:
+      - feat-helius-price-discovery-cache-2026-07-30
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: ${{ !contains(github.event.head_commit.message, '[codemod-output]') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat-helius-price-discovery-cache-2026-07-30
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --silent
+      - name: Apply source codemods
+        run: |
+          node scripts/codemod-helius-price-discovery-cache.mjs
+          node scripts/codemod-helius-price-cleanup.mjs
+      - name: Focused Helius price tests
+        run: node --import tsx --test lib/heliusPrice.test.ts
+      - name: Full test suite
+        run: npm test
+      - name: TypeScript check
+        run: npm run typecheck
+      - name: Commit source changes
+        shell: bash
+        run: |
+          if git diff --quiet; then
+            echo "No source changes required."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add lib/geckoFetch.ts paper-trader/marketDiscoveryAgent.ts paper-trader/aiOutcomeTrackerV10.ts paper-trader/aiDiscoveryTrader.ts
+          git commit -m "Route AI price reads through Helius and cache discovery [codemod-output]"
+          git push origin HEAD:feat-helius-price-discovery-cache-2026-07-30
