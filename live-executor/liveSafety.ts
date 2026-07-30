@@ -23,7 +23,6 @@ const REQUEST_TIMEOUT_MS = Math.max(3_000, Number(process.env.LIVE_SAFETY_REQUES
 const LP_SAFETY_ENABLED = process.env.LP_SAFETY_ENABLED !== "false";
 const LIVE_LP_SAFETY_ENFORCE = process.env.LIVE_LP_SAFETY_ENFORCE !== "false";
 const PAPER_LP_SAFETY_ENFORCE = process.env.AI_PAPER_LP_SAFETY_ENFORCE !== "false";
-const PAPER_HELIUS_ENFORCE = process.env.AI_PAPER_HELIUS_ENFORCE === "true";
 const PAPER_HELIUS_MAX_AGE_MS = Math.max(60_000, Number(process.env.AI_PAPER_HELIUS_MAX_AGE_MS) || 15 * 60_000);
 
 export type LiveEntrySafetyResult = { passed: boolean; reason: string | null; details: Record<string, unknown> };
@@ -45,38 +44,75 @@ async function fetchJson(url: string): Promise<any> {
 
 function reject(reason: string, details: Record<string, unknown>): LiveEntrySafetyResult { return { passed: false, reason, details }; }
 
-async function enforcePaperHelius(mint: string, details: Record<string, unknown>): Promise<LiveEntrySafetyResult | null> {
-  if (!PAPER_HELIUS_ENFORCE) return null;
-
+/**
+ * Helius flow eligibility is intentionally observational in the main AI trader.
+ * The isolated helius-flow-paper service owns the hard trade_eligible gate and
+ * its separate bankroll. Missing/stale/not-eligible intelligence is recorded
+ * here as a would-block verdict, but can never short-circuit the normal safety
+ * checks below.
+ */
+async function observePaperHelius(mint: string, details: Record<string, unknown>): Promise<void> {
   const supabase = getSupabaseAdmin();
   const cutoff = new Date(Date.now() - PAPER_HELIUS_MAX_AGE_MS).toISOString();
   const { data, error } = await supabase
     .from("token_intelligence_snapshots")
-    .select("observed_at,mode,recommendation,snapshot")
+    .select("symbol,observed_at,mode,recommendation,snapshot")
     .eq("mint", mint)
     .gte("observed_at", cutoff)
     .order("observed_at", { ascending: false })
     .limit(1)
     .maybeSingle();
 
-  if (error) return reject("helius_intelligence_query_failed", { ...details, heliusError: error.message });
-  if (!data) return reject("helius_intelligence_missing_or_stale", { ...details, heliusEnforced: true, heliusMaxAgeMs: PAPER_HELIUS_MAX_AGE_MS });
+  if (error) {
+    Object.assign(details, {
+      heliusEligible: null,
+      heliusRecommendation: null,
+      heliusSignalVersion: null,
+      heliusWouldBlock: true,
+      heliusShadowOnly: true,
+      heliusShadowStatus: "query_failed",
+      heliusError: error.message,
+      heliusMaxAgeMs: PAPER_HELIUS_MAX_AGE_MS,
+    });
+    console.warn(`[ai-discovery-trader] helius would_block ${mint} (shadow, not enforced)`);
+    return;
+  }
+
+  if (!data) {
+    Object.assign(details, {
+      heliusEligible: null,
+      heliusRecommendation: null,
+      heliusSignalVersion: null,
+      heliusWouldBlock: true,
+      heliusShadowOnly: true,
+      heliusShadowStatus: "missing_or_stale",
+      heliusMaxAgeMs: PAPER_HELIUS_MAX_AGE_MS,
+    });
+    console.warn(`[ai-discovery-trader] helius would_block ${mint} (shadow, not enforced)`);
+    return;
+  }
 
   const snapshot = (data.snapshot ?? {}) as Record<string, any>;
   const tradeEligible = snapshot.trade_eligible === true;
+  const symbol = String(data.symbol ?? snapshot.symbol ?? mint);
   Object.assign(details, {
-    heliusEnforced: true,
+    heliusEligible: tradeEligible,
+    heliusRecommendation: data.recommendation ?? snapshot.recommendation ?? null,
+    heliusSignalVersion: snapshot.signal_version ?? null,
+    heliusWouldBlock: !tradeEligible,
+    heliusShadowOnly: true,
+    heliusShadowStatus: "fresh",
     heliusObservedAt: data.observed_at,
     heliusMode: data.mode,
-    heliusRecommendation: data.recommendation,
-    heliusTradeEligible: tradeEligible,
     heliusSignalScore: snapshot.signal_score ?? null,
     heliusSignalReasons: snapshot.signal_reasons ?? [],
     heliusMissingEvidence: snapshot.missing_for_trade_eligibility ?? [],
+    heliusMaxAgeMs: PAPER_HELIUS_MAX_AGE_MS,
   });
 
-  if (!tradeEligible) return reject("helius_trade_not_eligible", details);
-  return null;
+  if (!tradeEligible) {
+    console.warn(`[ai-discovery-trader] helius would_block ${symbol} (shadow, not enforced)`);
+  }
 }
 
 export async function evaluateLiveEntrySafety(input: {
@@ -101,8 +137,7 @@ export async function evaluateLiveEntrySafety(input: {
 
     const paperCall = input.mode === "paper" || (input.mode == null && input.expectedTokenAmount == null);
     if (paperCall) {
-      const heliusRejection = await enforcePaperHelius(input.mint, details);
-      if (heliusRejection) return heliusRejection;
+      await observePaperHelius(input.mint, details);
     }
 
     const supply = BigInt(String(info.supply ?? "0"));
@@ -135,7 +170,7 @@ export async function evaluateLiveEntrySafety(input: {
     const pairCreatedAt = n(pair?.pairCreatedAt);
     const poolAgeMs = pairCreatedAt > 0 ? Date.now() - pairCreatedAt : 0;
     const liquidityToFdvPassed = fdv > 0 && liquidityToFdv >= MIN_LIQUIDITY_TO_FDV;
-    Object.assign(details, { liquidityUsd, fdv, liquidityToFdv, liquidityToFdvMinimum: MIN_LIQUIDITY_TO_FDV, liquidityToFdvPassed, liquidityToFdvEnforced: LIQUIDITY_TO_FDV_ENFORCE, h24VolumeUsd, m5Buys, m5Sells, poolAgeMinutes: poolAgeMs / 60_000, pairAddress: pair?.pairAddress ?? null, dexId: pair?.dexId ?? null });
+    Object.assign(details, { liquidityUsd, fdv, liquidityToFdv, liquidityToFdvMinimum: MIN_LIQUIDITY_TO_FDV, liquidityToFdvPassed, liquidityToFdvEnforced: LIQUIDITY_TO_FDV_ENFORCE, h24VolumeUsd, m5Buys, m5Sells, m5Transactions, poolAgeMinutes: poolAgeMs / 60_000, pairAddress: pair?.pairAddress ?? null, dexId: pair?.dexId ?? null });
     if (liquidityUsd < MIN_LIQUIDITY_USD) return reject("liquidity_below_live_minimum", details);
     if (LIQUIDITY_TO_FDV_ENFORCE && !liquidityToFdvPassed) return reject("liquidity_to_fdv_too_low", details);
     if (h24VolumeUsd < MIN_H24_VOLUME_USD) return reject("volume_below_live_minimum", details);
