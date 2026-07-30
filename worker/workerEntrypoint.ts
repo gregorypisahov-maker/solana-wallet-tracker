@@ -1,5 +1,6 @@
 import "dotenv/config";
 import "../lib/geckoFetch";
+import "../scripts/lpLockShadowAudit";
 import { startMarketDiscoveryAgent } from "../paper-trader/marketDiscoveryAgent";
 import { startAiDiscoveryTrader } from "../paper-trader/aiDiscoveryTrader";
 import { startAiCapitalMirror } from "../paper-trader/aiCapitalMirror";
