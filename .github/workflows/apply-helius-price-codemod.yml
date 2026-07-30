@@ -28,6 +28,7 @@ jobs:
       - run: npm ci --silent
       - name: Apply source codemods
         run: |
+          node scripts/prepare-helius-codemod.mjs
           node scripts/codemod-helius-price-discovery-cache.mjs
           node scripts/codemod-helius-price-cleanup.mjs
       - name: Focused Helius price tests
