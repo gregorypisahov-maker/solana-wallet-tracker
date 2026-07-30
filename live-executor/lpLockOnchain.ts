@@ -34,6 +34,14 @@ type PoolResolution = {
   details: Record<string, unknown>;
 };
 
+type ConcentrationResult = {
+  unsafe: boolean;
+  pct: number;
+  owner: string | null;
+  account: string | null;
+  details: Record<string, unknown>;
+};
+
 function percentage(amount: bigint, supply: bigint): number {
   if (supply <= 0n || amount <= 0n) return 0;
   return Number((amount * 1_000_000n) / supply) / 10_000;
@@ -57,10 +65,7 @@ function configuredLockerPrograms(): Set<string> {
   );
 }
 
-async function resolvePool(
-  connection: Connection,
-  poolAddress: string | null
-): Promise<PoolResolution> {
+async function resolvePool(connection: Connection, poolAddress: string | null): Promise<PoolResolution> {
   if (!poolAddress) {
     return { protocol: "missing_pool", protocolControlled: false, lpMint: null, vaults: [], details: {} };
   }
@@ -91,11 +96,10 @@ async function resolvePool(
     const decodedLpMint = pubkeyAt(data, 107);
     const baseVault = pubkeyAt(data, 139);
     const quoteVault = pubkeyAt(data, 171);
-    const lpMint = decodedLpMint ?? derivedLpMint;
     return {
       protocol: "pump_amm",
       protocolControlled: false,
-      lpMint,
+      lpMint: decodedLpMint ?? derivedLpMint,
       vaults: [baseVault, quoteVault].filter((value): value is PublicKey => value != null),
       details: {
         poolOwnerProgram: owner,
@@ -142,6 +146,55 @@ async function tokenAccountOwners(
   return output;
 }
 
+async function holderConcentration(input: {
+  connection: Connection;
+  mint: PublicKey;
+  supply: bigint;
+  vaults: PublicKey[];
+  thresholdPct: number;
+}): Promise<ConcentrationResult> {
+  const largest = await input.connection.getTokenLargestAccounts(input.mint, "confirmed");
+  const addresses = largest.value.slice(0, 20).map((item) => item.address);
+  const amounts = largest.value.slice(0, 20).map((item) => BigInt(item.amount));
+  const ownersByAccount = await tokenAccountOwners(input.connection, addresses);
+  const excludedVaults = new Set(input.vaults.map((vault) => vault.toBase58()));
+
+  let amount = 0n;
+  let account: string | null = null;
+  let owner: string | null = null;
+  for (let index = 0; index < addresses.length; index += 1) {
+    const candidateAccount = addresses[index].toBase58();
+    const candidateOwner = ownersByAccount.get(candidateAccount) ?? null;
+    if (
+      excludedVaults.has(candidateAccount) ||
+      LP_BURN_ADDRESSES.has(candidateAccount) ||
+      (candidateOwner && LP_BURN_ADDRESSES.has(candidateOwner))
+    ) {
+      continue;
+    }
+    amount = amounts[index] ?? 0n;
+    account = candidateAccount;
+    owner = candidateOwner;
+    break;
+  }
+
+  const pct = percentage(amount, input.supply);
+  return {
+    unsafe: pct > input.thresholdPct,
+    pct,
+    owner,
+    account,
+    details: {
+      topNonPoolHolderPct: pct,
+      topNonPoolHolderAccount: account,
+      topNonPoolHolderOwner: owner,
+      concentrationThresholdPct: input.thresholdPct,
+      excludedPoolVaults: [...excludedVaults],
+      largestTokenAccountsSampled: addresses.length,
+    },
+  };
+}
+
 async function lockerOwnedAmount(
   connection: Connection,
   owners: string[],
@@ -156,7 +209,7 @@ async function lockerOwnedAmount(
     try {
       ownerKeys.push(new PublicKey(owner));
     } catch {
-      // Ignore malformed owner values returned by an RPC provider.
+      // Ignore malformed RPC owner values.
     }
   }
   const accounts = ownerKeys.length
@@ -194,17 +247,9 @@ export async function evaluateOnchainLiquiditySafety(input: {
   const mintInfo = (parsedMint.value?.data as any)?.parsed?.info;
   if (!mintInfo) {
     return {
-      verdict: "UNKNOWN",
-      method: "onchain_authorities",
-      pctLocked: null,
-      pctBurned: null,
-      poolAddress,
-      lpMint: null,
-      status: "unknown",
-      removablePct: null,
-      owner: null,
-      reason: "mint_account_unreadable",
-      details: {},
+      verdict: "UNKNOWN", method: "onchain_authorities", pctLocked: null, pctBurned: null,
+      poolAddress, lpMint: null, status: "unknown", removablePct: null, owner: null,
+      reason: "mint_account_unreadable", details: {},
     };
   }
 
@@ -217,14 +262,8 @@ export async function evaluateOnchainLiquiditySafety(input: {
   };
   if (mintAuthority || freezeAuthority) {
     return {
-      verdict: "UNLOCKED",
-      method: "onchain_authorities",
-      pctLocked: null,
-      pctBurned: null,
-      poolAddress,
-      lpMint: null,
-      status: "unlocked",
-      removablePct: 100,
+      verdict: "UNLOCKED", method: "onchain_authorities", pctLocked: null, pctBurned: null,
+      poolAddress, lpMint: null, status: "unlocked", removablePct: 100,
       owner: String(mintAuthority ?? freezeAuthority),
       reason: mintAuthority ? "mint_authority_active" : "freeze_authority_active",
       details: authorityDetails,
@@ -234,29 +273,56 @@ export async function evaluateOnchainLiquiditySafety(input: {
   const pool = await resolvePool(input.connection, poolAddress);
   if (pool.protocolControlled) {
     return {
-      verdict: "LOCKED",
-      method: "onchain_lp_burn",
-      pctLocked: 100,
-      pctBurned: 0,
-      poolAddress,
-      lpMint: null,
-      status: "protocol_controlled",
-      removablePct: 0,
+      verdict: "LOCKED", method: "onchain_lp_burn", pctLocked: 100, pctBurned: 0,
+      poolAddress, lpMint: null, status: "protocol_controlled", removablePct: 0,
       owner: typeof pool.details.poolOwnerProgram === "string" ? pool.details.poolOwnerProgram : null,
-      reason: null,
-      details: { ...authorityDetails, ...pool.details, protocol: pool.protocol },
+      reason: null, details: { ...authorityDetails, ...pool.details, protocol: pool.protocol },
+    };
+  }
+
+  const tokenSupply = BigInt(String(mintInfo.supply ?? "0"));
+  const concentration = await holderConcentration({
+    connection: input.connection,
+    mint,
+    supply: tokenSupply,
+    vaults: pool.vaults,
+    thresholdPct: maxTopHolderPct,
+  });
+  const baseDetails = {
+    ...authorityDetails,
+    ...pool.details,
+    ...concentration.details,
+    protocol: pool.protocol,
+  };
+
+  // A concentrated developer wallet is unsafe even when LP itself is burned.
+  // This catches rugs driven by inventory dumps rather than LP removal.
+  if (concentration.unsafe) {
+    return {
+      verdict: "UNLOCKED", method: "onchain_holder_concentration", pctLocked: null,
+      pctBurned: null, poolAddress, lpMint: pool.lpMint?.toBase58() ?? null,
+      status: "unlocked", removablePct: null, owner: concentration.owner,
+      reason: "top_holder_concentration", details: baseDetails,
     };
   }
 
   if (pool.lpMint) {
     const supplyResponse = await input.connection.getTokenSupply(pool.lpMint, "confirmed");
-    const supply = BigInt(supplyResponse.value.amount);
+    const lpSupply = BigInt(supplyResponse.value.amount);
+    if (lpSupply === 0n) {
+      return {
+        verdict: "LOCKED", method: "onchain_lp_burn", pctLocked: 100, pctBurned: 100,
+        poolAddress, lpMint: pool.lpMint.toBase58(), status: "burned", removablePct: 0,
+        owner: null, reason: null,
+        details: { ...baseDetails, lpMint: pool.lpMint.toBase58(), lpSupply: "0", zeroSupplyBurn: true },
+      };
+    }
+
     const largest = await input.connection.getTokenLargestAccounts(pool.lpMint, "confirmed");
     const addresses = largest.value.map((item) => item.address);
     const amounts = largest.value.map((item) => BigInt(item.amount));
     const ownersByAccount = await tokenAccountOwners(input.connection, addresses);
     const owners = addresses.map((address) => ownersByAccount.get(address.toBase58()) ?? "");
-
     let burnedAmount = 0n;
     owners.forEach((owner, index) => {
       const tokenAccount = addresses[index].toBase58();
@@ -265,16 +331,14 @@ export async function evaluateOnchainLiquiditySafety(input: {
       }
     });
     const locker = await lockerOwnedAmount(input.connection, owners, amounts);
-    const pctBurned = percentage(burnedAmount, supply);
-    const pctLocker = percentage(locker.amount, supply);
+    const pctBurned = percentage(burnedAmount, lpSupply);
+    const pctLocker = percentage(locker.amount, lpSupply);
     const pctLocked = Math.min(100, pctBurned + pctLocker);
     const removablePct = Math.max(0, 100 - pctLocked);
     const details = {
-      ...authorityDetails,
-      ...pool.details,
-      protocol: pool.protocol,
+      ...baseDetails,
       lpMint: pool.lpMint.toBase58(),
-      lpSupply: supply.toString(),
+      lpSupply: lpSupply.toString(),
       largestLpAccountsSampled: addresses.length,
       pctLocker,
       lockerPrograms: locker.programs,
@@ -282,89 +346,21 @@ export async function evaluateOnchainLiquiditySafety(input: {
 
     return pctLocked >= lockMinPct
       ? {
-          verdict: "LOCKED",
-          method: "onchain_lp_burn",
-          pctLocked,
-          pctBurned,
-          poolAddress,
-          lpMint: pool.lpMint.toBase58(),
-          status: pctBurned >= lockMinPct ? "burned" : "locked",
-          removablePct,
-          owner: null,
-          reason: null,
-          details,
+          verdict: "LOCKED", method: "onchain_lp_burn", pctLocked, pctBurned,
+          poolAddress, lpMint: pool.lpMint.toBase58(),
+          status: pctBurned >= lockMinPct ? "burned" : "locked", removablePct,
+          owner: null, reason: null, details,
         }
       : {
-          verdict: "UNLOCKED",
-          method: "onchain_lp_burn",
-          pctLocked,
-          pctBurned,
-          poolAddress,
-          lpMint: pool.lpMint.toBase58(),
-          status: "unlocked",
-          removablePct,
-          owner: owners[0] || null,
-          reason: "insufficient_liquidity_locked",
-          details,
+          verdict: "UNLOCKED", method: "onchain_lp_burn", pctLocked, pctBurned,
+          poolAddress, lpMint: pool.lpMint.toBase58(), status: "unlocked", removablePct,
+          owner: owners[0] || null, reason: "insufficient_liquidity_locked", details,
         };
   }
 
-  const supply = BigInt(String(mintInfo.supply ?? "0"));
-  const largest = await input.connection.getTokenLargestAccounts(mint, "confirmed");
-  const addresses = largest.value.slice(0, 10).map((item) => item.address);
-  const amounts = largest.value.slice(0, 10).map((item) => BigInt(item.amount));
-  const ownersByAccount = await tokenAccountOwners(input.connection, addresses);
-  const vaults = new Set(pool.vaults.map((vault) => vault.toBase58()));
-  let topNonPoolAmount = 0n;
-  let topNonPoolOwner: string | null = null;
-  for (let index = 0; index < addresses.length; index += 1) {
-    const account = addresses[index].toBase58();
-    const owner = ownersByAccount.get(account) ?? null;
-    if (vaults.has(account) || LP_BURN_ADDRESSES.has(account) || (owner && LP_BURN_ADDRESSES.has(owner))) {
-      continue;
-    }
-    topNonPoolAmount = amounts[index] ?? 0n;
-    topNonPoolOwner = owner;
-    break;
-  }
-  const topHolderPct = percentage(topNonPoolAmount, supply);
-  const details = {
-    ...authorityDetails,
-    ...pool.details,
-    protocol: pool.protocol,
-    topNonPoolHolderPct: topHolderPct,
-    topNonPoolHolderOwner: topNonPoolOwner,
-    concentrationThresholdPct: maxTopHolderPct,
-    excludedPoolVaults: [...vaults],
-  };
-
-  if (topHolderPct > maxTopHolderPct) {
-    return {
-      verdict: "UNLOCKED",
-      method: "onchain_holder_concentration",
-      pctLocked: null,
-      pctBurned: null,
-      poolAddress,
-      lpMint: null,
-      status: "unlocked",
-      removablePct: null,
-      owner: topNonPoolOwner,
-      reason: "top_holder_concentration",
-      details,
-    };
-  }
-
   return {
-    verdict: "UNKNOWN",
-    method: "onchain_holder_concentration",
-    pctLocked: null,
-    pctBurned: null,
-    poolAddress,
-    lpMint: null,
-    status: "unknown",
-    removablePct: null,
-    owner: topNonPoolOwner,
-    reason: "lp_mint_unresolved",
-    details,
+    verdict: "UNKNOWN", method: "onchain_holder_concentration", pctLocked: null,
+    pctBurned: null, poolAddress, lpMint: null, status: "unknown", removablePct: null,
+    owner: concentration.owner, reason: "lp_mint_unresolved", details: baseDetails,
   };
 }
