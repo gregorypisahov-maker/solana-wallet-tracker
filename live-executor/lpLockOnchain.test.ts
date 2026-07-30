@@ -17,7 +17,9 @@ const POOL = key(8);
 const LP_ACCOUNT = key(9);
 const BASE_VAULT = key(10);
 const QUOTE_VAULT = key(11);
-const DEV = key(12).toBase58();
+const DEV_KEY = key(12);
+const SMALL_HOLDER = key(13);
+const DEV = DEV_KEY.toBase58();
 
 function mintResponse(info: Record<string, unknown>) {
   return {
@@ -38,6 +40,39 @@ function account(owner: PublicKey, data: Buffer) {
 
 function connectionMock(overrides: Record<string, unknown>): Connection {
   return overrides as unknown as Connection;
+}
+
+function poolData(lpMint: PublicKey): Buffer {
+  const data = Buffer.alloc(240);
+  lpMint.toBuffer().copy(data, 107);
+  BASE_VAULT.toBuffer().copy(data, 139);
+  QUOTE_VAULT.toBuffer().copy(data, 171);
+  return data;
+}
+
+function parsedOwners(addresses: PublicKey[], lpOwner: string) {
+  return {
+    context: { slot: 1 },
+    value: addresses.map((address) => ({
+      data: {
+        parsed: {
+          info: {
+            owner: address.equals(LP_ACCOUNT) ? lpOwner : DEV,
+          },
+        },
+      },
+    })),
+  } as any;
+}
+
+function safeTokenLargest() {
+  return {
+    context: { slot: 1 },
+    value: [
+      { address: BASE_VAULT, amount: "90000", decimals: 6, uiAmount: 0.09, uiAmountString: "0.09" },
+      { address: SMALL_HOLDER, amount: "10000", decimals: 6, uiAmount: 0.01, uiAmountString: "0.01" },
+    ],
+  };
 }
 
 test("active mint authority is unsafe before LP checks", async () => {
@@ -62,20 +97,15 @@ test("renounced mint on Pump bonding curve is protocol controlled", async () => 
 });
 
 test("PumpSwap LP held by incinerator is locked", async () => {
-  const lpMint = PublicKey.findProgramAddressSync(
-    [Buffer.from("pool_lp_mint"), POOL.toBuffer()],
-    PUMP_AMM_PROGRAM
-  )[0];
-  const poolData = Buffer.alloc(240);
-  lpMint.toBuffer().copy(poolData, 107);
-  BASE_VAULT.toBuffer().copy(poolData, 139);
-  QUOTE_VAULT.toBuffer().copy(poolData, 171);
+  const lpMint = PublicKey.findProgramAddressSync([Buffer.from("pool_lp_mint"), POOL.toBuffer()], PUMP_AMM_PROGRAM)[0];
   const connection = connectionMock({
     getParsedAccountInfo: async () => mintResponse({ mintAuthority: null, freezeAuthority: null, supply: "100000" }),
-    getAccountInfo: async () => account(PUMP_AMM_PROGRAM, poolData),
+    getAccountInfo: async () => account(PUMP_AMM_PROGRAM, poolData(lpMint)),
     getTokenSupply: async () => ({ context: { slot: 1 }, value: { amount: "1000", decimals: 6, uiAmount: 0.001, uiAmountString: "0.001" } }),
-    getTokenLargestAccounts: async () => ({ context: { slot: 1 }, value: [{ address: LP_ACCOUNT, amount: "960", decimals: 6, uiAmount: 0.00096, uiAmountString: "0.00096" }] }),
-    getMultipleParsedAccounts: async () => ({ context: { slot: 1 }, value: [{ data: { parsed: { info: { owner: INCINERATOR } } } }] }),
+    getTokenLargestAccounts: async (queriedMint: PublicKey) => queriedMint.equals(MINT)
+      ? safeTokenLargest()
+      : { context: { slot: 1 }, value: [{ address: LP_ACCOUNT, amount: "960", decimals: 6, uiAmount: 0.00096, uiAmountString: "0.00096" }] },
+    getMultipleParsedAccounts: async (addresses: PublicKey[]) => parsedOwners(addresses, INCINERATOR),
   });
   const result = await evaluateOnchainLiquiditySafety({ connection, mint: MINT.toBase58(), poolAddress: POOL.toBase58(), lockMinPct: 95 });
   assert.equal(result.verdict, "LOCKED");
@@ -84,24 +114,50 @@ test("PumpSwap LP held by incinerator is locked", async () => {
 });
 
 test("PumpSwap LP held by an ordinary wallet is unlocked", async () => {
-  const lpMint = PublicKey.findProgramAddressSync(
-    [Buffer.from("pool_lp_mint"), POOL.toBuffer()],
-    PUMP_AMM_PROGRAM
-  )[0];
-  const poolData = Buffer.alloc(240);
-  lpMint.toBuffer().copy(poolData, 107);
-  BASE_VAULT.toBuffer().copy(poolData, 139);
-  QUOTE_VAULT.toBuffer().copy(poolData, 171);
+  const lpMint = PublicKey.findProgramAddressSync([Buffer.from("pool_lp_mint"), POOL.toBuffer()], PUMP_AMM_PROGRAM)[0];
   const connection = connectionMock({
     getParsedAccountInfo: async () => mintResponse({ mintAuthority: null, freezeAuthority: null, supply: "100000" }),
-    getAccountInfo: async () => account(PUMP_AMM_PROGRAM, poolData),
+    getAccountInfo: async () => account(PUMP_AMM_PROGRAM, poolData(lpMint)),
     getTokenSupply: async () => ({ context: { slot: 1 }, value: { amount: "1000", decimals: 6, uiAmount: 0.001, uiAmountString: "0.001" } }),
-    getTokenLargestAccounts: async () => ({ context: { slot: 1 }, value: [{ address: LP_ACCOUNT, amount: "1000", decimals: 6, uiAmount: 0.001, uiAmountString: "0.001" }] }),
-    getMultipleParsedAccounts: async () => ({ context: { slot: 1 }, value: [{ data: { parsed: { info: { owner: DEV } } } }] }),
+    getTokenLargestAccounts: async (queriedMint: PublicKey) => queriedMint.equals(MINT)
+      ? safeTokenLargest()
+      : { context: { slot: 1 }, value: [{ address: LP_ACCOUNT, amount: "1000", decimals: 6, uiAmount: 0.001, uiAmountString: "0.001" }] },
+    getMultipleParsedAccounts: async (addresses: PublicKey[]) => parsedOwners(addresses, DEV),
   });
   const result = await evaluateOnchainLiquiditySafety({ connection, mint: MINT.toBase58(), poolAddress: POOL.toBase58(), lockMinPct: 95 });
   assert.equal(result.verdict, "UNLOCKED");
   assert.equal(result.reason, "insufficient_liquidity_locked");
+});
+
+test("zero LP supply is treated as fully burned when holder concentration is safe", async () => {
+  const lpMint = PublicKey.findProgramAddressSync([Buffer.from("pool_lp_mint"), POOL.toBuffer()], PUMP_AMM_PROGRAM)[0];
+  const connection = connectionMock({
+    getParsedAccountInfo: async () => mintResponse({ mintAuthority: null, freezeAuthority: null, supply: "100000" }),
+    getAccountInfo: async () => account(PUMP_AMM_PROGRAM, poolData(lpMint)),
+    getTokenSupply: async () => ({ context: { slot: 1 }, value: { amount: "0", decimals: 9, uiAmount: 0, uiAmountString: "0" } }),
+    getTokenLargestAccounts: async () => safeTokenLargest(),
+    getMultipleParsedAccounts: async (addresses: PublicKey[]) => parsedOwners(addresses, DEV),
+  });
+  const result = await evaluateOnchainLiquiditySafety({ connection, mint: MINT.toBase58(), poolAddress: POOL.toBase58() });
+  assert.equal(result.verdict, "LOCKED");
+  assert.equal(result.status, "burned");
+  assert.equal(result.pctBurned, 100);
+});
+
+test("concentrated token supply overrides a burned LP verdict", async () => {
+  const lpMint = PublicKey.findProgramAddressSync([Buffer.from("pool_lp_mint"), POOL.toBuffer()], PUMP_AMM_PROGRAM)[0];
+  const topAccount = key(30);
+  const connection = connectionMock({
+    getParsedAccountInfo: async () => mintResponse({ mintAuthority: null, freezeAuthority: null, supply: "1000" }),
+    getAccountInfo: async () => account(PUMP_AMM_PROGRAM, poolData(lpMint)),
+    getTokenSupply: async () => ({ context: { slot: 1 }, value: { amount: "0", decimals: 9, uiAmount: 0, uiAmountString: "0" } }),
+    getTokenLargestAccounts: async () => ({ context: { slot: 1 }, value: [{ address: topAccount, amount: "920", decimals: 6, uiAmount: 0.00092, uiAmountString: "0.00092" }] }),
+    getMultipleParsedAccounts: async (addresses: PublicKey[]) => parsedOwners(addresses, DEV),
+  });
+  const result = await evaluateOnchainLiquiditySafety({ connection, mint: MINT.toBase58(), poolAddress: POOL.toBase58(), maxTopHolderPct: 30 });
+  assert.equal(result.verdict, "UNLOCKED");
+  assert.equal(result.method, "onchain_holder_concentration");
+  assert.equal(result.reason, "top_holder_concentration");
 });
 
 test("unresolved LP with excessive non-pool holder concentration is unsafe", async () => {
@@ -111,7 +167,7 @@ test("unresolved LP with excessive non-pool holder concentration is unsafe", asy
     getParsedAccountInfo: async () => mintResponse({ mintAuthority: null, freezeAuthority: null, supply: "1000" }),
     getAccountInfo: async () => account(unsupportedProgram, Buffer.alloc(64)),
     getTokenLargestAccounts: async () => ({ context: { slot: 1 }, value: [{ address: topAccount, amount: "350", decimals: 6, uiAmount: 0.00035, uiAmountString: "0.00035" }] }),
-    getMultipleParsedAccounts: async () => ({ context: { slot: 1 }, value: [{ data: { parsed: { info: { owner: DEV } } } }] }),
+    getMultipleParsedAccounts: async (addresses: PublicKey[]) => parsedOwners(addresses, DEV),
   });
   const result = await evaluateOnchainLiquiditySafety({ connection, mint: MINT.toBase58(), poolAddress: POOL.toBase58(), maxTopHolderPct: 30 });
   assert.equal(result.verdict, "UNLOCKED");
@@ -126,7 +182,7 @@ test("renounced authorities without resolvable LP evidence remains unknown", asy
     getParsedAccountInfo: async () => mintResponse({ mintAuthority: null, freezeAuthority: null, supply: "1000" }),
     getAccountInfo: async () => account(unsupportedProgram, Buffer.alloc(64)),
     getTokenLargestAccounts: async () => ({ context: { slot: 1 }, value: [{ address: topAccount, amount: "200", decimals: 6, uiAmount: 0.0002, uiAmountString: "0.0002" }] }),
-    getMultipleParsedAccounts: async () => ({ context: { slot: 1 }, value: [{ data: { parsed: { info: { owner: DEV } } } }] }),
+    getMultipleParsedAccounts: async (addresses: PublicKey[]) => parsedOwners(addresses, DEV),
   });
   const result = await evaluateOnchainLiquiditySafety({ connection, mint: MINT.toBase58(), poolAddress: POOL.toBase58(), maxTopHolderPct: 30 });
   assert.equal(result.verdict, "UNKNOWN");
