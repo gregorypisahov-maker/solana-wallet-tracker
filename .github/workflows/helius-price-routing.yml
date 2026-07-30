@@ -1,0 +1,43 @@
+name: Helius price routing
+
+on:
+  pull_request:
+    paths:
+      - "lib/heliusPrice.ts"
+      - "lib/heliusPrice.test.ts"
+      - "lib/geckoFetch.ts"
+      - "paper-trader/marketDiscoveryAgent.ts"
+      - "paper-trader/aiOutcomeTrackerV10.ts"
+      - "paper-trader/aiOutcomeTrackerV10.test.ts"
+      - "paper-trader/aiDiscoveryTrader.ts"
+      - ".github/workflows/helius-price-routing.yml"
+  push:
+    branches: [main]
+    paths:
+      - "lib/heliusPrice.ts"
+      - "lib/heliusPrice.test.ts"
+      - "lib/geckoFetch.ts"
+      - "paper-trader/marketDiscoveryAgent.ts"
+      - "paper-trader/aiOutcomeTrackerV10.ts"
+      - "paper-trader/aiOutcomeTrackerV10.test.ts"
+      - "paper-trader/aiDiscoveryTrader.ts"
+      - ".github/workflows/helius-price-routing.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --silent
+      - name: Helius price and outcome tests
+        run: node --import tsx --test lib/heliusPrice.test.ts paper-trader/aiOutcomeTrackerV10.test.ts
+      - name: TypeScript check
+        run: npm run typecheck

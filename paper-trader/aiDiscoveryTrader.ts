@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { getSupabaseAdmin } from "../lib/supabase";
+import { getPriceViaHelius } from "../lib/heliusPrice";
 import { sendTelegramAlert } from "../lib/telegram";
 import {
   getJupiterQuote,
@@ -267,6 +268,14 @@ async function pairFor(
   pairAddress: string,
   minimumLiquidity = 0
 ): Promise<Market | null> {
+  if (minimumLiquidity <= 0) {
+    const helius = await getPriceViaHelius(mint, pairAddress);
+    if (helius) {
+      console.log(`[ai-discovery-trader] price ${mint} src=${helius.source} poolProgram=${helius.poolProgram}`);
+      return { priceUsd: helius.priceUsd, liquidityUsd: 0, marketCapUsd: 0, changeM5: 0 };
+    }
+  }
+
   const body = await fetchJson(`${DEX_URL}/${encodeURIComponent(mint)}`);
   const pairs = Array.isArray(body) ? body : [];
   const pair = pairs.find(
@@ -296,8 +305,24 @@ async function pairFor(
   };
 }
 
-async function priceFor(mint: string, pairAddress: string): Promise<Market | null> {
-  return pairFor(mint, pairAddress, 25_000);
+async function priceForOpportunity(opportunity: any): Promise<Market | null> {
+  const mint = String(opportunity.mint ?? "");
+  const pairAddress = String(opportunity.pair_address ?? "");
+  const helius = await getPriceViaHelius(mint, pairAddress);
+  const liquidityUsd = n(opportunity.liquidity_usd, Number.NaN);
+  if (helius && Number.isFinite(liquidityUsd) && liquidityUsd >= 25_000) {
+    console.log(`[ai-discovery-trader] price ${mint} src=${helius.source} poolProgram=${helius.poolProgram}`);
+    return {
+      priceUsd: helius.priceUsd,
+      liquidityUsd,
+      marketCapUsd: n(opportunity.market_cap_usd, 0),
+      changeM5: n(opportunity.price_change_m5, 0),
+    };
+  }
+
+  const fallback = await pairFor(mint, pairAddress, 25_000);
+  if (fallback) console.log(`[ai-discovery-trader] price ${mint} src=dex poolProgram=fallback`);
+  return fallback;
 }
 
 async function loadState(): Promise<State> {
@@ -648,7 +673,7 @@ async function scanEntries(): Promise<void> {
       );
       if (await cooledDown(opportunity.mint)) continue;
       try {
-        const market = await priceFor(opportunity.mint, opportunity.pair_address);
+        const market = await priceForOpportunity(opportunity);
         if (!market || market.changeM5 < 0 || market.changeM5 > 15) continue;
         if (PAPER_ENTRY_SAFETY_ENABLED) {
           const safety = await evaluateLiveEntrySafety({ mint: opportunity.mint, sizeSol: FIXED_SIZE_SOL, slippageBps: QUOTE_SLIPPAGE_BPS });

@@ -1,8 +1,8 @@
+import { GeckoCooldownError, geckoFetchJson } from "../lib/geckoFetch";
 import { getSupabaseAdmin } from "../lib/supabase";
 
 const supabase = getSupabaseAdmin();
 const VERSION = "market_discovery_ai_v1_2026_07_24";
-const REQUEST_TIMEOUT_MS = 12_000;
 const DEFAULT_INTERVAL_MS = 60_000;
 const TOP_LIMIT = 25;
 const WRAPPED_SOL = "So11111111111111111111111111111111111111112";
@@ -11,6 +11,11 @@ const STABLES = new Set([
   "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
   "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",
 ]);
+const DISCOVERY_CACHE_TTL_MS = Math.max(30_000, Number(process.env.DISCOVERY_CACHE_TTL_MS) || 90_000);
+const DISCOVERY_CACHE_MAX_STALE_MS = Math.max(
+  DISCOVERY_CACHE_TTL_MS,
+  Number(process.env.DISCOVERY_CACHE_MAX_STALE_MS) || 10 * 60_000
+);
 
 const FEEDS = [
   "https://api.geckoterminal.com/api/v2/networks/solana/trending_pools?duration=5m&page=1",
@@ -44,7 +49,17 @@ type Ranked = Candidate & {
   risks: string[];
 };
 
+type DiscoveryMeta = {
+  servedFrom: "live" | "cache" | "live_partial";
+  stale: boolean;
+  cacheAgeMs: number | null;
+  failedFeeds: number;
+};
+
+type DiscoveryResult = { candidates: Candidate[]; meta: DiscoveryMeta };
+
 let running = false;
+let lastGoodDiscovery: { savedAt: number; candidates: Candidate[] } | null = null;
 
 function num(value: unknown, fallback = 0): number {
   const parsed = typeof value === "number" ? value : Number(value);
@@ -67,22 +82,13 @@ function enabled(): boolean {
 }
 
 async function fetchJson(url: string): Promise<any> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-  try {
-    const response = await fetch(url, {
-      cache: "no-store",
-      signal: controller.signal,
-      headers: {
-        Accept: "application/vnd.api+json;version=20230302",
-        "User-Agent": "solana-market-discovery-ai/1.0",
-      },
-    });
-    if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
-    return await response.json();
-  } finally {
-    clearTimeout(timeout);
-  }
+  return geckoFetchJson(url);
+}
+
+function isCooldownFailure(error: unknown): boolean {
+  return error instanceof GeckoCooldownError || /(^|\s)429(\s|$)|cooling down|too many requests/i.test(
+    error instanceof Error ? error.message : String(error)
+  );
 }
 
 function parse(row: any): Candidate | null {
@@ -139,9 +145,20 @@ function parse(row: any): Candidate | null {
   return candidate;
 }
 
-async function discover(): Promise<Candidate[]> {
+async function discover(): Promise<DiscoveryResult> {
+  const now = Date.now();
+  if (lastGoodDiscovery && now - lastGoodDiscovery.savedAt <= DISCOVERY_CACHE_TTL_MS) {
+    const age = now - lastGoodDiscovery.savedAt;
+    console.log(`[market-discovery-ai] discovery served_from=cache age=${age}ms stale=false`);
+    return {
+      candidates: lastGoodDiscovery.candidates.map((item) => ({ ...item })),
+      meta: { servedFrom: "cache", stale: false, cacheAgeMs: age, failedFeeds: 0 },
+    };
+  }
+
   const results = await Promise.allSettled(FEEDS.map(fetchJson));
   const byMint = new Map<string, Candidate>();
+  const failures = results.filter((result): result is PromiseRejectedResult => result.status === "rejected");
 
   for (const result of results) {
     if (result.status === "rejected") {
@@ -154,20 +171,33 @@ async function discover(): Promise<Candidate[]> {
       const candidate = parse(row);
       if (!candidate) continue;
       const existing = byMint.get(candidate.mint);
-      if (!existing || candidate.liquidityUsd > existing.liquidityUsd) {
-        byMint.set(candidate.mint, candidate);
-      }
+      if (!existing || candidate.liquidityUsd > existing.liquidityUsd) byMint.set(candidate.mint, candidate);
     }
   }
 
-  if (
-    byMint.size === 0 &&
-    results.every((result) => result.status === "rejected")
-  ) {
-    throw new Error("all discovery feeds failed");
+  if (failures.length === 0 && byMint.size > 0) {
+    const candidates = [...byMint.values()];
+    lastGoodDiscovery = { savedAt: Date.now(), candidates: candidates.map((item) => ({ ...item })) };
+    return { candidates, meta: { servedFrom: "live", stale: false, cacheAgeMs: null, failedFeeds: 0 } };
   }
 
-  return [...byMint.values()];
+  const cacheAge = lastGoodDiscovery ? Date.now() - lastGoodDiscovery.savedAt : Number.POSITIVE_INFINITY;
+  const cooldown = failures.some((result) => isCooldownFailure(result.reason));
+  if (lastGoodDiscovery && cacheAge <= DISCOVERY_CACHE_MAX_STALE_MS) {
+    console.warn(
+      `[market-discovery-ai] discovery served_from=cache age=${cacheAge}ms stale=true failures=${failures.length} cooldown=${cooldown}`
+    );
+    return {
+      candidates: lastGoodDiscovery.candidates.map((item) => ({ ...item })),
+      meta: { servedFrom: "cache", stale: true, cacheAgeMs: cacheAge, failedFeeds: failures.length },
+    };
+  }
+
+  if (byMint.size === 0 && failures.length === results.length) throw new Error("all discovery feeds failed");
+  return {
+    candidates: [...byMint.values()],
+    meta: { servedFrom: "live_partial", stale: true, cacheAgeMs: null, failedFeeds: failures.length },
+  };
 }
 
 function rank(candidate: Candidate): Ranked {
@@ -304,7 +334,8 @@ async function persist(
   startedAt: string,
   candidates: Candidate[],
   ranked: Ranked[],
-  marketRegime: string
+  marketRegime: string,
+  discoveryMeta: DiscoveryMeta
 ): Promise<void> {
   const now = new Date().toISOString();
   const top = ranked.slice(0, TOP_LIMIT);
@@ -335,6 +366,9 @@ async function persist(
         signal_snapshot: {
           version: VERSION,
           buyRatio: item.buysM5 / Math.max(1, item.buysM5 + item.sellsM5),
+          discoveryStale: discoveryMeta.stale,
+          discoveryServedFrom: discoveryMeta.servedFrom,
+          discoveryCacheAgeMs: discoveryMeta.cacheAgeMs,
         },
         last_seen_at: now,
         updated_at: now,
@@ -357,7 +391,7 @@ async function persist(
     top_score: top[0]?.score ?? null,
     market_regime: marketRegime,
     message: top[0] ? `top_candidate:${top[0].symbol}` : "no_candidates",
-    snapshot: { version: VERSION, top: top.slice(0, 10) },
+    snapshot: { version: VERSION, top: top.slice(0, 10), discovery: discoveryMeta },
   });
   if (error) throw new Error(`discovery run insert failed: ${error.message}`);
 
@@ -374,14 +408,16 @@ export async function runMarketDiscoveryScan(): Promise<void> {
   const startedAt = new Date().toISOString();
 
   try {
-    const candidates = await discover();
+    const discovery = await discover();
+    const candidates = discovery.candidates;
     const ranked = candidates.map(rank).sort((a, b) => b.score - a.score);
     const marketRegime = regime(ranked);
-    await persist(startedAt, candidates, ranked, marketRegime);
+    await persist(startedAt, candidates, ranked, marketRegime, discovery.meta);
 
     const top = ranked[0];
     console.log(
       `[market-discovery-ai] scanned ${candidates.length}; regime ${marketRegime}; ` +
+        `served_from=${discovery.meta.servedFrom} stale=${discovery.meta.stale}; ` +
         `top ${top ? `${top.symbol} ${top.score}/100` : "none"}`
     );
   } catch (error) {
@@ -420,7 +456,8 @@ export function startMarketDiscoveryAgent(): void {
   const every = intervalMs();
   console.log(
     `[market-discovery-ai] ${VERSION} enabled; scan ${every / 1000}s; ` +
-      "restored original GeckoTerminal discovery; analysis-only, no direct real-money execution"
+      `discoveryCacheTtlMs=${DISCOVERY_CACHE_TTL_MS} maxStaleMs=${DISCOVERY_CACHE_MAX_STALE_MS}; ` +
+      "GeckoTerminal discovery with full-universe cache; analysis-only, no direct real-money execution"
   );
   void runSafely();
   setInterval(() => void runSafely(), every);
