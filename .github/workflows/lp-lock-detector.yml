@@ -1,0 +1,45 @@
+name: LP lock detector
+
+on:
+  pull_request:
+    paths:
+      - "live-executor/lpLock*.ts"
+      - "live-executor/liquiditySafety.ts"
+      - "live-executor/liveSafety.ts"
+      - "scripts/lpLockShadowAudit.ts"
+      - "worker/workerEntrypoint.ts"
+      - "package.json"
+      - ".github/workflows/lp-lock-detector.yml"
+  push:
+    branches: [main]
+    paths:
+      - "live-executor/lpLock*.ts"
+      - "live-executor/liquiditySafety.ts"
+      - "live-executor/liveSafety.ts"
+      - "scripts/lpLockShadowAudit.ts"
+      - "worker/workerEntrypoint.ts"
+      - "package.json"
+      - ".github/workflows/lp-lock-detector.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci --silent
+      - name: LP parser and on-chain fallback tests
+        run: node --import tsx --test live-executor/lpLockGoplus.test.ts live-executor/lpLockOnchain.test.ts
+      - name: TypeScript check
+        run: npm run typecheck
+      - name: Verify paper worker remains shadow-only
+        run: |
+          grep -q 'LP_LOCK_ENFORCE=false' package.json
+          grep -q 'LP_LOCK_BLOCK_ON_UNKNOWN=false' package.json
