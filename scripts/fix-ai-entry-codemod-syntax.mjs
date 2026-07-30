@@ -88,6 +88,11 @@ replaceRequired(
   '      "<a href=\\"https://dexscreener.com/solana/" + opportunity.pair_address + "\\">Open chart</a>",',
   "telegram chart"
 );
+replaceRequired(
+  '    ].join("\\n")',
+  '    ].join("\\\\n")',
+  "telegram newline escape"
+);
 
 fs.writeFileSync(path, source);
 console.log("Entry feature codemod syntax fixed.");
