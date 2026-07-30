@@ -4,13 +4,16 @@ on:
   push:
     branches:
       - feat-helius-price-discovery-cache-2026-07-30
+  pull_request:
+    branches:
+      - main
 
 permissions:
   contents: write
 
 jobs:
   apply:
-    if: ${{ !contains(github.event.head_commit.message, '[codemod-output]') }}
+    if: ${{ !contains(github.event.head_commit.message || '', '[codemod-output]') }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
