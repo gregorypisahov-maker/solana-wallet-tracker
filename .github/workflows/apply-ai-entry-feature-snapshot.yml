@@ -4,13 +4,16 @@ on:
   push:
     branches:
       - feat-ai-entry-feature-snapshot-2026-07-30
+  pull_request:
+    branches:
+      - main
 
 permissions:
   contents: write
 
 jobs:
   apply:
-    if: ${{ !contains(github.event.head_commit.message, '[feature-snapshot-output]') }}
+    if: ${{ github.event_name != 'push' || !contains(github.event.head_commit.message, '[feature-snapshot-output]') }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
