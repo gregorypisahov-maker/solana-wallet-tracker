@@ -1,0 +1,47 @@
+name: AI PnL scoreboard
+
+on:
+  pull_request:
+    paths:
+      - "paper-trader/aiPnlScoreboard.ts"
+      - "paper-trader/aiPnlScoreboard.test.ts"
+      - "paper-trader/aiDiscoveryTrader.ts"
+      - "worker/telegramBot.ts"
+      - "live-executor/liquiditySafety.ts"
+      - "live-executor/liveSafety.ts"
+      - ".github/workflows/ai-pnl-scoreboard.yml"
+  push:
+    branches: [main]
+    paths:
+      - "paper-trader/aiPnlScoreboard.ts"
+      - "paper-trader/aiPnlScoreboard.test.ts"
+      - "paper-trader/aiDiscoveryTrader.ts"
+      - "worker/telegramBot.ts"
+      - "live-executor/liquiditySafety.ts"
+      - "live-executor/liveSafety.ts"
+      - ".github/workflows/ai-pnl-scoreboard.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --silent
+      - name: AI PnL unit tests
+        run: node --import tsx --test paper-trader/aiPnlScoreboard.test.ts
+      - name: TypeScript check
+        run: npm run typecheck
+      - name: Retired LP reason is absent
+        run: |
+          if grep -R --exclude-dir=.git --exclude='*.md' --exclude='*.log' -n "liquidity_not_locked" .; then
+            echo "retired liquidity_not_locked reason still exists"
+            exit 1
+          fi
