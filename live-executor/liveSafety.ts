@@ -197,13 +197,8 @@ export async function evaluateLiveEntrySafety(input: {
           ? "block"
           : "pass";
       const lpLock = {
-        verdict: liquiditySafety.verdict,
-        method: liquiditySafety.method,
-        pctLocked: liquiditySafety.pctLocked,
+        ...liquiditySafety,
         action,
-        poolAddress: liquiditySafety.poolAddress,
-        unlockTime: liquiditySafety.unlockTime,
-        rawError: liquiditySafety.rawError,
         enforce,
         blockOnUnknown,
       };
@@ -213,9 +208,11 @@ export async function evaluateLiveEntrySafety(input: {
       if (paperCall) {
         const symbol = String(pair?.baseToken?.symbol ?? input.mint);
         const pctLocked = liquiditySafety.pctLocked == null ? "unknown" : liquiditySafety.pctLocked.toFixed(2);
+        const pctBurned = liquiditySafety.pctBurned == null ? "unknown" : liquiditySafety.pctBurned.toFixed(2);
         console.log(
           `[ai-discovery-trader] lp_lock ${symbol} verdict=${liquiditySafety.verdict} ` +
-            `method=${liquiditySafety.method} pctLocked=${pctLocked} enforce=${enforce} ` +
+            `method=${liquiditySafety.method} source=${liquiditySafety.source} status=${liquiditySafety.status} ` +
+            `pctLocked=${pctLocked} pctBurned=${pctBurned} enforce=${enforce} ` +
             `action=${action} pool=${liquiditySafety.poolAddress ?? "unknown"}`
         );
       }
