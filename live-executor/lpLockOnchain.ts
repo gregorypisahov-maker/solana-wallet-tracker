@@ -138,7 +138,7 @@ async function tokenAccountOwners(
 ): Promise<Map<string, string | null>> {
   const output = new Map<string, string | null>();
   if (!addresses.length) return output;
-  const accounts = await connection.getMultipleParsedAccounts(addresses, "confirmed");
+  const accounts = await connection.getMultipleParsedAccounts(addresses, { commitment: "confirmed" });
   accounts.value.forEach((account, index) => {
     const info = (account?.data as any)?.parsed?.info;
     output.set(addresses[index].toBase58(), info?.owner ? String(info.owner) : null);
