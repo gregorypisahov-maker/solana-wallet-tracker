@@ -9,6 +9,7 @@ on:
       - "worker/telegramBot.ts"
       - "live-executor/liquiditySafety.ts"
       - "live-executor/liveSafety.ts"
+      - "supabase/migrations/20260730075000_ai_discovery_entry_snapshot_lp_lock.sql"
       - ".github/workflows/ai-pnl-scoreboard.yml"
   push:
     branches: [main]
@@ -19,6 +20,7 @@ on:
       - "worker/telegramBot.ts"
       - "live-executor/liquiditySafety.ts"
       - "live-executor/liveSafety.ts"
+      - "supabase/migrations/20260730075000_ai_discovery_entry_snapshot_lp_lock.sql"
       - ".github/workflows/ai-pnl-scoreboard.yml"
 
 permissions:
@@ -40,8 +42,10 @@ jobs:
       - name: TypeScript check
         run: npm run typecheck
       - name: Retired LP reason is absent
+        shell: bash
         run: |
-          if grep -R --exclude-dir=.git --exclude='*.md' --exclude='*.log' -n "liquidity_not_locked" .; then
-            echo "retired liquidity_not_locked reason still exists"
+          retired_reason="liquidity""_not_locked"
+          if grep -R --exclude-dir=.git --exclude='*.md' --exclude='*.log' -n "$retired_reason" live-executor paper-trader worker lib; then
+            echo "retired LP block reason still exists"
             exit 1
           fi
