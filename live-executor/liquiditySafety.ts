@@ -1,6 +1,12 @@
+import { PublicKey } from "@solana/web3.js";
+import { getLiveConnection } from "../lib/liveWallet";
+import { classifyLpLock, type LpLockResult } from "./lpLockGoplus";
+import { evaluateOnchainLiquiditySafety } from "./lpLockOnchain";
+
 const GOPLUS_URL = "https://api.gopluslabs.io/api/v1/solana/token_security";
 const REQUEST_TIMEOUT_MS = Math.max(3_000, Number(process.env.LP_SAFETY_REQUEST_TIMEOUT_MS) || 10_000);
 const MIN_LOCKED_PCT = Math.min(100, Math.max(50, Number(process.env.LP_MIN_LOCKED_PCT) || 95));
+const MAX_TOP_HOLDER_PCT = Math.min(100, Math.max(5, Number(process.env.LP_MAX_TOP_HOLDER_PCT) || 30));
 
 export type LiquidityLockVerdict = "LOCKED" | "UNLOCKED" | "UNKNOWN";
 
@@ -15,46 +21,18 @@ export type LiquiditySafetyResult = {
   verdict: LiquidityLockVerdict;
   method: string;
   pctLocked: number | null;
+  pctBurned: number | null;
   poolAddress: string | null;
+  lpMint: string | null;
   unlockTime: string | null;
   rawError: string | null;
   status: LiquiditySafetyStatus;
   removablePct: number | null;
   owner: string | null;
-  source: "goplus" | "unavailable";
+  source: "goplus" | "onchain" | "unavailable";
   reason: string | null;
   details: Record<string, unknown>;
 };
-
-function n(value: unknown, fallback = 0): number {
-  const parsed = typeof value === "number" ? value : Number(value);
-  return Number.isFinite(parsed) ? parsed : fallback;
-}
-
-function boolish(value: unknown): boolean {
-  return value === true || value === 1 || value === "1" || value === "true";
-}
-
-function falseish(value: unknown): boolean {
-  return value === false || value === 0 || value === "0" || value === "false";
-}
-
-function pct(value: unknown): number | null {
-  if (value == null || value === "") return null;
-  const parsed = n(value, Number.NaN);
-  if (!Number.isFinite(parsed)) return null;
-  return parsed <= 1 ? parsed * 100 : parsed;
-}
-
-function expiryFrom(details: any[]): string | null {
-  const timestamps = details
-    .flatMap((item) => [item?.end_time, item?.unlock_time, item?.expiry_time])
-    .map((value) => n(value))
-    .filter((value) => value > 0);
-  if (!timestamps.length) return null;
-  const latest = Math.max(...timestamps);
-  return new Date(latest > 10_000_000_000 ? latest : latest * 1_000).toISOString();
-}
 
 async function fetchJson(url: string): Promise<any> {
   const controller = new AbortController();
@@ -70,33 +48,28 @@ async function fetchJson(url: string): Promise<any> {
   }
 }
 
-function result(input: {
-  verdict: LiquidityLockVerdict;
-  method: string;
-  pctLocked: number | null;
-  poolAddress: string | null;
-  unlockTime: string | null;
-  rawError?: string | null;
-  status: LiquiditySafetyStatus;
-  removablePct: number | null;
-  owner: string | null;
-  source: "goplus" | "unavailable";
-  reason?: string | null;
-  details: Record<string, unknown>;
-}): LiquiditySafetyResult {
+function goplusResult(classified: LpLockResult, poolAddress: string | null): LiquiditySafetyResult {
+  const securedPct = (classified.pctLocked ?? 0) + (classified.pctBurned ?? 0);
+  const status: LiquiditySafetyStatus = classified.verdict === "LOCKED"
+    ? (classified.pctBurned ?? 0) >= MIN_LOCKED_PCT ? "burned" : "locked"
+    : classified.verdict === "UNLOCKED" ? "unlocked" : "unknown";
   return {
-    verdict: input.verdict,
-    method: input.method,
-    pctLocked: input.pctLocked,
-    poolAddress: input.poolAddress,
-    unlockTime: input.unlockTime,
-    rawError: input.rawError ?? null,
-    status: input.status,
-    removablePct: input.removablePct,
-    owner: input.owner,
-    source: input.source,
-    reason: input.reason ?? null,
-    details: input.details,
+    verdict: classified.verdict,
+    method: classified.method,
+    pctLocked: classified.pctLocked,
+    pctBurned: classified.pctBurned,
+    poolAddress: classified.pool ?? poolAddress,
+    lpMint: null,
+    unlockTime: classified.unlockTime,
+    rawError: null,
+    status,
+    removablePct: classified.verdict === "UNKNOWN" ? null : Math.max(0, 100 - securedPct),
+    owner: null,
+    source: "goplus",
+    reason: classified.verdict === "UNLOCKED"
+      ? "insufficient_liquidity_locked"
+      : classified.verdict === "UNKNOWN" ? "liquidity_lock_unknown" : null,
+    details: classified.details,
   };
 }
 
@@ -106,191 +79,149 @@ export async function evaluateLiquiditySafety(input: {
   dexId?: string | null;
 }): Promise<LiquiditySafetyResult> {
   const poolAddress = input.pairAddress ?? null;
-  const details: Record<string, unknown> = {
+  const common = {
     mint: input.mint,
     pairAddress: poolAddress,
     dexId: input.dexId ?? null,
     minimumLockedPct: MIN_LOCKED_PCT,
+    maxTopHolderPct: MAX_TOP_HOLDER_PCT,
   };
+  const connection = getLiveConnection();
 
+  // Authority risk outranks every LP-lock signal. GoPlus may say LOCKED while the
+  // developer can still mint infinite supply or freeze holders, so check chain state first.
   try {
-    const payload = await fetchJson(`${GOPLUS_URL}?contract_addresses=${encodeURIComponent(input.mint)}`);
-    const resultMap = payload?.result ?? {};
-    const report = resultMap[input.mint] ?? resultMap[input.mint.toLowerCase()] ?? Object.values(resultMap)[0];
-    if (!report || typeof report !== "object") {
-      return result({
+    const mintAccount = await connection.getParsedAccountInfo(new PublicKey(input.mint), "confirmed");
+    const mintInfo = (mintAccount.value?.data as any)?.parsed?.info;
+    if (!mintInfo) {
+      return {
         verdict: "UNKNOWN",
-        method: "goplus_report_missing",
+        method: "onchain_authorities",
         pctLocked: null,
+        pctBurned: null,
         poolAddress,
+        lpMint: null,
         unlockTime: null,
+        rawError: null,
         status: "unknown",
         removablePct: null,
         owner: null,
-        source: "goplus",
-        reason: "liquidity_report_missing",
-        details: { ...details, responseCode: payload?.code ?? null },
-      });
+        source: "onchain",
+        reason: "mint_account_unreadable",
+        details: { ...common, resolution: "authority_unreadable" },
+      };
     }
-
-    const holders = Array.isArray((report as any).holders) ? (report as any).holders : [];
-    const lockedHolders = holders.filter((holder: any) => boolish(holder?.is_locked) || /burn|black hole|dead/i.test(String(holder?.tag ?? "")));
-    const lockedPctFromHolders = lockedHolders.reduce((sum: number, holder: any) => sum + (pct(holder?.percent) ?? 0), 0);
-    const topLevelLockedPct = pct((report as any).locked_percent ?? (report as any).lp_locked_percent ?? (report as any).liquidity_locked_percent);
-    const pctLocked = topLevelLockedPct ?? (lockedHolders.length ? Math.min(100, lockedPctFromHolders) : null);
-    const providerHasLockFlag = Object.prototype.hasOwnProperty.call(report, "is_locked");
-    const providerSaysLocked = providerHasLockFlag && boolish((report as any).is_locked);
-    const providerSaysUnlocked = providerHasLockFlag && falseish((report as any).is_locked);
-    const burnDetected = lockedHolders.some((holder: any) => /burn|black hole|dead/i.test(String(holder?.tag ?? "")));
-    const lockDetails = [
-      ...((Array.isArray((report as any).locked_detail) ? (report as any).locked_detail : [])),
-      ...lockedHolders.flatMap((holder: any) => Array.isArray(holder?.locked_detail) ? holder.locked_detail : []),
-    ];
-    const unlockTime = expiryFrom(lockDetails);
-    const owner = (report as any).owner_address ?? (report as any).creator_address ?? null;
-    const removablePct = pctLocked == null ? null : Math.max(0, 100 - pctLocked);
-    const expiryMs = unlockTime ? Date.parse(unlockTime) : null;
-
-    Object.assign(details, {
-      providerIsLocked: (report as any).is_locked ?? null,
-      providerHasLockFlag,
-      pctLocked,
-      removablePct,
-      unlockTime,
-      owner,
-      lockedHolderCount: lockedHolders.length,
-      lockDetails,
-      providerRiskItems: (report as any).risk_items ?? (report as any).risks ?? null,
-    });
-
-    if (burnDetected) {
-      if (pctLocked == null) {
-        return result({
-          verdict: "UNKNOWN",
-          method: "goplus_burn_pct_unknown",
-          pctLocked,
-          poolAddress,
-          unlockTime,
-          status: "unknown",
-          removablePct,
-          owner,
-          source: "goplus",
-          reason: "burn_percentage_unknown",
-          details,
-        });
-      }
-      if (pctLocked < MIN_LOCKED_PCT) {
-        return result({
-          verdict: "UNLOCKED",
-          method: "goplus_partial_burn",
-          pctLocked,
-          poolAddress,
-          unlockTime,
-          status: "unlocked",
-          removablePct,
-          owner,
-          source: "goplus",
-          reason: "insufficient_liquidity_locked",
-          details,
-        });
-      }
-      return result({
-        verdict: "LOCKED",
-        method: "goplus_burn_address",
-        pctLocked,
-        poolAddress,
-        unlockTime,
-        status: "burned",
-        removablePct,
-        owner,
-        source: "goplus",
-        details,
-      });
-    }
-
-    if (expiryMs != null && expiryMs <= Date.now()) {
-      return result({
+    const mintAuthority = mintInfo.mintAuthority ?? null;
+    const freezeAuthority = mintInfo.freezeAuthority ?? null;
+    if (mintAuthority || freezeAuthority) {
+      return {
         verdict: "UNLOCKED",
-        method: "goplus_lock_expired",
-        pctLocked,
+        method: "onchain_authorities",
+        pctLocked: null,
+        pctBurned: null,
         poolAddress,
-        unlockTime,
+        lpMint: null,
+        unlockTime: null,
+        rawError: null,
         status: "unlocked",
-        removablePct,
-        owner,
-        source: "goplus",
-        reason: "liquidity_lock_expired",
-        details,
-      });
+        removablePct: 100,
+        owner: String(mintAuthority ?? freezeAuthority),
+        source: "onchain",
+        reason: mintAuthority ? "mint_authority_active" : "freeze_authority_active",
+        details: {
+          ...common,
+          mintAuthority,
+          freezeAuthority,
+          authoritiesRenounced: false,
+          resolution: "authority_unsafe",
+        },
+      };
     }
-
-    if (pctLocked != null && pctLocked < MIN_LOCKED_PCT) {
-      return result({
-        verdict: "UNLOCKED",
-        method: "goplus_insufficient_locked_pct",
-        pctLocked,
-        poolAddress,
-        unlockTime,
-        status: "unlocked",
-        removablePct,
-        owner,
-        source: "goplus",
-        reason: "insufficient_liquidity_locked",
-        details,
-      });
-    }
-
-    if ((providerSaysLocked || lockedHolders.length > 0) && pctLocked != null && expiryMs != null && expiryMs > Date.now()) {
-      return result({
-        verdict: "LOCKED",
-        method: "goplus_locker_future_unlock",
-        pctLocked,
-        poolAddress,
-        unlockTime,
-        status: "locked",
-        removablePct,
-        owner,
-        source: "goplus",
-        details,
-      });
-    }
-
-    if (providerSaysUnlocked || pctLocked === 0) {
-      return result({
-        verdict: "UNLOCKED",
-        method: "goplus_explicit_unlocked",
-        pctLocked,
-        poolAddress,
-        unlockTime,
-        status: "unlocked",
-        removablePct,
-        owner,
-        source: "goplus",
-        reason: "provider_reports_unlocked",
-        details,
-      });
-    }
-
-    return result({
-      verdict: "UNKNOWN",
-      method: providerSaysLocked || lockedHolders.length > 0 ? "goplus_lock_metadata_incomplete" : "goplus_lock_state_unrecognized",
-      pctLocked,
-      poolAddress,
-      unlockTime,
-      status: "unknown",
-      removablePct,
-      owner,
-      source: "goplus",
-      reason: "liquidity_lock_unknown",
-      details,
-    });
+    Object.assign(common, { authoritiesRenounced: true });
   } catch (error) {
     const rawError = error instanceof Error ? error.message : String(error);
-    return result({
+    return {
+      verdict: "UNKNOWN",
+      method: "onchain_authorities",
+      pctLocked: null,
+      pctBurned: null,
+      poolAddress,
+      lpMint: null,
+      unlockTime: null,
+      rawError,
+      status: "unknown",
+      removablePct: null,
+      owner: null,
+      source: "unavailable",
+      reason: "authority_check_failed",
+      details: { ...common, authorityError: rawError, resolution: "authority_unresolved" },
+    };
+  }
+
+  let goPlus: LpLockResult;
+  try {
+    const payload = await fetchJson(`${GOPLUS_URL}?contract_addresses=${encodeURIComponent(input.mint)}`);
+    goPlus = classifyLpLock(payload, input.mint, {
+      lockMinPct: MIN_LOCKED_PCT / 100,
+      poolAddress,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    goPlus = {
       verdict: "UNKNOWN",
       method: "goplus_request_failed",
       pctLocked: null,
+      pctBurned: null,
+      pool: poolAddress,
+      unlockTime: null,
+      details: { error: message },
+    };
+  }
+
+  if (goPlus.verdict !== "UNKNOWN") {
+    const resolved = goplusResult(goPlus, poolAddress);
+    resolved.details = { ...common, goplus: goPlus, resolution: "goplus" };
+    return resolved;
+  }
+
+  try {
+    const onchain = await evaluateOnchainLiquiditySafety({
+      connection,
+      mint: input.mint,
       poolAddress,
+      lockMinPct: MIN_LOCKED_PCT,
+      maxTopHolderPct: MAX_TOP_HOLDER_PCT,
+    });
+    return {
+      verdict: onchain.verdict,
+      method: onchain.method,
+      pctLocked: onchain.pctLocked,
+      pctBurned: onchain.pctBurned,
+      poolAddress: onchain.poolAddress,
+      lpMint: onchain.lpMint,
+      unlockTime: null,
+      rawError: null,
+      status: onchain.status,
+      removablePct: onchain.removablePct,
+      owner: onchain.owner,
+      source: "onchain",
+      reason: onchain.reason,
+      details: {
+        ...common,
+        goplus: goPlus,
+        onchain: onchain.details,
+        resolution: "onchain_fallback",
+      },
+    };
+  } catch (error) {
+    const rawError = error instanceof Error ? error.message : String(error);
+    return {
+      verdict: "UNKNOWN",
+      method: "onchain_authorities",
+      pctLocked: null,
+      pctBurned: null,
+      poolAddress,
+      lpMint: null,
       unlockTime: null,
       rawError,
       status: "unknown",
@@ -298,7 +229,12 @@ export async function evaluateLiquiditySafety(input: {
       owner: null,
       source: "unavailable",
       reason: "liquidity_safety_check_failed",
-      details: { ...details, error: rawError },
-    });
+      details: {
+        ...common,
+        goplus: goPlus,
+        onchainError: rawError,
+        resolution: "unresolved",
+      },
+    };
   }
 }
