@@ -242,7 +242,7 @@ export async function evaluateOnchainLiquiditySafety(input: {
       lpMint: null,
       status: "protocol_controlled",
       removablePct: 0,
-      owner: pool.details.poolOwnerProgram as string,
+      owner: typeof pool.details.poolOwnerProgram === "string" ? pool.details.poolOwnerProgram : null,
       reason: null,
       details: { ...authorityDetails, ...pool.details, protocol: pool.protocol },
     };
@@ -265,7 +265,6 @@ export async function evaluateOnchainLiquiditySafety(input: {
       }
     });
     const locker = await lockerOwnedAmount(input.connection, owners, amounts);
-    const securedAmount = burnedAmount + locker.amount;
     const pctBurned = percentage(burnedAmount, supply);
     const pctLocker = percentage(locker.amount, supply);
     const pctLocked = Math.min(100, pctBurned + pctLocker);
@@ -334,7 +333,7 @@ export async function evaluateOnchainLiquiditySafety(input: {
     ...pool.details,
     protocol: pool.protocol,
     topNonPoolHolderPct: topHolderPct,
-    topNonPoolHolderOwner,
+    topNonPoolHolderOwner: topNonPoolOwner,
     concentrationThresholdPct: maxTopHolderPct,
     excludedPoolVaults: [...vaults],
   };
