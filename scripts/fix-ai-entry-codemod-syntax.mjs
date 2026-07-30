@@ -9,6 +9,11 @@ function replaceRequired(before, after, label) {
 }
 
 replaceRequired(
+  '/type Candidate = \\{[\\s\\S]*?\\n\\};\\n\\ntype Ranked = \\{[\\s\\S]*?\\n\\};\\n\\ntype DiscoveryMeta/',
+  '/type Candidate = \\{[\\s\\S]*?\\n\\};\\n\\ntype Ranked = Candidate & \\{[\\s\\S]*?\\n\\};\\n\\ntype DiscoveryMeta/',
+  "candidate type matcher"
+);
+replaceRequired(
   '      `[ai-discovery-trader] entry feature join failed entry_id=${entryId} observation_id=${id}`,',
   '      "[ai-discovery-trader] entry feature join failed entry_id=" + entryId + " observation_id=" + id,',
   "join error log"
