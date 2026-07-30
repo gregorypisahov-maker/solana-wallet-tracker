@@ -62,10 +62,13 @@ const EXTRA_CHAT_IDS = cleanEnv(process.env.TELEGRAM_ALLOWED_CHAT_IDS)
   .map((value) => value.trim())
   .filter(Boolean);
 const AUTHORIZED_CHAT_IDS = new Set([TELEGRAM_CHAT_ID, ...EXTRA_CHAT_IDS].filter(Boolean));
-const POLL_TIMEOUT_SECONDS = 30;
+const POLL_TIMEOUT_SECONDS = 8;
 const CONFLICT_BACKOFF_MIN_MS = 65_000;
 const CONFLICT_BACKOFF_JITTER_MS = 30_000;
-const TELEGRAM_WORKER_VERSION = "2026-07-29-helius-flow-commands";
+const TELEGRAM_FETCH_TIMEOUT_MS = 10_000;
+const TELEGRAM_FETCH_MAX_ATTEMPTS = 5;
+const TELEGRAM_WARNING_INTERVAL_MS = 30_000;
+const TELEGRAM_WORKER_VERSION = "2026-07-30-network-resilient-polling";
 
 if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
   console.error("[telegram-bot] TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID must be set. Exiting.");
@@ -78,6 +81,8 @@ if (!/^\d+:[A-Za-z0-9_-]+$/.test(TELEGRAM_BOT_TOKEN)) {
 
 const tokenFingerprint = `${TELEGRAM_BOT_TOKEN.slice(0, 6)}…${TELEGRAM_BOT_TOKEN.slice(-4)}`;
 let lastUpdateId = 0;
+let tokenValidated = false;
+let nextTokenValidationAt = 0;
 
 interface TelegramMessage {
   chat: { id: number; title?: string; type?: string };
@@ -93,46 +98,201 @@ interface TelegramUpdate {
   message?: TelegramMessage;
   callback_query?: TelegramCallbackQuery;
 }
-interface TelegramUpdatesResponse {
-  ok: boolean;
-  result?: TelegramUpdate[];
+interface TelegramApiEnvelope<T = unknown> {
+  ok?: boolean;
+  result?: T;
   description?: string;
+  error_code?: number;
+  parameters?: { retry_after?: number };
 }
 type InlineButton = { text: string; callback_data?: string; url?: string };
 type InlineKeyboard = { inline_keyboard: InlineButton[][] };
+type TelegramFetchResult<T> = {
+  status: number;
+  responseOk: boolean;
+  body: T | string | null;
+};
+
+const RETRYABLE_TELEGRAM_NETWORK_CODES = new Set([
+  "ETIMEDOUT",
+  "ECONNRESET",
+  "ENOTFOUND",
+  "EAI_AGAIN",
+]);
+const warningState = new Map<string, { count: number; lastLoggedAt: number }>();
+
+function compactError(error: unknown): string {
+  if (error instanceof Error) return error.message || error.name;
+  return String(error);
+}
+
+function networkErrorCode(error: unknown): string | null {
+  const candidate = error as {
+    name?: string;
+    message?: string;
+    cause?: { name?: string; code?: string; message?: string };
+  };
+  if (candidate?.name === "AbortError" || candidate?.cause?.name === "AbortError") {
+    return "AbortError";
+  }
+  const code = candidate?.cause?.code;
+  if (code && RETRYABLE_TELEGRAM_NETWORK_CODES.has(code)) return code;
+  const message = `${candidate?.message ?? ""} ${candidate?.cause?.message ?? ""}`.toLowerCase();
+  return message.includes("fetch failed") ? "FETCH_FAILED" : null;
+}
+
+function warnCollapsed(key: string, message: string, intervalMs = TELEGRAM_WARNING_INTERVAL_MS): void {
+  const now = Date.now();
+  const state = warningState.get(key) ?? { count: 0, lastLoggedAt: 0 };
+  state.count += 1;
+  if (state.lastLoggedAt === 0 || now - state.lastLoggedAt >= intervalMs) {
+    console.warn(`${message} (occurrences=${state.count})`);
+    state.count = 0;
+    state.lastLoggedAt = now;
+  }
+  warningState.set(key, state);
+}
+
+async function sleep(ms: number): Promise<void> {
+  await new Promise<void>((resolve) => setTimeout(resolve, ms));
+}
+
+async function parseTelegramBody(response: Response): Promise<unknown> {
+  const text = await response.text();
+  if (!text) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
+  }
+}
+
+async function fetchTelegram<T = TelegramApiEnvelope>(
+  url: string,
+  options: RequestInit = {}
+): Promise<TelegramFetchResult<T> | null> {
+  for (let attempt = 1; attempt <= TELEGRAM_FETCH_MAX_ATTEMPTS; attempt += 1) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), TELEGRAM_FETCH_TIMEOUT_MS);
+    try {
+      const response = await fetch(url, { ...options, signal: controller.signal });
+      return {
+        status: response.status,
+        responseOk: response.ok,
+        body: (await parseTelegramBody(response)) as T | string | null,
+      };
+    } catch (error) {
+      const code = networkErrorCode(error);
+      if (!code) {
+        warnCollapsed(
+          "telegram-fetch-unexpected",
+          `[telegram-bot] Telegram request failed without retry: ${compactError(error)}`
+        );
+        return null;
+      }
+
+      warnCollapsed(
+        `telegram-network-${code}`,
+        `[telegram-bot] Telegram network unavailable (${code}); retrying attempt ${attempt}/${TELEGRAM_FETCH_MAX_ATTEMPTS}`
+      );
+      if (attempt >= TELEGRAM_FETCH_MAX_ATTEMPTS) return null;
+
+      const baseDelayMs = Math.min(8_000, 500 * 2 ** (attempt - 1));
+      const jitterMs = Math.floor(Math.random() * Math.max(100, Math.floor(baseDelayMs * 0.25)));
+      await sleep(baseDelayMs + jitterMs);
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+  return null;
+}
+
+function envelopeFrom<T>(result: TelegramFetchResult<TelegramApiEnvelope<T>>): TelegramApiEnvelope<T> | null {
+  return result.body && typeof result.body === "object"
+    ? result.body as TelegramApiEnvelope<T>
+    : null;
+}
 
 async function sendToChat(chatId: string, text: string, replyMarkup?: InlineKeyboard): Promise<void> {
-  const response = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      chat_id: chatId,
-      text,
-      parse_mode: "HTML",
-      disable_web_page_preview: true,
-      ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
-    }),
-  });
-  if (!response.ok) throw new Error(`Telegram sendMessage failed: ${response.status} ${await response.text()}`);
+  const result = await fetchTelegram<TelegramApiEnvelope>(
+    `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        chat_id: chatId,
+        text,
+        parse_mode: "HTML",
+        disable_web_page_preview: true,
+        ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
+      }),
+    }
+  );
+  if (!result) {
+    warnCollapsed("telegram-send-deferred", "[telegram-bot] sendMessage deferred: network unavailable");
+    return;
+  }
+  const body = envelopeFrom(result);
+  if (!result.responseOk || body?.ok !== true) {
+    warnCollapsed(
+      `telegram-send-http-${result.status}`,
+      `[telegram-bot] sendMessage rejected: HTTP ${result.status} ${body?.description ?? "unknown response"}`
+    );
+  }
 }
 
 async function answerCallback(callbackQueryId: string): Promise<void> {
-  try {
-    await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/answerCallbackQuery`, {
+  const result = await fetchTelegram<TelegramApiEnvelope>(
+    `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/answerCallbackQuery`,
+    {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ callback_query_id: callbackQueryId }),
-    });
-  } catch (error) {
-    console.warn("[telegram-bot] Could not acknowledge callback:", error);
+    }
+  );
+  if (!result) {
+    warnCollapsed("telegram-callback-deferred", "[telegram-bot] callback acknowledgement deferred: network unavailable");
+    return;
+  }
+  const body = envelopeFrom(result);
+  if (!result.responseOk || body?.ok !== true) {
+    warnCollapsed(
+      `telegram-callback-http-${result.status}`,
+      `[telegram-bot] callback acknowledgement rejected: HTTP ${result.status} ${body?.description ?? "unknown response"}`
+    );
   }
 }
 
 async function validateToken(): Promise<void> {
-  const response = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getMe`);
-  const text = await response.text();
-  if (!response.ok) throw new Error(`Telegram rejected token (${tokenFingerprint}): ${response.status} ${text}`);
-  console.log(`[telegram-bot] Token accepted by Telegram (${tokenFingerprint}).`);
+  const result = await fetchTelegram<TelegramApiEnvelope<{ id: number }>>(
+    `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getMe`
+  );
+  if (!result) {
+    tokenValidated = false;
+    nextTokenValidationAt = Date.now() + TELEGRAM_WARNING_INTERVAL_MS;
+    warnCollapsed(
+      "telegram-token-validation-deferred",
+      "[telegram-bot] token validation deferred: network unavailable, will retry"
+    );
+    return;
+  }
+
+  const body = envelopeFrom(result);
+  if (!result.responseOk || body?.ok !== true) {
+    tokenValidated = false;
+    nextTokenValidationAt = Date.now() + TELEGRAM_WARNING_INTERVAL_MS;
+    warnCollapsed(
+      `telegram-token-validation-http-${result.status}`,
+      `[telegram-bot] token validation rejected: HTTP ${result.status} ${body?.description ?? "unknown response"}`
+    );
+    return;
+  }
+
+  if (!tokenValidated) {
+    console.log(`[telegram-bot] Token accepted by Telegram (${tokenFingerprint}).`);
+  }
+  tokenValidated = true;
+  nextTokenValidationAt = Number.POSITIVE_INFINITY;
 }
 
 async function getUpdates(): Promise<TelegramUpdate[]> {
@@ -141,11 +301,46 @@ async function getUpdates(): Promise<TelegramUpdate[]> {
     `?offset=${lastUpdateId + 1}` +
     `&timeout=${POLL_TIMEOUT_SECONDS}` +
     `&allowed_updates=${encodeURIComponent(JSON.stringify(["message", "callback_query"]))}`;
-  const response = await fetch(url);
-  if (!response.ok) throw new Error(`Telegram getUpdates failed: ${response.status} ${await response.text()}`);
-  const body = (await response.json()) as TelegramUpdatesResponse;
-  if (!body.ok) throw new Error(body.description ?? "Telegram getUpdates failed");
-  return body.result ?? [];
+  const result = await fetchTelegram<TelegramApiEnvelope<TelegramUpdate[]>>(url);
+  if (!result) {
+    warnCollapsed(
+      "telegram-poll-network-unavailable",
+      "[telegram-bot] polling paused: Telegram network unavailable; will retry automatically"
+    );
+    return [];
+  }
+
+  const body = envelopeFrom(result);
+  if (result.status === 409) {
+    const backoff = CONFLICT_BACKOFF_MIN_MS + Math.floor(Math.random() * CONFLICT_BACKOFF_JITTER_MS);
+    warnCollapsed(
+      "telegram-poll-conflict",
+      `[telegram-bot] getUpdates conflict; another poller may be active, backing off ${Math.round(backoff / 1000)}s`
+    );
+    await sleep(backoff);
+    return [];
+  }
+
+  if (result.status === 429) {
+    const retrySeconds = Math.max(1, Number(body?.parameters?.retry_after) || 5);
+    warnCollapsed(
+      "telegram-poll-rate-limit",
+      `[telegram-bot] Telegram rate limited getUpdates; retrying in ${retrySeconds}s`
+    );
+    await sleep(retrySeconds * 1_000);
+    return [];
+  }
+
+  if (!result.responseOk || body?.ok !== true) {
+    warnCollapsed(
+      `telegram-poll-http-${result.status}`,
+      `[telegram-bot] getUpdates rejected: HTTP ${result.status} ${body?.description ?? "unknown response"}`
+    );
+    await sleep(2_000);
+    return [];
+  }
+
+  return Array.isArray(body.result) ? body.result : [];
 }
 
 async function handleResumeScalper(): Promise<string> {
@@ -315,35 +510,49 @@ async function handleUpdate(update: TelegramUpdate): Promise<void> {
   if (update.message?.text) await processCommand(String(update.message.chat.id), normalizeCommand(update.message.text));
 }
 
-function isTelegramConflict(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error);
-  return message.includes("409") && message.toLowerCase().includes("conflict");
-}
-
-async function sleep(ms: number): Promise<void> {
-  await new Promise<void>((resolve) => setTimeout(resolve, ms));
-}
-
 async function pollLoop(): Promise<void> {
   console.log(`[telegram-bot] Starting inbound command listener (${TELEGRAM_WORKER_VERSION})...`);
   console.log("[telegram-bot] Helius commands ready: /helius_stats /helius_positions /helius_trades /helius_pnl /helius_credit /helius_pause /helius_resume");
   await validateToken();
+
   while (true) {
     try {
-      for (const update of await getUpdates()) await handleUpdate(update);
-    } catch (error) {
-      if (isTelegramConflict(error)) {
-        const backoff = CONFLICT_BACKOFF_MIN_MS + Math.floor(Math.random() * CONFLICT_BACKOFF_JITTER_MS);
-        await sleep(backoff);
-        continue;
+      if (!tokenValidated && Date.now() >= nextTokenValidationAt) {
+        await validateToken();
       }
-      console.error("[telegram-bot] Fatal polling error:", error);
-      process.exit(1);
+      const updates = await getUpdates();
+      for (const update of updates) {
+        try {
+          await handleUpdate(update);
+        } catch (error) {
+          warnCollapsed(
+            "telegram-update-handler",
+            `[telegram-bot] update handler failed: ${compactError(error)}; continuing`
+          );
+        }
+      }
+    } catch (error) {
+      warnCollapsed(
+        "telegram-poll-iteration",
+        `[telegram-bot] polling iteration failed: ${compactError(error)}; backing off and continuing`
+      );
+      await sleep(2_000);
     }
   }
 }
 
-pollLoop().catch((error) => {
-  console.error("[telegram-bot] Fatal startup error:", error);
-  process.exit(1);
-});
+async function runPollingSupervisor(): Promise<void> {
+  while (true) {
+    try {
+      await pollLoop();
+    } catch (error) {
+      warnCollapsed(
+        "telegram-poll-supervisor",
+        `[telegram-bot] polling loop stopped unexpectedly: ${compactError(error)}; restarting in 5s`
+      );
+      await sleep(5_000);
+    }
+  }
+}
+
+void runPollingSupervisor();
