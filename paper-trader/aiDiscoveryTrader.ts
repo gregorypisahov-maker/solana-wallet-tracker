@@ -8,12 +8,11 @@ import {
   type JupiterQuoteOnlyResult,
 } from "../lib/jupiterQuote";
 import { PAPER_COST_MODEL } from "./executionCosts";
-import { EXECUTION_PARITY_CONFIG, modelRoundTrip, parseJupiterQuoteLeg } from "./executionParity";
 import { buildAiEntryFeatureSnapshot } from "./aiEntryFeatures";
 import { evaluateLiveEntrySafety } from "../live-executor/liveSafety";
 
 const supabase = getSupabaseAdmin();
-const VERSION = "ai_discovery_trader_v2_execution_parity_2026_07_30";
+const VERSION = "ai_discovery_trader_v1_9_shared_entry_safety_2026_07_28";
 const PAPER_ENTRY_SAFETY_ENABLED = process.env.AI_PAPER_ENTRY_SAFETY_ENABLED !== "false";
 const PAPER_ENTRY_SAFETY_ENFORCE = process.env.AI_PAPER_ENTRY_SAFETY_ENFORCE !== "false";
 const SHADOW_MODEL_VERSION = "baseline_v1_2026_07_24";
@@ -968,34 +967,10 @@ async function closeTrade(
   }
 
   const sizeSol = n(position.size_sol);
-  const entryRaw = (position.entry_snapshot?.entryQuote ?? null) as Record<string, unknown> | null;
-  const entryLeg = parseJupiterQuoteLeg(entryRaw);
-  const exitLeg = parseJupiterQuoteLeg(
-    valuation.rawQuote ?? null,
-    valuation.quoteCallFailed ? (valuation.quoteError ?? "quote_failed") : null
-  );
-  const parity = modelRoundTrip({
-    sizeSol,
-    entry: entryLeg,
-    exit: exitLeg,
-    exitOutLamports: valuation.outLamports,
-  });
-  const proceeds = parity.status === "modeled"
-    ? Math.max(0, valuation.executableSol - parity.cost.knownRoundTripFeeSol)
-    : Math.max(0, valuation.proceedsSol);
+  const proceeds = Math.max(0, valuation.proceedsSol);
   const pnlSol = proceeds - sizeSol;
   const grossPct = sizeSol > 0 ? ((valuation.executableSol / sizeSol) - 1) * 100 : -100;
   const netPct = sizeSol > 0 ? (pnlSol / sizeSol) * 100 : -100;
-  const strategyEntryPrice = n(position.entry_price_usd);
-  const executableEntryPrice = strategyEntryPrice > 0 && entryLeg.status === "available"
-    ? strategyEntryPrice * (sizeSol / Math.max(sizeSol - PAPER_COST_MODEL.networkCostSolPerTransaction, Number.EPSILON))
-    : null;
-  const entryDisadvantagePct = executableEntryPrice && strategyEntryPrice > 0
-    ? ((executableEntryPrice / strategyEntryPrice) - 1) * 100
-    : null;
-  const exitDisadvantagePct = strategyEntryPrice > 0 && valuation.impliedPriceUsd > 0
-    ? ((strategyEntryPrice - valuation.impliedPriceUsd) / strategyEntryPrice) * 100
-    : null;
   const now = new Date().toISOString();
   const state = await loadState();
 
@@ -1018,19 +993,6 @@ async function closeTrade(
     gross_return_pct: grossPct,
     net_return_pct: netPct,
     pnl_sol: pnlSol,
-    modeled_executable_net_return_pct: parity.executableNetReturnPct,
-    modeled_stress_net_return_pct: parity.stressNetReturnPct,
-    modeled_executable_pnl_sol: parity.executablePnlSol,
-    modeled_stress_pnl_sol: parity.stressPnlSol,
-    execution_model_status: parity.status,
-    execution_model_version: parity.modelVersion,
-    entry_executable_price_usd: executableEntryPrice,
-    exit_executable_price_usd: Math.max(0, valuation.impliedPriceUsd),
-    entry_price_disadvantage_pct: entryDisadvantagePct,
-    exit_price_disadvantage_pct: exitDisadvantagePct,
-    entry_price_impact_pct: entryLeg.priceImpactPct,
-    exit_price_impact_pct: exitLeg.priceImpactPct,
-    execution_costs: parity.cost,
     execution_source: valuation.source,
     exit_reason: reason,
     opened_at: position.opened_at,
@@ -1047,15 +1009,6 @@ async function closeTrade(
       slippageBps: QUOTE_SLIPPAGE_BPS,
       quoteError: valuation.quoteError ?? null,
       quote: valuation.rawQuote ?? null,
-      entryExecutableQuote: entryLeg,
-      exitExecutableQuote: exitLeg,
-      executionParity: parity,
-      assumptions: {
-        shadowOnly: EXECUTION_PARITY_CONFIG.shadowOnly,
-        execRiskBpsPerLeg: EXECUTION_PARITY_CONFIG.execRiskBpsPerLeg,
-        routeImpactNotDoubleCounted: true,
-        stressIsAssumptionNotMeasuredMev: true,
-      },
       peakPriceUsd: n(position.peak_price_usd),
     },
   });
@@ -1203,25 +1156,7 @@ async function managePositions(): Promise<void> {
         if (valuation.quoteCallFailed) {
           const nextStreak = failStreak + 1;
           if (nextStreak >= MAX_QUOTE_FAIL_STREAK || heldMs >= MAX_HOLD_MS) {
-            const now = new Date().toISOString();
-            await supabase.from("ai_discovery_state").update({
-              halted: true,
-              halt_reason: "paper_quote_unavailable_requires_review",
-              updated_at: now,
-            }).eq("id", 1);
-            await supabase.from("ai_discovery_positions").update({
-              quote_fail_streak: nextStreak,
-              last_checked_at: now,
-              updated_at: now,
-              entry_snapshot: {
-                ...(position.entry_snapshot ?? {}),
-                executionModelStatus: "exit_quote_failed",
-                executionModelError: valuation.quoteError ?? "quote_failed",
-              },
-            }).eq("position_id", position.position_id);
-            console.error(
-              `[ai-discovery-trader] halted: executable exit quote unavailable for ${position.token_symbol}; no fill fabricated`
-            );
+            await closeTrade(position, valuation, "quote_unavailable_forced_exit");
             continue;
           }
           const now = new Date().toISOString();
