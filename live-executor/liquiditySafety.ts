@@ -1,3 +1,4 @@
+import { PublicKey } from "@solana/web3.js";
 import { getLiveConnection } from "../lib/liveWallet";
 import { classifyLpLock, type LpLockResult } from "./lpLockGoplus";
 import { evaluateOnchainLiquiditySafety } from "./lpLockOnchain";
@@ -85,6 +86,77 @@ export async function evaluateLiquiditySafety(input: {
     minimumLockedPct: MIN_LOCKED_PCT,
     maxTopHolderPct: MAX_TOP_HOLDER_PCT,
   };
+  const connection = getLiveConnection();
+
+  // Authority risk outranks every LP-lock signal. GoPlus may say LOCKED while the
+  // developer can still mint infinite supply or freeze holders, so check chain state first.
+  try {
+    const mintAccount = await connection.getParsedAccountInfo(new PublicKey(input.mint), "confirmed");
+    const mintInfo = (mintAccount.value?.data as any)?.parsed?.info;
+    if (!mintInfo) {
+      return {
+        verdict: "UNKNOWN",
+        method: "onchain_authorities",
+        pctLocked: null,
+        pctBurned: null,
+        poolAddress,
+        lpMint: null,
+        unlockTime: null,
+        rawError: null,
+        status: "unknown",
+        removablePct: null,
+        owner: null,
+        source: "onchain",
+        reason: "mint_account_unreadable",
+        details: { ...common, resolution: "authority_unreadable" },
+      };
+    }
+    const mintAuthority = mintInfo.mintAuthority ?? null;
+    const freezeAuthority = mintInfo.freezeAuthority ?? null;
+    if (mintAuthority || freezeAuthority) {
+      return {
+        verdict: "UNLOCKED",
+        method: "onchain_authorities",
+        pctLocked: null,
+        pctBurned: null,
+        poolAddress,
+        lpMint: null,
+        unlockTime: null,
+        rawError: null,
+        status: "unlocked",
+        removablePct: 100,
+        owner: String(mintAuthority ?? freezeAuthority),
+        source: "onchain",
+        reason: mintAuthority ? "mint_authority_active" : "freeze_authority_active",
+        details: {
+          ...common,
+          mintAuthority,
+          freezeAuthority,
+          authoritiesRenounced: false,
+          resolution: "authority_unsafe",
+        },
+      };
+    }
+    Object.assign(common, { authoritiesRenounced: true });
+  } catch (error) {
+    const rawError = error instanceof Error ? error.message : String(error);
+    return {
+      verdict: "UNKNOWN",
+      method: "onchain_authorities",
+      pctLocked: null,
+      pctBurned: null,
+      poolAddress,
+      lpMint: null,
+      unlockTime: null,
+      rawError,
+      status: "unknown",
+      removablePct: null,
+      owner: null,
+      source: "unavailable",
+      reason: "authority_check_failed",
+      details: { ...common, authorityError: rawError, resolution: "authority_unresolved" },
+    };
+  }
 
   let goPlus: LpLockResult;
   try {
@@ -114,7 +186,7 @@ export async function evaluateLiquiditySafety(input: {
 
   try {
     const onchain = await evaluateOnchainLiquiditySafety({
-      connection: getLiveConnection(),
+      connection,
       mint: input.mint,
       poolAddress,
       lockMinPct: MIN_LOCKED_PCT,
