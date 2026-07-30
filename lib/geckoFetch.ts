@@ -9,6 +9,7 @@ const STALE_CACHE_MS = Math.max(CACHE_MS, Number(process.env.GECKO_FETCH_STALE_C
 const MAX_RETRIES = Math.max(0, Math.min(2, Number(process.env.GECKO_FETCH_MAX_RETRIES ?? 1)));
 const COOLDOWN_MS = Math.max(60_000, Number(process.env.GECKO_FETCH_COOLDOWN_MS ?? 5 * 60_000));
 const REQUEST_TIMEOUT_MS = Math.max(3_000, Number(process.env.GECKO_FETCH_TIMEOUT_MS ?? 12_000));
+const TOKEN_BUCKET_CAPACITY = Math.max(1, Math.min(5, Number(process.env.GECKO_TOKEN_BUCKET_CAPACITY ?? 1)));
 
 class GeckoHttpError extends Error {
   constructor(public readonly status: number, message: string) {
@@ -28,11 +29,32 @@ type CacheRow = { expiresAt: number; staleUntil: number; value: unknown };
 const cache = new Map<string, CacheRow>();
 const inFlight = new Map<string, Promise<unknown>>();
 let queueTail: Promise<void> = Promise.resolve();
-let lastRequestAt = 0;
+let bucketTokens = TOKEN_BUCKET_CAPACITY;
+let bucketUpdatedAt = Date.now();
 let cooldownUntil = 0;
 let lastCooldownLogAt = 0;
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+function refillBucket(): void {
+  const now = Date.now();
+  const elapsed = now - bucketUpdatedAt;
+  if (elapsed < MIN_INTERVAL_MS) return;
+  const tokens = Math.floor(elapsed / MIN_INTERVAL_MS);
+  bucketTokens = Math.min(TOKEN_BUCKET_CAPACITY, bucketTokens + tokens);
+  bucketUpdatedAt += tokens * MIN_INTERVAL_MS;
+}
+
+async function takeToken(): Promise<void> {
+  while (true) {
+    refillBucket();
+    if (bucketTokens >= 1) {
+      bucketTokens -= 1;
+      return;
+    }
+    await sleep(Math.max(25, MIN_INTERVAL_MS - (Date.now() - bucketUpdatedAt)));
+  }
+}
 
 async function waitForTurn(): Promise<void> {
   const previous = queueTail;
@@ -40,13 +62,9 @@ async function waitForTurn(): Promise<void> {
   queueTail = new Promise<void>((resolve) => { release = resolve; });
   await previous;
   try {
-    const waitMs = Math.max(
-      0,
-      MIN_INTERVAL_MS - (Date.now() - lastRequestAt),
-      cooldownUntil - Date.now()
-    );
+    const waitMs = Math.max(0, cooldownUntil - Date.now());
     if (waitMs > 0) await sleep(waitMs);
-    lastRequestAt = Date.now();
+    await takeToken();
   } finally {
     release();
   }

@@ -1,4 +1,5 @@
 import { geckoFetchJson } from "../lib/geckoFetch";
+import { getPriceViaHelius } from "../lib/heliusPrice";
 import { getSupabaseAdmin } from "../lib/supabase";
 import { FetchPriority, fetchJsonQueued } from "./fetchQueue";
 
@@ -19,7 +20,7 @@ const CYCLE_MS = Math.max(15_000, Number(process.env.AI_OUTCOME_CYCLE_MS) || 30_
 
 type Horizon = (typeof HORIZONS)[number];
 type HorizonState = "pending" | "due" | "missed";
-type PriceSource = "dexscreener" | "geckoterminal";
+type PriceSource = "helius" | "cache" | "dexscreener" | "geckoterminal";
 type PriceMeasurement = {
   priceUsd: number;
   measuredAt: string;
@@ -39,6 +40,9 @@ type CycleStats = {
   dexRequests: number;
   dex429: number;
   geckoFallbacks: number;
+  heliusRequests: number;
+  heliusHits: number;
+  heliusCacheHits: number;
 };
 
 let running = false;
@@ -133,12 +137,33 @@ async function pairMeasurement(
   pairAddress: string,
   stats?: CycleStats
 ): Promise<MeasurementAttempt> {
+  if (stats) stats.heliusRequests += 1;
+  const helius = await getPriceViaHelius(mint, pairAddress);
+  if (helius) {
+    if (stats) {
+      stats.heliusHits += 1;
+      if (helius.source === "cache") stats.heliusCacheHits += 1;
+    }
+    console.log(`[outcome-tracker] price ${mint} src=${helius.source} poolProgram=${helius.poolProgram}`);
+    return {
+      measurement: {
+        priceUsd: helius.priceUsd,
+        measuredAt: helius.observedAt,
+        source: helius.source,
+      },
+      error: null,
+      dex429: false,
+      usedFallback: false,
+    };
+  }
+
   let dexError: string | null = null;
   if (stats) stats.dexRequests += 1;
 
   try {
     const measurement = await dexPrice(mint, pairAddress);
     if (measurement) {
+      console.log(`[outcome-tracker] price ${mint} src=dex poolProgram=fallback`);
       return { measurement, error: null, dex429: false, usedFallback: false };
     }
     dexError = "DexScreener pair price unavailable";
@@ -153,6 +178,7 @@ async function pairMeasurement(
     const measurement = await geckoPrice(mint, pairAddress);
     if (measurement) {
       if (stats) stats.geckoFallbacks += 1;
+      console.log(`[outcome-tracker] price ${mint} src=gecko poolProgram=fallback`);
       return { measurement, error: dexError, dex429, usedFallback: true };
     }
     return {
@@ -305,6 +331,9 @@ async function trackDueOutcomes(): Promise<void> {
     dexRequests: 0,
     dex429: 0,
     geckoFallbacks: 0,
+    heliusRequests: 0,
+    heliusHits: 0,
+    heliusCacheHits: 0,
   };
 
   for (const { row } of actionable) {
@@ -394,7 +423,8 @@ async function trackDueOutcomes(): Promise<void> {
   console.log(
     `[outcome-tracker] version=${VERSION} due=${stats.due} measured=${stats.measured} ` +
       `missed=${stats.missed} failed=${stats.failed} dexRequests=${stats.dexRequests} ` +
-      `429=${stats.dex429} geckoFallback=${stats.geckoFallbacks} backlog=${backlog ?? 0}`
+      `429=${stats.dex429} geckoFallback=${stats.geckoFallbacks} ` +
+      `helius=${stats.heliusHits}/${stats.heliusRequests} heliusCache=${stats.heliusCacheHits} backlog=${backlog ?? 0}`
   );
 }
 
