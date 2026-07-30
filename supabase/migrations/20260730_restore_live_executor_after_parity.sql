@@ -5,7 +5,7 @@ begin;
 update public.live_executor_state
 set enabled = true,
     halted = false,
-    halt_reason = null,
+    halt_reason = '',
     max_position_sol = 0.1,
     updated_at = now()
 where id = 1
