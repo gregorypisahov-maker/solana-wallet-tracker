@@ -85,7 +85,7 @@ replaceRequired(
 );
 replaceRequired(
   '      `<a href="https://dexscreener.com/solana/${opportunity.pair_address}">Open chart</a>`,',
-  '      "<a href=\\"https://dexscreener.com/solana/" + opportunity.pair_address + "\\">Open chart</a>",',
+  "      '<a href=\"https://dexscreener.com/solana/' + opportunity.pair_address + '\">Open chart</a>',",
   "telegram chart"
 );
 replaceRequired(
