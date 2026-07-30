@@ -1,9 +1,6 @@
 name: Apply AI entry feature snapshot
 
 on:
-  push:
-    branches:
-      - feat-ai-entry-feature-snapshot-2026-07-30
   pull_request:
     branches:
       - main
@@ -11,9 +8,12 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: ai-entry-feature-snapshot
+  cancel-in-progress: true
+
 jobs:
   apply:
-    if: ${{ github.event_name != 'push' || !contains(github.event.head_commit.message, '[feature-snapshot-output]') }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -45,4 +45,6 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add paper-trader/marketDiscoveryAgent.ts paper-trader/aiDiscoveryTrader.ts paper-trader/aiOutcomeTrackerV10.ts live-executor/liveSafety.ts
           git commit -m "Capture full AI paper entry features [feature-snapshot-output]"
+          git fetch origin feat-ai-entry-feature-snapshot-2026-07-30
+          git rebase origin/feat-ai-entry-feature-snapshot-2026-07-30
           git push origin HEAD:feat-ai-entry-feature-snapshot-2026-07-30
