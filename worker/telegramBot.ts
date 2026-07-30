@@ -21,6 +21,10 @@ import {
   handleHeliusTrades,
 } from "../paper-trader/heliusTelegramCommands";
 import { handleAiStats } from "../paper-trader/aiDiscoveryStats";
+import {
+  handleAiPnl,
+  maybeLogAiPnlHourlySummary,
+} from "../paper-trader/aiPnlScoreboard";
 import { handleBinanceFuturesStats } from "../paper-trader/binanceFuturesStats";
 import { handleWalletScan } from "./walletScanCommand";
 import {
@@ -68,7 +72,7 @@ const CONFLICT_BACKOFF_JITTER_MS = 30_000;
 const TELEGRAM_FETCH_TIMEOUT_MS = 10_000;
 const TELEGRAM_FETCH_MAX_ATTEMPTS = 5;
 const TELEGRAM_WARNING_INTERVAL_MS = 30_000;
-const TELEGRAM_WORKER_VERSION = "2026-07-30-network-resilient-polling";
+const TELEGRAM_WORKER_VERSION = "2026-07-30-network-resilient-ai-pnl";
 
 if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
   console.error("[telegram-bot] TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID must be set. Exiting.");
@@ -371,6 +375,7 @@ async function handleHelp(): Promise<string> {
     "/paperstats — Wallet-based paper trading performance",
     "/scalpstats — Parallel momentum scalper performance",
     "/aistats — AI discovery paper trading performance",
+    "/ai_pnl [14d|30d|72h] — AI paper P&L scoreboard",
     "/binancestats — BTCUSDT futures paper bot",
     "/readiness — Bot readiness check",
     "/heliusstats — Existing Helius monitor usage", "",
@@ -406,7 +411,8 @@ function helpKeyboard(): InlineKeyboard {
   if (/^https:\/\//i.test(DASHBOARD_URL)) rows.push([{ text: "🌐 Command Center", url: DASHBOARD_URL }]);
   rows.push(
     [{ text: "📊 Paper Stats", callback_data: "/paperstats" }, { text: "⚡ Scalp Stats", callback_data: "/scalpstats" }],
-    [{ text: "🧠 AI Stats", callback_data: "/aistats" }, { text: "📉 Binance Paper", callback_data: "/binancestats" }],
+    [{ text: "🧠 AI Stats", callback_data: "/aistats" }, { text: "💰 AI PnL", callback_data: "/ai_pnl" }],
+    [{ text: "📉 Binance Paper", callback_data: "/binancestats" }],
     [{ text: "🧠 Helius Flow", callback_data: "/helius_stats" }, { text: "💰 Helius PnL", callback_data: "/helius_pnl" }],
     [{ text: "✅ Readiness", callback_data: "/readiness" }],
     [{ text: "▶️ Resume Paper", callback_data: "/resume" }, { text: "⚡ Resume Scalp", callback_data: "/resume_scalp" }],
@@ -415,7 +421,9 @@ function helpKeyboard(): InlineKeyboard {
   return { inline_keyboard: rows };
 }
 
-const COMMAND_HANDLERS: Record<string, () => Promise<string>> = {
+type CommandHandler = (args: string[]) => Promise<string>;
+
+const COMMAND_HANDLERS: Record<string, CommandHandler> = {
   "/help": handleHelp,
   "/commands": handleHelp,
   "/start": handleHelp,
@@ -426,6 +434,8 @@ const COMMAND_HANDLERS: Record<string, () => Promise<string>> = {
   "/aistats": handleAiStats,
   "/ai_stats": handleAiStats,
   "/aidiscovery": handleAiStats,
+  "/ai_pnl": (args) => handleAiPnl(args[0]),
+  "/aipnl": (args) => handleAiPnl(args[0]),
   "/binancestats": handleBinanceFuturesStats,
   "/binance_stats": handleBinanceFuturesStats,
   "/futuresstats": handleBinanceFuturesStats,
@@ -468,7 +478,9 @@ function normalizeCommand(text: string): string {
   return text.trim().split(/\s+/)[0].split("@")[0].toLowerCase();
 }
 
-async function processCommand(incomingChatId: string, command: string): Promise<void> {
+async function processCommand(incomingChatId: string, rawText: string): Promise<void> {
+  const command = normalizeCommand(rawText);
+  const args = rawText.trim().split(/\s+/).slice(1);
   if (command === "/chatid") {
     await sendToChat(incomingChatId, [
       "🆔 <b>Telegram chat ID</b>", "", `<code>${incomingChatId}</code>`, "",
@@ -489,7 +501,7 @@ async function processCommand(incomingChatId: string, command: string): Promise<
     return;
   }
   try {
-    const response = await handler();
+    const response = await handler(args);
     const isHelp = command === "/help" || command === "/commands" || command === "/start";
     await sendToChat(incomingChatId, response, isHelp ? helpKeyboard() : undefined);
   } catch (error) {
@@ -503,16 +515,17 @@ async function handleUpdate(update: TelegramUpdate): Promise<void> {
   if (update.callback_query) {
     await answerCallback(update.callback_query.id);
     const chatId = update.callback_query.message ? String(update.callback_query.message.chat.id) : "";
-    const command = update.callback_query.data ? normalizeCommand(update.callback_query.data) : "";
-    if (chatId && command) await processCommand(chatId, command);
+    const rawText = update.callback_query.data ?? "";
+    if (chatId && rawText) await processCommand(chatId, rawText);
     return;
   }
-  if (update.message?.text) await processCommand(String(update.message.chat.id), normalizeCommand(update.message.text));
+  if (update.message?.text) await processCommand(String(update.message.chat.id), update.message.text);
 }
 
 async function pollLoop(): Promise<void> {
   console.log(`[telegram-bot] Starting inbound command listener (${TELEGRAM_WORKER_VERSION})...`);
   console.log("[telegram-bot] Helius commands ready: /helius_stats /helius_positions /helius_trades /helius_pnl /helius_credit /helius_pause /helius_resume");
+  console.log("[telegram-bot] AI PnL command ready: /ai_pnl [14d|30d|72h]");
   await validateToken();
 
   while (true) {
@@ -555,4 +568,6 @@ async function runPollingSupervisor(): Promise<void> {
   }
 }
 
+void maybeLogAiPnlHourlySummary();
+setInterval(() => void maybeLogAiPnlHourlySummary(), 60_000);
 void runPollingSupervisor();
