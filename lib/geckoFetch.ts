@@ -3,13 +3,13 @@ const GECKO_HOST = "api.geckoterminal.com";
 
 // Conservative defaults for GeckoTerminal's public API. These can still be
 // overridden in Railway, but the bot is safe even when no variables are set.
-const MIN_INTERVAL_MS = Math.max(2_500, Number(process.env.GECKO_FETCH_MIN_INTERVAL_MS ?? 4_000));
-const CACHE_MS = Math.max(30_000, Number(process.env.GECKO_FETCH_CACHE_MS ?? 60_000));
-const STALE_CACHE_MS = Math.max(CACHE_MS, Number(process.env.GECKO_FETCH_STALE_CACHE_MS ?? 10 * 60_000));
-const MAX_RETRIES = Math.max(0, Math.min(2, Number(process.env.GECKO_FETCH_MAX_RETRIES ?? 1)));
+const MIN_INTERVAL_MS = Math.max(5_000, Number(process.env.GECKO_FETCH_MIN_INTERVAL_MS ?? 10_000));
+const CACHE_MS = Math.max(60_000, Number(process.env.GECKO_FETCH_CACHE_MS ?? 5 * 60_000));
+const STALE_CACHE_MS = Math.max(CACHE_MS, Number(process.env.GECKO_FETCH_STALE_CACHE_MS ?? 15 * 60_000));
+const MAX_RETRIES = Math.max(0, Math.min(1, Number(process.env.GECKO_FETCH_MAX_RETRIES ?? 0)));
 const COOLDOWN_MS = Math.max(60_000, Number(process.env.GECKO_FETCH_COOLDOWN_MS ?? 5 * 60_000));
 const REQUEST_TIMEOUT_MS = Math.max(3_000, Number(process.env.GECKO_FETCH_TIMEOUT_MS ?? 12_000));
-const TOKEN_BUCKET_CAPACITY = Math.max(1, Math.min(5, Number(process.env.GECKO_TOKEN_BUCKET_CAPACITY ?? 1)));
+const TOKEN_BUCKET_CAPACITY = Math.max(1, Math.min(3, Number(process.env.GECKO_TOKEN_BUCKET_CAPACITY ?? 1)));
 
 class GeckoHttpError extends Error {
   constructor(public readonly status: number, message: string) {
@@ -36,6 +36,10 @@ let lastCooldownLogAt = 0;
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
+export function getGeckoCooldownRemainingMs(): number {
+  return Math.max(0, cooldownUntil - Date.now());
+}
+
 function refillBucket(): void {
   const now = Date.now();
   const elapsed = now - bucketUpdatedAt;
@@ -47,6 +51,9 @@ function refillBucket(): void {
 
 async function takeToken(): Promise<void> {
   while (true) {
+    const cooldownRemainingMs = getGeckoCooldownRemainingMs();
+    if (cooldownRemainingMs > 0) throw new GeckoCooldownError(cooldownRemainingMs);
+
     refillBucket();
     if (bucketTokens >= 1) {
       bucketTokens -= 1;
@@ -59,11 +66,15 @@ async function takeToken(): Promise<void> {
 async function waitForTurn(): Promise<void> {
   const previous = queueTail;
   let release!: () => void;
-  queueTail = new Promise<void>((resolve) => { release = resolve; });
+  queueTail = new Promise<void>((resolve) => {
+    release = resolve;
+  });
   await previous;
   try {
-    const waitMs = Math.max(0, cooldownUntil - Date.now());
-    if (waitMs > 0) await sleep(waitMs);
+    // Never leave requests sleeping in the queue for the full host cooldown.
+    // The caller can immediately use stale cache or another provider instead.
+    const cooldownRemainingMs = getGeckoCooldownRemainingMs();
+    if (cooldownRemainingMs > 0) throw new GeckoCooldownError(cooldownRemainingMs);
     await takeToken();
   } finally {
     release();
@@ -90,8 +101,9 @@ function enterCooldown(response?: Response): number {
 }
 
 async function requestJson(url: string): Promise<unknown> {
-  if (cooldownUntil > Date.now()) {
-    throw new GeckoCooldownError(cooldownUntil - Date.now());
+  const cooldownRemainingMs = getGeckoCooldownRemainingMs();
+  if (cooldownRemainingMs > 0) {
+    throw new GeckoCooldownError(cooldownRemainingMs);
   }
 
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt += 1) {
@@ -141,9 +153,10 @@ export async function geckoFetchJson<T = any>(url: string): Promise<T> {
 
   // During a global cooldown, return a recent stale value instead of creating
   // more traffic or failing the whole trading cycle.
-  if (cooldownUntil > now) {
+  const cooldownRemainingMs = getGeckoCooldownRemainingMs();
+  if (cooldownRemainingMs > 0) {
     if (cached && cached.staleUntil > now) return cached.value as T;
-    throw new GeckoCooldownError(cooldownUntil - now);
+    throw new GeckoCooldownError(cooldownRemainingMs);
   }
 
   const existing = inFlight.get(url);
@@ -194,5 +207,5 @@ globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
 
 console.log(
   `[gecko-gateway] active; minInterval=${MIN_INTERVAL_MS}ms cache=${CACHE_MS}ms ` +
-  `staleCache=${STALE_CACHE_MS}ms retries=${MAX_RETRIES} cooldown=${COOLDOWN_MS}ms`
+    `staleCache=${STALE_CACHE_MS}ms retries=${MAX_RETRIES} cooldown=${COOLDOWN_MS}ms`
 );
