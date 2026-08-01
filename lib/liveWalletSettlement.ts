@@ -1,4 +1,9 @@
 import type { PublicKey } from "@solana/web3.js";
+import {
+  executeJupiterSwap,
+  getLiveConnection,
+  getLiveSigner,
+} from "./liveWallet";
 
 export type WalletSettlementDeltas = {
   solLamportsDelta: bigint;
@@ -29,6 +34,8 @@ type SettlementTransaction = {
     loadedAddresses?: unknown;
   } | null;
 };
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function tokenTotal(
   balances: TokenBalance[] | null | undefined,
@@ -77,4 +84,44 @@ export function walletSettlementFromTransaction(
     solLamportsDelta: BigInt(postLamports) - BigInt(preLamports),
     tokenRawDelta: postToken - preToken,
   };
+}
+
+export async function getConfirmedWalletSettlement(
+  signature: string,
+  tokenMint: string
+): Promise<WalletSettlementDeltas> {
+  const connection = getLiveConnection();
+  const owner = getLiveSigner().publicKey;
+  let lastError = "Confirmed transaction metadata is unavailable";
+  for (let attempt = 1; attempt <= 8; attempt += 1) {
+    try {
+      const transaction = await connection.getTransaction(signature, {
+        maxSupportedTransactionVersion: 0,
+        commitment: "confirmed",
+      });
+      if (transaction) {
+        return walletSettlementFromTransaction(transaction, owner, tokenMint);
+      }
+      lastError = "Confirmed transaction metadata is not indexed yet";
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : String(error);
+    }
+    if (attempt < 8) await sleep(500 * attempt);
+  }
+  throw new Error(`${lastError}: ${signature}`);
+}
+
+export async function executeJupiterSwapWithSettlement(input: {
+  inputMint: string;
+  outputMint: string;
+  rawAmount: string;
+  slippageBps: number;
+  settlementTokenMint: string;
+}) {
+  const result = await executeJupiterSwap(input);
+  const settlement = await getConfirmedWalletSettlement(
+    result.signature,
+    input.settlementTokenMint
+  );
+  return { ...result, settlement };
 }
