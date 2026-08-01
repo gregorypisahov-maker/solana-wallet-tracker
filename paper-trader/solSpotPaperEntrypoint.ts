@@ -1,5 +1,5 @@
 import "dotenv/config";
-import { startSolSpotPaperBot } from "./solSpotPaper";
+import { startSolSpotPaperBootstrap } from "./solSpotPaperBootstrap";
 
 console.log("[sol-spot-paper] isolated paper runtime starting");
-startSolSpotPaperBot();
+void startSolSpotPaperBootstrap();
