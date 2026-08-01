@@ -2,11 +2,21 @@ import { NextRequest, NextResponse } from "next/server";
 import { VersionedTransaction } from "@solana/web3.js";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { hasViewerAccess, unauthorized } from "@/lib/dashboardAuth";
-import { JUPITER_SWAP_BASE_URL, finite, jupiterHeaders } from "@/lib/solSpotLive";
+import { JUPITER_SWAP_BASE_URL, jupiterHeaders } from "@/lib/solSpotLive";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 export const fetchCache = "force-no-store";
+
+function positiveAtomic(value: unknown): string | null {
+  const text = String(value ?? "").trim();
+  if (!/^\d+$/.test(text)) return null;
+  try {
+    return BigInt(text) > 0n ? text : null;
+  } catch {
+    return null;
+  }
+}
 
 export async function POST(request: NextRequest) {
   if (!hasViewerAccess(request)) return unauthorized("Viewer login required");
@@ -47,9 +57,11 @@ export async function POST(request: NextRequest) {
 
   try {
     const transaction = VersionedTransaction.deserialize(Buffer.from(signedTransaction, "base64"));
-    const payer = transaction.message.staticAccountKeys[0]?.toBase58();
+    const message = transaction.message;
+    const payer = ("staticAccountKeys" in message ? message.staticAccountKeys : message.accountKeys)[0]
+      ?.toBase58();
     const signature = transaction.signatures[0];
-    const hasSignature = signature && signature.some((byte) => byte !== 0);
+    const hasSignature = Boolean(signature?.some((byte) => byte !== 0));
     if (payer !== order.wallet_public_key || !hasSignature) {
       return NextResponse.json(
         { error: "Transaction was not signed by the linked wallet" },
@@ -100,11 +112,18 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: `Real swap failed: ${errorText}`, result }, { status: 502 });
   }
 
-  const actualInputAmountAtomic = finite(result.inputAmountResult ?? result.totalInputAmount);
-  const actualOutputAmountAtomic = finite(result.outputAmountResult ?? result.totalOutputAmount);
-  if (actualInputAmountAtomic <= 0 || actualOutputAmountAtomic <= 0) {
+  const actualInputAmountAtomic = positiveAtomic(
+    result.inputAmountResult ?? result.totalInputAmount
+  );
+  const actualOutputAmountAtomic = positiveAtomic(
+    result.outputAmountResult ?? result.totalOutputAmount
+  );
+  if (!actualInputAmountAtomic || !actualOutputAmountAtomic) {
     return NextResponse.json(
-      { error: "Swap confirmed but Jupiter returned invalid execution amounts; inspect the signature" },
+      {
+        error: "Swap confirmed but Jupiter returned invalid execution amounts; inspect the signature",
+        signature: result.signature,
+      },
       { status: 502 }
     );
   }
@@ -115,8 +134,8 @@ export async function POST(request: NextRequest) {
     {
       p_order_id: orderId,
       p_signature: result.signature,
-      p_actual_input_amount_atomic: String(actualInputAmountAtomic),
-      p_actual_output_amount_atomic: String(actualOutputAmountAtomic),
+      p_actual_input_amount_atomic: actualInputAmountAtomic,
+      p_actual_output_amount_atomic: actualOutputAmountAtomic,
       p_result: mergedResult,
     }
   );
