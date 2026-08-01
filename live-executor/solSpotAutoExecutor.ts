@@ -2,23 +2,23 @@ import { randomUUID } from "node:crypto";
 import { getSupabaseAdmin } from "../lib/supabase";
 import { sendTelegramAlert } from "../lib/telegram";
 import {
-  executeJupiterSwap,
   getLiveSigner,
   getLiveWalletHealth,
   getWalletSolLamports,
   getWalletTokenRawAmount,
   SOL_MINT,
 } from "../lib/liveWallet";
+import { executeJupiterSwapWithSettlement } from "../lib/liveWalletSettlement";
 
 export const USDT_MINT = "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB";
 const USDT_DECIMALS = 6;
-const SOL_DECIMALS = 9;
 const LAMPORTS_PER_SOL = 1_000_000_000;
 const USDT_ATOMIC = 1_000_000;
 const POLL_MS = Math.max(2_000, Number(process.env.SOL_SPOT_AUTO_POLL_MS) || 3_000);
 const LEASE_MS = Math.max(8_000, Number(process.env.SOL_SPOT_AUTO_LEASE_REFRESH_MS) || 15_000);
 const LEASE_SECONDS = Math.max(20, Math.min(300, Number(process.env.SOL_SPOT_AUTO_LEASE_SECONDS) || 45));
 const SOL_FEE_RESERVE = Math.max(0.02, Number(process.env.SOL_SPOT_AUTO_SOL_RESERVE) || 0.03);
+const SOL_FEE_RESERVE_LAMPORTS = Math.ceil(SOL_FEE_RESERVE * LAMPORTS_PER_SOL);
 const ENABLED = process.env.ENABLE_SOL_SPOT_AUTO_EXECUTOR !== "false";
 
 type AutoState = {
@@ -146,7 +146,12 @@ async function loadState(): Promise<AutoState> {
 }
 
 async function loadPaperPosition(): Promise<PaperPosition | null> {
-  const { data, error } = await supabase.from("sol_spot_paper_positions").select("position_id,entry_fill_price,stop_loss_price,take_profit_price,opened_at").maybeSingle();
+  const { data, error } = await supabase
+    .from("sol_spot_paper_positions")
+    .select("position_id,entry_fill_price,stop_loss_price,take_profit_price,opened_at")
+    .order("opened_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
   if (error) throw new Error(error.message);
   return (data as PaperPosition | null) ?? null;
 }
@@ -247,9 +252,14 @@ async function confirmOrder(orderId: string, signature: string, outputAmountAtom
 
 async function failOrder(orderId: string, error: unknown): Promise<void> {
   const message = error instanceof Error ? error.message : String(error);
+  const confirmedButUnreconciled = /swap confirmed but settlement/i.test(message);
   await supabase
     .from("sol_spot_auto_orders")
-    .update({ status: "failed", error: message.slice(0, 500), completed_at: new Date().toISOString() })
+    .update({
+      status: confirmedButUnreconciled ? "reconciliation_required" : "failed",
+      error: message.slice(0, 500),
+      completed_at: new Date().toISOString(),
+    })
     .eq("order_id", orderId);
 }
 
@@ -285,27 +295,29 @@ async function adoptExistingSol(state: AutoState, paper: PaperPosition, marketPr
 
 async function bootstrapToUsdt(state: AutoState, marketPrice: number): Promise<void> {
   const wallet = await walletSnapshot();
-  const requested = n(state.bootstrap_sol_amount);
-  const available = Math.max(0, wallet.sol - SOL_FEE_RESERVE);
-  const quantity = Math.min(requested, available);
-  if (quantity <= 0) throw new Error("No SOL is available above the fee reserve");
-  const rawAmount = atomic(quantity, SOL_DECIMALS);
+  const requestedLamports = BigInt(Math.max(0, Math.floor(n(state.bootstrap_sol_amount) * LAMPORTS_PER_SOL)));
+  const availableLamports = BigInt(Math.max(0, wallet.solLamports - SOL_FEE_RESERVE_LAMPORTS));
+  const sellLamports = requestedLamports < availableLamports ? requestedLamports : availableLamports;
+  if (sellLamports <= 0n) throw new Error("No SOL is available above the fee reserve");
+  const rawAmount = sellLamports.toString();
   const orderId = await createOrder({
     side: "bootstrap_sell",
     inputMint: SOL_MINT,
     outputMint: USDT_MINT,
     inputAmountAtomic: rawAmount,
-    metadata: { marketPrice, reason: "one_time_strategy_funding" },
+    metadata: { marketPrice, reason: "one_time_strategy_funding", feeReserveLamports: SOL_FEE_RESERVE_LAMPORTS },
   });
   try {
-    const result = await executeJupiterSwap({
+    const result = await executeJupiterSwapWithSettlement({
       inputMint: SOL_MINT,
       outputMint: USDT_MINT,
       rawAmount,
       slippageBps: state.slippage_bps,
+      settlementTokenMint: USDT_MINT,
     });
-    const outputRaw = String(result.quote.outAmount);
-    const proceeds = Number(outputRaw) / USDT_ATOMIC;
+    if (result.settlement.tokenRawDelta <= 0n) throw new Error("Confirmed bootstrap sell produced no USDT settlement");
+    const outputRaw = result.settlement.tokenRawDelta.toString();
+    const proceeds = Number(result.settlement.tokenRawDelta) / USDT_ATOMIC;
     await confirmOrder(orderId, result.signature, outputRaw);
     await patchState({
       bootstrap_pending: false,
@@ -315,7 +327,7 @@ async function bootstrapToUsdt(state: AutoState, marketPrice: number): Promise<v
     });
     await notify([
       "💵 <b>SOL auto bot funded with USDT</b>",
-      `Sold once: <b>${quantity.toFixed(6)} SOL</b>`,
+      `Sold once: <b>${(Number(sellLamports) / LAMPORTS_PER_SOL).toFixed(6)} SOL</b>`,
       `Received: <b>${proceeds.toFixed(2)} USDT</b>`,
       "The bot is now waiting for a valid SOL entry and will trade automatically.",
       `<a href="https://solscan.io/tx/${encodeURIComponent(result.signature)}">View transaction</a>`,
@@ -343,17 +355,22 @@ async function openFromUsdt(state: AutoState, paper: PaperPosition, marketPrice:
     metadata: { marketPrice, paperEntryPrice: n(paper.entry_fill_price) },
   });
   try {
-    const result = await executeJupiterSwap({
+    const result = await executeJupiterSwapWithSettlement({
       inputMint: USDT_MINT,
       outputMint: SOL_MINT,
       rawAmount,
       slippageBps: state.slippage_bps,
+      settlementTokenMint: USDT_MINT,
     });
-    const inputRaw = String(result.quote.inAmount ?? rawAmount);
-    const outputRaw = String(result.quote.outAmount);
-    const costUsdt = Number(inputRaw) / USDT_ATOMIC;
-    const quantitySol = Number(outputRaw) / LAMPORTS_PER_SOL;
-    if (quantitySol <= 0 || costUsdt <= 0) throw new Error("Confirmed buy returned invalid amounts");
+    const settledSolLamports = result.settlement.solLamportsDelta;
+    const settledUsdtRaw = result.settlement.tokenRawDelta;
+    if (settledSolLamports <= 0n || settledUsdtRaw >= 0n) {
+      throw new Error("Confirmed buy returned invalid wallet settlement deltas");
+    }
+    const outputRaw = settledSolLamports.toString();
+    const costUsdt = Number(-settledUsdtRaw) / USDT_ATOMIC;
+    const quantitySol = Number(settledSolLamports) / LAMPORTS_PER_SOL;
+    if (quantitySol <= 0 || costUsdt <= 0) throw new Error("Confirmed buy returned invalid settled amounts");
     await confirmOrder(orderId, result.signature, outputRaw);
     const positionId = randomUUID();
     const now = new Date().toISOString();
@@ -406,27 +423,47 @@ async function paperExitReason(sourceId: string | null): Promise<string> {
 }
 
 async function closeToUsdt(state: AutoState, position: AutoPosition, exitReason: string): Promise<void> {
-  const quantity = n(position.quantity_sol);
-  const rawAmount = atomic(quantity, SOL_DECIMALS);
-  if (BigInt(rawAmount) <= 0n) throw new Error("Tracked SOL quantity is invalid");
+  const wallet = await walletSnapshot();
+  const trackedLamports = BigInt(Math.max(0, Math.floor(n(position.quantity_sol) * LAMPORTS_PER_SOL)));
+  const availableLamports = BigInt(Math.max(0, wallet.solLamports - SOL_FEE_RESERVE_LAMPORTS));
+  const sellLamports = trackedLamports < availableLamports ? trackedLamports : availableLamports;
+  if (sellLamports <= 0n) throw new Error("No tracked SOL is available above the fee reserve");
+  if (sellLamports < trackedLamports) {
+    console.warn(
+      `[sol-spot-auto] reducing sell from ${trackedLamports} to ${sellLamports} lamports ` +
+        `to preserve ${SOL_FEE_RESERVE_LAMPORTS} fee-reserve lamports`
+    );
+  }
+  const rawAmount = sellLamports.toString();
+  const soldFraction = trackedLamports > 0n ? Number(sellLamports) / Number(trackedLamports) : 0;
+  const trackedQuantity = n(position.quantity_sol);
+  const quantity = Number(sellLamports) / LAMPORTS_PER_SOL;
+  const fullCost = n(position.cost_basis_usdt);
+  const cost = fullCost * Math.min(1, Math.max(0, soldFraction));
   const orderId = await createOrder({
     side: "sell",
     sourcePaperPositionId: position.source_paper_position_id,
     inputMint: SOL_MINT,
     outputMint: USDT_MINT,
     inputAmountAtomic: rawAmount,
-    metadata: { exitReason },
+    metadata: {
+      exitReason,
+      trackedLamports: trackedLamports.toString(),
+      sellLamports: sellLamports.toString(),
+      feeReserveLamports: SOL_FEE_RESERVE_LAMPORTS,
+    },
   });
   try {
-    const result = await executeJupiterSwap({
+    const result = await executeJupiterSwapWithSettlement({
       inputMint: SOL_MINT,
       outputMint: USDT_MINT,
       rawAmount,
       slippageBps: state.slippage_bps,
+      settlementTokenMint: USDT_MINT,
     });
-    const outputRaw = String(result.quote.outAmount);
-    const proceeds = Number(outputRaw) / USDT_ATOMIC;
-    const cost = n(position.cost_basis_usdt);
+    if (result.settlement.tokenRawDelta <= 0n) throw new Error("Confirmed sell produced no USDT settlement");
+    const outputRaw = result.settlement.tokenRawDelta.toString();
+    const proceeds = Number(result.settlement.tokenRawDelta) / USDT_ATOMIC;
     const pnl = proceeds - cost;
     const returnPct = cost > 0 ? (pnl / cost) * 100 : 0;
     await confirmOrder(orderId, result.signature, outputRaw);
@@ -447,7 +484,15 @@ async function closeToUsdt(state: AutoState, position: AutoPosition, exitReason:
       bootstrap: position.bootstrap,
       opened_at: position.opened_at,
       closed_at: closedAt,
-      metadata: { execution: "automatic", venue: "jupiter", outputRaw },
+      metadata: {
+        execution: "automatic",
+        venue: "jupiter",
+        outputRaw,
+        trackedQuantitySol: trackedQuantity,
+        soldQuantitySol: quantity,
+        unsoldReserveQuantitySol: Math.max(0, trackedQuantity - quantity),
+        settlementSolLamportsDelta: result.settlement.solLamportsDelta.toString(),
+      },
     });
     if (tradeError) {
       await supabase.from("sol_spot_auto_orders").update({ status: "reconciliation_required", error: tradeError.message }).eq("order_id", orderId);
@@ -470,6 +515,9 @@ async function closeToUsdt(state: AutoState, position: AutoPosition, exitReason:
       `Received: <b>${proceeds.toFixed(2)} USDT</b>`,
       `Realized P&amp;L: <b>${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)} USDT</b> (${returnPct.toFixed(2)}%)`,
       `Exit: <b>${html(exitReason)}</b>`,
+      sellLamports < trackedLamports
+        ? `Fee reserve kept: <b>${((Number(trackedLamports - sellLamports)) / LAMPORTS_PER_SOL).toFixed(6)} SOL</b>`
+        : "Full tracked quantity settled.",
       "Funds and profit remain in USDT for the next trade or withdrawal.",
       `<a href="https://solscan.io/tx/${encodeURIComponent(result.signature)}">View transaction</a>`,
     ].join("\n"));
