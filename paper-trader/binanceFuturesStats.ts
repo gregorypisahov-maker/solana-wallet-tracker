@@ -10,6 +10,8 @@ const signed = (value: number, digits = 2): string =>
   `${value >= 0 ? "+" : ""}${value.toFixed(digits)}`;
 
 const money = (value: unknown, digits = 2): string => `${finite(value).toFixed(digits)} USDT`;
+const short = (value: string | null | undefined): string =>
+  value ? `${value.slice(0, 5)}…${value.slice(-5)}` : "not linked";
 
 const israelTime = (value: string | null | undefined): string => {
   if (!value || !Number.isFinite(Date.parse(value))) return "—";
@@ -109,6 +111,44 @@ async function loadSpotSection(): Promise<string[]> {
   ];
 }
 
+async function loadLiveWalletSection(): Promise<string[]> {
+  const supabase = getSupabaseAdmin({ noStore: true });
+  const [settingsResult, livePositionResult, paperPositionResult, tradesResult] = await Promise.all([
+    supabase.from("sol_spot_live_settings").select("*").eq("id", 1).maybeSingle(),
+    supabase.from("sol_spot_live_positions").select("*").eq("id", 1).maybeSingle(),
+    supabase.from("sol_spot_paper_positions").select("position_id").maybeSingle(),
+    supabase.from("sol_spot_live_trades").select("pnl_usdt").limit(500),
+  ]);
+  const failed = [settingsResult, livePositionResult, paperPositionResult, tradesResult]
+    .find((result) => result.error);
+  if (failed?.error) return ["🔐 <b>REAL SOL/USDT WALLET</b>", "Status unavailable"];
+
+  const settings = settingsResult.data;
+  const livePosition = livePositionResult.data;
+  const paperPosition = paperPositionResult.data;
+  const armed = Boolean(
+    settings?.armed && settings?.armed_until && Date.parse(settings.armed_until) > Date.now()
+  );
+  const nextAction = livePosition ? (paperPosition ? "HOLD" : "APPROVE SELL") : paperPosition ? "APPROVE BUY" : "WAIT";
+  const pnl = (tradesResult.data ?? []).reduce(
+    (sum: number, trade: any) => sum + finite(trade.pnl_usdt),
+    0
+  );
+
+  return [
+    "🔐 <b>REAL SOL/USDT WALLET</b>",
+    `Wallet: <b>${short(settings?.wallet_public_key)}</b>`,
+    `Mode: <b>${armed ? "🟢 ARMED" : "⚫ DISARMED"}</b>${armed ? ` until ${israelTime(settings?.armed_until)}` : ""}`,
+    `Maximum buy: <b>${money(settings?.max_position_usdt)}</b> · manual wallet approval`,
+    livePosition
+      ? `Tracked position: <b>${finite(livePosition.quantity_sol).toFixed(6)} SOL</b> · cost ${money(livePosition.cost_usdt)}`
+      : "Tracked position: <b>none</b>",
+    `Next action: <b>${nextAction}</b>`,
+    `Completed real PnL: <b>${signed(pnl)} USDT</b>`,
+    "The bot never stores the wallet seed phrase or private key.",
+  ];
+}
+
 async function loadLegacyFuturesSection(): Promise<string[]> {
   const supabase = getSupabaseAdmin({ noStore: true });
   const [stateResult, positionsResult, tradesResult] = await Promise.all([
@@ -130,14 +170,20 @@ async function loadLegacyFuturesSection(): Promise<string[]> {
 }
 
 export async function handleBinanceFuturesStats(): Promise<string> {
-  const [spot, futures] = await Promise.all([loadSpotSection(), loadLegacyFuturesSection()]);
+  const [spot, liveWallet, futures] = await Promise.all([
+    loadSpotSection(),
+    loadLiveWalletSection(),
+    loadLegacyFuturesSection(),
+  ]);
   return [
-    "📊 <b>BINANCE PAPER TRADING</b>",
+    "📊 <b>BINANCE / SOL SPOT TRADING</b>",
     "",
     ...spot,
     "",
+    ...liveWallet,
+    "",
     ...futures,
     "",
-    `🌐 <a href="https://solana-wallet-tracker-murex.vercel.app/platform/binance#sol-spot-paper">Open the Binance dashboard</a>`,
+    `🌐 <a href="https://solana-wallet-tracker-murex.vercel.app/platform/binance#sol-spot-live">Open wallet and real-trade controls</a>`,
   ].join("\n");
 }
