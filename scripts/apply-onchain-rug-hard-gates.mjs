@@ -31,7 +31,7 @@ next = next.replace(
 if (next === source) throw new Error("onchain rug patch: no write performed");
 fs.writeFileSync(path, next);
 const written = fs.readFileSync(path, "utf8");
-if (!written.includes(marker) || !written.includes("resolveOnchainLpSafety") || !written.includes("token2022")) {
+if (!written.includes(marker) || !written.includes("resolveOnchainLpSafety") || !written.includes("resolveTokenControls")) {
   throw new Error("onchain rug patch: post-write verification failed");
 }
 console.log("[onchain-rug-patch] applied and verified");
