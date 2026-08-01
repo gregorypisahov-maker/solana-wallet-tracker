@@ -34,6 +34,9 @@ async function main(): Promise<void> {
 
   const { startLiveExecutor } = await import("./liveExecutor");
   startLiveExecutor();
+
+  const { startSolSpotAutoExecutor } = await import("./solSpotAutoExecutor");
+  startSolSpotAutoExecutor();
 }
 
 void main().catch((error) => {
