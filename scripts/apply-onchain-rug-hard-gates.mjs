@@ -21,7 +21,7 @@ let next = source.replace(
 );
 next = next.replace(
   authorityAnchor,
-  `${authorityAnchor}\n\n    const rugGateEnabled = process.env.LIVE_ONCHAIN_RUG_GATE_ENABLED !== "false";\n    const authorityEnforce = process.env.LIVE_TOKEN2022_AUTHORITY_ENFORCE !== "false";\n    if (rugGateEnabled) {\n      const tokenControls = await resolveTokenControls(input.mint);\n      details.tokenControls = { ...tokenControls, version: ONCHAIN_RUG_SAFETY_VERSION, enforced: authorityEnforce };\n      if (authorityEnforce && !tokenControls.safe) return reject(tokenControls.reason ?? "token_control_unsafe", details);\n    }`
+  `${authorityAnchor}\n\n    const rugGateEnabled = process.env.LIVE_ONCHAIN_RUG_GATE_ENABLED === "true";\n    const authorityEnforce = process.env.LIVE_TOKEN2022_AUTHORITY_ENFORCE !== "false";\n    if (rugGateEnabled) {\n      const tokenControls = await resolveTokenControls(input.mint);\n      details.tokenControls = { ...tokenControls, version: ONCHAIN_RUG_SAFETY_VERSION, enforced: authorityEnforce };\n      if (authorityEnforce && !tokenControls.safe) return reject(tokenControls.reason ?? "token_control_unsafe", details);\n    }`
 );
 next = next.replace(
   lpAnchor,
@@ -34,4 +34,4 @@ const written = fs.readFileSync(path, "utf8");
 if (!written.includes(marker) || !written.includes("resolveOnchainLpSafety") || !written.includes("resolveTokenControls")) {
   throw new Error("onchain rug patch: post-write verification failed");
 }
-console.log("[onchain-rug-patch] applied and verified");
+console.log("[onchain-rug-patch] applied and verified; live gate defaults disabled until replay review");
