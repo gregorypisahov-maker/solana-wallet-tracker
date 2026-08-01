@@ -138,6 +138,6 @@ export async function handleBinanceFuturesStats(): Promise<string> {
     "",
     ...futures,
     "",
-    "🌐 Open the Binance dashboard: /platform/binance",
+    `🌐 <a href="https://solana-wallet-tracker-murex.vercel.app/platform/binance#sol-spot-paper">Open the Binance dashboard</a>`,
   ].join("\n");
 }
