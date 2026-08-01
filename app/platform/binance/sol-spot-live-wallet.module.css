@@ -25,7 +25,7 @@
 .metric small { display: block; margin-top: 5px; color: #6f8197; line-height: 1.3; }
 .passwordRow { margin-top: 16px; padding: 14px; border-radius: 14px; border: 1px solid rgba(148,163,184,.16); background: rgba(255,255,255,.02); }
 .passwordRow label { display: block; color: #9aa8ba; font-size: 12px; font-weight: 750; }
-.passwordRow input { display: block; width: 100%; box-sizing: border-box; margin-top: 8px; border: 1px solid rgba(148,163,184,.28); border-radius: 10px; background: #080d15; color: #fff; padding: 12px; font: inherit; }
+.passwordRow input { display: block; width: 100%; box-sizing: border-box; margin-top: 8px; border: 1px solid rgba(148,163,184,.28); border-radius: 10px; background: #080d15; color: #fff; padding: 12px; font-family: inherit; font-size: 16px; line-height: 1.25; touch-action: manipulation; }
 .passwordRow input:focus { outline: 2px solid rgba(34,197,94,.35); border-color: rgba(34,197,94,.55); }
 .passwordRow small { display: block; margin-top: 8px; color: #718198; line-height: 1.4; }
 .controls, .tradeActions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 16px; }
@@ -36,7 +36,7 @@
 .sizeRow { display: flex; align-items: flex-end; gap: 12px; margin-top: 16px; padding: 14px; border-radius: 14px; border: 1px solid rgba(148,163,184,.14); }
 .sizeRow label { color: #9aa8ba; font-size: 12px; font-weight: 750; }
 .sizeRow label span { display: flex; align-items: center; gap: 7px; margin-top: 7px; color: #cbd5e1; }
-.sizeRow input { width: 100px; border: 1px solid rgba(148,163,184,.24); border-radius: 9px; background: #080d15; color: #fff; padding: 9px 10px; font: inherit; }
+.sizeRow input { width: 100px; border: 1px solid rgba(148,163,184,.24); border-radius: 9px; background: #080d15; color: #fff; padding: 9px 10px; font-family: inherit; font-size: 16px; line-height: 1.25; touch-action: manipulation; }
 .sizeRow small { color: #718198; align-self: center; }
 .tradeActions button { flex: 1 1 250px; min-height: 48px; }
 .position { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-top: 16px; padding: 14px; border-radius: 14px; border: 1px solid rgba(139,92,246,.25); background: rgba(139,92,246,.06); }
