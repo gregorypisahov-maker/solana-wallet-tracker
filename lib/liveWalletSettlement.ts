@@ -19,7 +19,7 @@ type TokenBalance = {
 type SettlementTransaction = {
   transaction: {
     message: {
-      getAccountKeys(input?: unknown): {
+      getAccountKeys(input?: any): {
         length: number;
         get(index: number): PublicKey | undefined;
       };
@@ -31,7 +31,7 @@ type SettlementTransaction = {
     postBalances: number[];
     preTokenBalances?: TokenBalance[] | null;
     postTokenBalances?: TokenBalance[] | null;
-    loadedAddresses?: unknown;
+    loadedAddresses?: any;
   } | null;
 };
 
@@ -99,9 +99,7 @@ export async function getConfirmedWalletSettlement(
         maxSupportedTransactionVersion: 0,
         commitment: "confirmed",
       });
-      if (transaction) {
-        return walletSettlementFromTransaction(transaction, owner, tokenMint);
-      }
+      if (transaction) return walletSettlementFromTransaction(transaction, owner, tokenMint);
       lastError = "Confirmed transaction metadata is not indexed yet";
     } catch (error) {
       lastError = error instanceof Error ? error.message : String(error);
@@ -119,9 +117,14 @@ export async function executeJupiterSwapWithSettlement(input: {
   settlementTokenMint: string;
 }) {
   const result = await executeJupiterSwap(input);
-  const settlement = await getConfirmedWalletSettlement(
-    result.signature,
-    input.settlementTokenMint
-  );
-  return { ...result, settlement };
+  try {
+    const settlement = await getConfirmedWalletSettlement(
+      result.signature,
+      input.settlementTokenMint
+    );
+    return { ...result, settlement };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`Swap confirmed but settlement could not be reconciled: ${message}`);
+  }
 }
