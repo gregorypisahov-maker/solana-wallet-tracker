@@ -5,6 +5,7 @@ import { startAiDiscoveryTrader } from "../paper-trader/aiDiscoveryTrader";
 import { startAiCapitalMirror } from "../paper-trader/aiCapitalMirror";
 import { startAiTradeAutopsyEngine } from "../paper-trader/aiTradeAutopsy";
 import { startAiOutcomeTrackerV10 } from "../paper-trader/aiOutcomeTrackerV10";
+import { startSolSpotPaperBot } from "../paper-trader/solSpotPaper";
 
 // Paper-only AI runtime. AI Discovery and its AI Capital mirror remain controlled
 // by their Supabase state rows. Real-money execution runs only in the dedicated
@@ -15,3 +16,4 @@ startAiDiscoveryTrader();
 startAiOutcomeTrackerV10();
 startAiCapitalMirror();
 startAiTradeAutopsyEngine();
+startSolSpotPaperBot();
