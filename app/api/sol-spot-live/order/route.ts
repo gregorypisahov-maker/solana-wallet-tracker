@@ -3,13 +3,15 @@ import { NextRequest, NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { hasAdminAccess, hasViewerAccess, unauthorized } from "@/lib/dashboardAuth";
 import {
-  JUPITER_SWAP_BASE_URL,
+  JUPITER_LITE_V1_BASE_URL,
+  JUPITER_SWAP_V2_BASE_URL,
   LIVE_ORDER_TTL_SECONDS,
   SOL_DECIMALS,
   SOL_MINT,
   USDT_DECIMALS,
   USDT_MINT,
   finite,
+  hasJupiterApiKey,
   isValidSolanaAddress,
   jupiterHeaders,
   toAtomic,
@@ -19,6 +21,119 @@ export const dynamic = "force-dynamic";
 export const revalidate = 0;
 export const fetchCache = "force-no-store";
 
+async function fetchJson(url: string, init: RequestInit, timeoutMs = 15_000): Promise<{ response: Response; body: any }> {
+  const response = await fetch(url, {
+    ...init,
+    cache: "no-store",
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  return { response, body: await response.json().catch(() => ({})) };
+}
+
+async function buildManagedV2(input: {
+  inputMint: string;
+  outputMint: string;
+  inputAmountAtomic: string;
+  walletPublicKey: string;
+}) {
+  const params = new URLSearchParams({
+    inputMint: input.inputMint,
+    outputMint: input.outputMint,
+    amount: input.inputAmountAtomic,
+    taker: input.walletPublicKey,
+  });
+  const { response, body } = await fetchJson(
+    `${JUPITER_SWAP_V2_BASE_URL}/order?${params.toString()}`,
+    { headers: jupiterHeaders() }
+  );
+  if (!response.ok || !body?.transaction || !body?.requestId) {
+    const detail = body?.error ?? body?.message ?? `Jupiter HTTP ${response.status}`;
+    throw new Error(String(detail).slice(0, 240));
+  }
+  return {
+    transaction: body.transaction as string,
+    requestId: String(body.requestId),
+    inAmount: String(body.inAmount ?? input.inputAmountAtomic),
+    outAmount: body.outAmount == null ? null : String(body.outAmount),
+    otherAmountThreshold: body.otherAmountThreshold == null ? null : String(body.otherAmountThreshold),
+    priceImpactPct: finite(body.priceImpactPct ?? body.priceImpact),
+    router: body.router ?? null,
+    mode: body.mode ?? null,
+    feeBps: body.feeBps ?? body.platformFee?.feeBps ?? null,
+    feeMint: body.feeMint ?? body.platformFee?.feeMint ?? null,
+    lastValidBlockHeight: body.lastValidBlockHeight ?? null,
+    executionMode: "jupiter_v2_managed",
+  };
+}
+
+async function buildLiteV1(input: {
+  inputMint: string;
+  outputMint: string;
+  inputAmountAtomic: string;
+  walletPublicKey: string;
+}) {
+  const quoteParams = new URLSearchParams({
+    inputMint: input.inputMint,
+    outputMint: input.outputMint,
+    amount: input.inputAmountAtomic,
+    slippageBps: "50",
+    restrictIntermediateTokens: "true",
+  });
+  const quoteResult = await fetchJson(
+    `${JUPITER_LITE_V1_BASE_URL}/quote?${quoteParams.toString()}`,
+    { headers: {} }
+  );
+  const quote = quoteResult.body;
+  if (!quoteResult.response.ok || !quote?.outAmount) {
+    const detail = quote?.error ?? quote?.message ?? `Jupiter Lite quote HTTP ${quoteResult.response.status}`;
+    throw new Error(String(detail).slice(0, 240));
+  }
+
+  const swapResult = await fetchJson(
+    `${JUPITER_LITE_V1_BASE_URL}/swap`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        quoteResponse: quote,
+        userPublicKey: input.walletPublicKey,
+        wrapAndUnwrapSol: true,
+        dynamicComputeUnitLimit: true,
+        prioritizationFeeLamports: {
+          priorityLevelWithMaxLamports: {
+            priorityLevel: "high",
+            maxLamports: 500_000,
+            global: false,
+          },
+        },
+      }),
+    }
+  );
+  const swap = swapResult.body;
+  if (!swapResult.response.ok || !swap?.swapTransaction) {
+    const detail = swap?.error ?? swap?.message ?? `Jupiter Lite swap HTTP ${swapResult.response.status}`;
+    throw new Error(String(detail).slice(0, 240));
+  }
+  if (swap?.simulationError) {
+    throw new Error(`Jupiter Lite simulation failed: ${JSON.stringify(swap.simulationError).slice(0, 180)}`);
+  }
+
+  return {
+    transaction: String(swap.swapTransaction),
+    requestId: `lite-${randomUUID()}`,
+    inAmount: String(quote.inAmount ?? input.inputAmountAtomic),
+    outAmount: String(quote.outAmount),
+    otherAmountThreshold: quote.otherAmountThreshold == null ? null : String(quote.otherAmountThreshold),
+    priceImpactPct: finite(quote.priceImpactPct),
+    router: "metis_lite_v1",
+    mode: quote.swapMode ?? "ExactIn",
+    feeBps: quote.platformFee?.feeBps ?? null,
+    feeMint: null,
+    lastValidBlockHeight: swap.lastValidBlockHeight ?? null,
+    executionMode: "rpc_v1_lite",
+  };
+}
+
 export async function POST(request: NextRequest) {
   if (!hasViewerAccess(request)) return unauthorized("Viewer login required");
   if (!hasAdminAccess(request)) return unauthorized("Owner password required");
@@ -26,7 +141,7 @@ export async function POST(request: NextRequest) {
   const body = await request.json().catch(() => ({}));
   const side = String(body.side ?? "").toLowerCase();
   const walletPublicKey = String(body.walletPublicKey ?? "").trim();
-  if (!['buy', 'sell'].includes(side)) {
+  if (!["buy", "sell"].includes(side)) {
     return NextResponse.json({ error: "Side must be buy or sell" }, { status: 400 });
   }
   if (!isValidSolanaAddress(walletPublicKey)) {
@@ -109,41 +224,24 @@ export async function POST(request: NextRequest) {
     paperPositionId = livePosition.paper_position_id ?? paperPositionId;
   }
 
-  const params = new URLSearchParams({
-    inputMint,
-    outputMint,
-    amount: inputAmountAtomic,
-    taker: walletPublicKey,
-  });
-
-  let jupiterResponse: Response;
+  let prepared: Awaited<ReturnType<typeof buildManagedV2>>;
   try {
-    jupiterResponse = await fetch(`${JUPITER_SWAP_BASE_URL}/order?${params.toString()}`, {
-      headers: jupiterHeaders(),
-      cache: "no-store",
-      signal: AbortSignal.timeout(15_000),
-    });
+    prepared = hasJupiterApiKey()
+      ? await buildManagedV2({ inputMint, outputMint, inputAmountAtomic, walletPublicKey })
+      : await buildLiteV1({ inputMint, outputMint, inputAmountAtomic, walletPublicKey });
   } catch (error) {
-    console.error("[sol-spot-live-order] Jupiter request failed", error);
-    return NextResponse.json({ error: "Jupiter market route is unavailable" }, { status: 502 });
-  }
-
-  const order = await jupiterResponse.json().catch(() => ({}));
-  if (!jupiterResponse.ok || !order?.transaction || !order?.requestId) {
-    console.error("[sol-spot-live-order] Jupiter rejected order", jupiterResponse.status, order);
-    const detail = order?.error ?? order?.message ?? `Jupiter HTTP ${jupiterResponse.status}`;
+    console.error("[sol-spot-live-order] Jupiter build failed", error);
     return NextResponse.json(
-      { error: `Could not prepare real swap: ${String(detail).slice(0, 240)}` },
+      { error: `Could not prepare real swap: ${error instanceof Error ? error.message : String(error)}` },
       { status: 502 }
     );
   }
 
-  const priceImpactPct = finite(order.priceImpactPct ?? order.priceImpact);
   const maximumImpactPct = finite(settings.max_price_impact_pct);
-  if (priceImpactPct > maximumImpactPct) {
+  if (prepared.priceImpactPct > maximumImpactPct) {
     return NextResponse.json(
       {
-        error: `Price impact ${priceImpactPct.toFixed(4)}% exceeds the ${maximumImpactPct.toFixed(2)}% safety cap`,
+        error: `Price impact ${prepared.priceImpactPct.toFixed(4)}% exceeds the ${maximumImpactPct.toFixed(2)}% safety cap`,
       },
       { status: 409 }
     );
@@ -152,28 +250,29 @@ export async function POST(request: NextRequest) {
   const orderId = randomUUID();
   const expiresAt = new Date(Date.now() + LIVE_ORDER_TTL_SECONDS * 1000).toISOString();
   const safeQuote = {
-    inAmount: order.inAmount ?? inputAmountAtomic,
-    outAmount: order.outAmount ?? null,
-    otherAmountThreshold: order.otherAmountThreshold ?? null,
-    priceImpactPct,
-    router: order.router ?? null,
-    mode: order.mode ?? null,
-    feeBps: order.feeBps ?? order.platformFee?.feeBps ?? null,
-    feeMint: order.feeMint ?? order.platformFee?.feeMint ?? null,
-    lastValidBlockHeight: order.lastValidBlockHeight ?? null,
+    inAmount: prepared.inAmount,
+    outAmount: prepared.outAmount,
+    otherAmountThreshold: prepared.otherAmountThreshold,
+    priceImpactPct: prepared.priceImpactPct,
+    router: prepared.router,
+    mode: prepared.mode,
+    feeBps: prepared.feeBps,
+    feeMint: prepared.feeMint,
+    lastValidBlockHeight: prepared.lastValidBlockHeight,
+    executionMode: prepared.executionMode,
   };
 
   const { error: insertError } = await supabase.from("sol_spot_live_orders").insert({
     order_id: orderId,
-    request_id: order.requestId,
+    request_id: prepared.requestId,
     wallet_public_key: walletPublicKey,
     side,
     status: "pending_signature",
     input_mint: inputMint,
     output_mint: outputMint,
     input_amount_atomic: inputAmountAtomic,
-    quoted_output_amount_atomic: order.outAmount ?? null,
-    price_impact_pct: priceImpactPct,
+    quoted_output_amount_atomic: prepared.outAmount,
+    price_impact_pct: prepared.priceImpactPct,
     paper_position_id: paperPositionId,
     expires_at: expiresAt,
     result: { quote: safeQuote },
@@ -187,8 +286,8 @@ export async function POST(request: NextRequest) {
     {
       ok: true,
       orderId,
-      requestId: order.requestId,
-      transaction: order.transaction,
+      requestId: prepared.requestId,
+      transaction: prepared.transaction,
       side,
       expiresAt,
       quote: safeQuote,

@@ -1,8 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
-import { VersionedTransaction } from "@solana/web3.js";
+import { Connection, VersionedTransaction } from "@solana/web3.js";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { hasViewerAccess, unauthorized } from "@/lib/dashboardAuth";
-import { JUPITER_SWAP_BASE_URL, jupiterHeaders } from "@/lib/solSpotLive";
+import {
+  JUPITER_SWAP_V2_BASE_URL,
+  SOL_MINT,
+  USDT_MINT,
+  getLiveRpcUrl,
+  jupiterHeaders,
+} from "@/lib/solSpotLive";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -15,6 +21,138 @@ function positiveAtomic(value: unknown): string | null {
     return BigInt(text) > 0n ? text : null;
   } catch {
     return null;
+  }
+}
+
+function atomicDelta(
+  balances: any[] | null | undefined,
+  walletPublicKey: string,
+  mint: string
+): bigint {
+  return (balances ?? []).reduce((total, row) => {
+    if (row?.owner !== walletPublicKey || row?.mint !== mint) return total;
+    const amount = String(row?.uiTokenAmount?.amount ?? "0");
+    return /^\d+$/.test(amount) ? total + BigInt(amount) : total;
+  }, 0n);
+}
+
+async function executeManagedV2(input: {
+  signedTransaction: string;
+  requestId: string;
+  lastValidBlockHeight: unknown;
+}) {
+  const executeBody: Record<string, unknown> = {
+    signedTransaction: input.signedTransaction,
+    requestId: input.requestId,
+  };
+  if (input.lastValidBlockHeight != null) {
+    executeBody.lastValidBlockHeight = String(input.lastValidBlockHeight);
+  }
+
+  const response = await fetch(`${JUPITER_SWAP_V2_BASE_URL}/execute`, {
+    method: "POST",
+    headers: jupiterHeaders(true),
+    body: JSON.stringify(executeBody),
+    cache: "no-store",
+    signal: AbortSignal.timeout(30_000),
+  });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok || result?.status !== "Success" || !result?.signature) {
+    const detail = result?.error ?? result?.message ?? `Jupiter execute HTTP ${response.status}`;
+    throw new Error(String(detail).slice(0, 500));
+  }
+  return result;
+}
+
+async function executeLiteRpc(input: {
+  transaction: VersionedTransaction;
+  transactionBinary: Uint8Array;
+  walletPublicKey: string;
+  side: "buy" | "sell";
+  inputAmountAtomic: string;
+  quotedOutputAmountAtomic: string | null;
+  lastValidBlockHeight: unknown;
+}) {
+  const connection = new Connection(getLiveRpcUrl(), "confirmed");
+  let signature = "";
+  try {
+    signature = await connection.sendRawTransaction(input.transactionBinary, {
+      skipPreflight: false,
+      preflightCommitment: "confirmed",
+      maxRetries: 3,
+    });
+
+    const lastValidBlockHeight = Number(input.lastValidBlockHeight);
+    if (Number.isSafeInteger(lastValidBlockHeight) && lastValidBlockHeight > 0) {
+      const confirmation = await connection.confirmTransaction(
+        {
+          signature,
+          blockhash: input.transaction.message.recentBlockhash,
+          lastValidBlockHeight,
+        },
+        "confirmed"
+      );
+      if (confirmation.value.err) {
+        throw new Error(`Solana transaction failed: ${JSON.stringify(confirmation.value.err)}`);
+      }
+    } else {
+      const confirmation = await connection.confirmTransaction(signature, "confirmed");
+      if (confirmation.value.err) {
+        throw new Error(`Solana transaction failed: ${JSON.stringify(confirmation.value.err)}`);
+      }
+    }
+
+    const landed = await connection.getTransaction(signature, {
+      commitment: "confirmed",
+      maxSupportedTransactionVersion: 0,
+    });
+    if (!landed?.meta || landed.meta.err) {
+      throw new Error(
+        landed?.meta?.err
+          ? `Solana transaction failed: ${JSON.stringify(landed.meta.err)}`
+          : "Confirmed transaction details are unavailable"
+      );
+    }
+
+    const preUsdt = atomicDelta(landed.meta.preTokenBalances, input.walletPublicKey, USDT_MINT);
+    const postUsdt = atomicDelta(landed.meta.postTokenBalances, input.walletPublicKey, USDT_MINT);
+    const usdtDelta = postUsdt - preUsdt;
+    const preLamports = BigInt(landed.meta.preBalances?.[0] ?? 0);
+    const postLamports = BigInt(landed.meta.postBalances?.[0] ?? 0);
+    const feeLamports = BigInt(landed.meta.fee ?? 0);
+    const nativeDeltaExcludingFee = postLamports - preLamports + feeLamports;
+
+    let actualInputAmountAtomic: string | null;
+    let actualOutputAmountAtomic: string | null;
+    if (input.side === "buy") {
+      actualInputAmountAtomic = usdtDelta < 0n ? (-usdtDelta).toString() : input.inputAmountAtomic;
+      actualOutputAmountAtomic =
+        nativeDeltaExcludingFee > 0n
+          ? nativeDeltaExcludingFee.toString()
+          : input.quotedOutputAmountAtomic;
+    } else {
+      actualInputAmountAtomic = input.inputAmountAtomic;
+      actualOutputAmountAtomic = usdtDelta > 0n ? usdtDelta.toString() : input.quotedOutputAmountAtomic;
+    }
+
+    if (!positiveAtomic(actualInputAmountAtomic) || !positiveAtomic(actualOutputAmountAtomic)) {
+      throw new Error("Confirmed swap amounts could not be reconciled");
+    }
+
+    return {
+      status: "Success",
+      signature,
+      inputAmountResult: actualInputAmountAtomic,
+      outputAmountResult: actualOutputAmountAtomic,
+      executionMode: "rpc_v1_lite",
+      slot: landed.slot,
+      feeLamports: Number(feeLamports),
+      inputMint: input.side === "buy" ? USDT_MINT : SOL_MINT,
+      outputMint: input.side === "buy" ? SOL_MINT : USDT_MINT,
+    };
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(signature ? `Transaction ${signature} submitted but not reconciled: ${detail}` : detail);
   }
 }
 
@@ -55,8 +193,11 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Wallet approval expired; prepare a new order" }, { status: 409 });
   }
 
+  let transaction: VersionedTransaction;
+  let transactionBinary: Uint8Array;
   try {
-    const transaction = VersionedTransaction.deserialize(Buffer.from(signedTransaction, "base64"));
+    transactionBinary = Uint8Array.from(Buffer.from(signedTransaction, "base64"));
+    transaction = VersionedTransaction.deserialize(transactionBinary);
     const payer = transaction.message.staticAccountKeys[0]?.toBase58();
     const signature = transaction.signatures[0];
     const hasSignature = Boolean(signature?.some((byte) => byte !== 0));
@@ -71,43 +212,44 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Wallet returned an invalid transaction" }, { status: 400 });
   }
 
-  const executeBody: Record<string, unknown> = { signedTransaction, requestId };
-  const lastValidBlockHeight = order.result?.quote?.lastValidBlockHeight;
-  if (lastValidBlockHeight != null) executeBody.lastValidBlockHeight = String(lastValidBlockHeight);
-
-  let response: Response;
+  const executionMode = String(order.result?.quote?.executionMode ?? "jupiter_v2_managed");
+  let result: any;
   try {
-    response = await fetch(`${JUPITER_SWAP_BASE_URL}/execute`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", ...jupiterHeaders() },
-      body: JSON.stringify(executeBody),
-      cache: "no-store",
-      signal: AbortSignal.timeout(30_000),
-    });
+    result = executionMode === "rpc_v1_lite"
+      ? await executeLiteRpc({
+          transaction,
+          transactionBinary,
+          walletPublicKey: order.wallet_public_key,
+          side: order.side,
+          inputAmountAtomic: String(order.input_amount_atomic),
+          quotedOutputAmountAtomic: order.quoted_output_amount_atomic == null
+            ? null
+            : String(order.quoted_output_amount_atomic),
+          lastValidBlockHeight: order.result?.quote?.lastValidBlockHeight,
+        })
+      : await executeManagedV2({
+          signedTransaction,
+          requestId,
+          lastValidBlockHeight: order.result?.quote?.lastValidBlockHeight,
+        });
   } catch (error) {
-    console.error("[sol-spot-live-execute] Jupiter execute request failed", error);
+    const errorText = String(error instanceof Error ? error.message : error).slice(0, 500);
+    const mayHaveLanded = /Transaction [1-9A-HJ-NP-Za-km-z]+ submitted but not reconciled/.test(errorText);
+    if (!mayHaveLanded) {
+      await supabase
+        .from("sol_spot_live_orders")
+        .update({
+          status: "failed",
+          error: errorText,
+          result: { ...(order.result ?? {}), execution: { error: errorText, executionMode } },
+          executed_at: new Date().toISOString(),
+        })
+        .eq("order_id", orderId);
+    }
     return NextResponse.json(
-      { error: "Jupiter could not submit the signed transaction; check the wallet before retrying" },
+      { error: `Real swap failed: ${errorText}`, reconciliationRequired: mayHaveLanded },
       { status: 502 }
     );
-  }
-
-  const result = await response.json().catch(() => ({}));
-  const success = response.ok && result?.status === "Success" && result?.signature;
-  if (!success) {
-    const errorText = String(
-      result?.error ?? result?.message ?? `Jupiter execute HTTP ${response.status}`
-    ).slice(0, 500);
-    await supabase
-      .from("sol_spot_live_orders")
-      .update({
-        status: "failed",
-        error: errorText,
-        result: { ...(order.result ?? {}), execution: result },
-        executed_at: new Date().toISOString(),
-      })
-      .eq("order_id", orderId);
-    return NextResponse.json({ error: `Real swap failed: ${errorText}`, result }, { status: 502 });
   }
 
   const actualInputAmountAtomic = positiveAtomic(
@@ -119,7 +261,7 @@ export async function POST(request: NextRequest) {
   if (!actualInputAmountAtomic || !actualOutputAmountAtomic) {
     return NextResponse.json(
       {
-        error: "Swap confirmed but Jupiter returned invalid execution amounts; inspect the signature",
+        error: "Swap confirmed but execution amounts could not be reconciled; inspect the signature",
         signature: result.signature,
       },
       { status: 502 }
