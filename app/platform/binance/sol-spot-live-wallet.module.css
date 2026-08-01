@@ -23,6 +23,11 @@
 .metric span, .position span { display: block; color: #8fa0b5; font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }
 .metric strong { display: block; margin-top: 7px; font-size: 17px; color: #f8fafc; }
 .metric small { display: block; margin-top: 5px; color: #6f8197; line-height: 1.3; }
+.passwordRow { margin-top: 16px; padding: 14px; border-radius: 14px; border: 1px solid rgba(148,163,184,.16); background: rgba(255,255,255,.02); }
+.passwordRow label { display: block; color: #9aa8ba; font-size: 12px; font-weight: 750; }
+.passwordRow input { display: block; width: 100%; box-sizing: border-box; margin-top: 8px; border: 1px solid rgba(148,163,184,.28); border-radius: 10px; background: #080d15; color: #fff; padding: 12px; font: inherit; }
+.passwordRow input:focus { outline: 2px solid rgba(34,197,94,.35); border-color: rgba(34,197,94,.55); }
+.passwordRow small { display: block; margin-top: 8px; color: #718198; line-height: 1.4; }
 .controls, .tradeActions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 16px; }
 .controls button, .tradeActions button, .sizeRow button { border: 0; border-radius: 12px; padding: 11px 15px; font-weight: 800; cursor: pointer; background: #202b3b; color: #f8fafc; }
 .controls button:disabled, .tradeActions button:disabled, .sizeRow button:disabled { cursor: not-allowed; opacity: .42; }
