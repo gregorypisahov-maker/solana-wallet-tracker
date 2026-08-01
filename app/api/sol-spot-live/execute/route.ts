@@ -57,9 +57,7 @@ export async function POST(request: NextRequest) {
 
   try {
     const transaction = VersionedTransaction.deserialize(Buffer.from(signedTransaction, "base64"));
-    const message = transaction.message;
-    const payer = ("staticAccountKeys" in message ? message.staticAccountKeys : message.accountKeys)[0]
-      ?.toBase58();
+    const payer = transaction.message.staticAccountKeys[0]?.toBase58();
     const signature = transaction.signatures[0];
     const hasSignature = Boolean(signature?.some((byte) => byte !== 0));
     if (payer !== order.wallet_public_key || !hasSignature) {
