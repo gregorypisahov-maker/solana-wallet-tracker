@@ -11,7 +11,7 @@ const signed = (value: number, digits = 2): string =>
 
 const money = (value: unknown, digits = 2): string => `${finite(value).toFixed(digits)} USDT`;
 const short = (value: string | null | undefined): string =>
-  value ? `${value.slice(0, 5)}…${value.slice(-5)}` : "not linked";
+  value ? `${value.slice(0, 5)}…${value.slice(-5)}` : "not available";
 
 const israelTime = (value: string | null | undefined): string => {
   if (!value || !Number.isFinite(Date.parse(value))) return "—";
@@ -96,13 +96,12 @@ async function loadSpotSection(): Promise<string[]> {
     : "—";
 
   return [
-    "🟣 <b>SOL/USDT SPOT PAPER</b>",
+    "🟣 <b>SOL/USDT MARKET MODEL</b>",
     `Status: <b>${healthLabel(state)}</b>`,
     `Price: <b>${currentPrice > 0 ? `${currentPrice.toFixed(4)} USDT` : "no live price"}</b>`,
-    `Cash: <b>${money(state?.bankroll_usdt)}</b> · Equity: <b>${money(equity)}</b>`,
-    `Realized PnL: <b>${signed(pnl)} USDT</b>`,
-    `Trades: <b>${trades.length}</b> · ${wins}W/${losses}L · Win rate <b>${trades.length ? ((wins / trades.length) * 100).toFixed(1) : "0.0"}%</b>`,
-    `Today: ${state?.entries_today ?? 0} entries · ${signed(finite(state?.daily_realized_pnl_usdt))} USDT`,
+    `Paper cash: <b>${money(state?.bankroll_usdt)}</b> · Equity: <b>${money(equity)}</b>`,
+    `Paper realized PnL: <b>${signed(pnl)} USDT</b>`,
+    `Paper trades: <b>${trades.length}</b> · ${wins}W/${losses}L · Win rate <b>${trades.length ? ((wins / trades.length) * 100).toFixed(1) : "0.0"}%</b>`,
     openLine,
     latestScan
       ? `Latest decision: <b>${String(latestScan.action).replaceAll("_", " ")}</b> · score ${latestScan.score ?? "—"}/${latestScan.threshold ?? "—"}\n${scanReasons}`
@@ -111,79 +110,56 @@ async function loadSpotSection(): Promise<string[]> {
   ];
 }
 
-async function loadLiveWalletSection(): Promise<string[]> {
+async function loadAutoSection(): Promise<string[]> {
   const supabase = getSupabaseAdmin({ noStore: true });
-  const [settingsResult, livePositionResult, paperPositionResult, tradesResult] = await Promise.all([
-    supabase.from("sol_spot_live_settings").select("*").eq("id", 1).maybeSingle(),
-    supabase.from("sol_spot_live_positions").select("*").eq("id", 1).maybeSingle(),
-    supabase.from("sol_spot_paper_positions").select("position_id").maybeSingle(),
-    supabase.from("sol_spot_live_trades").select("pnl_usdt").limit(500),
+  const [stateResult, positionResult, tradesResult] = await Promise.all([
+    supabase.from("sol_spot_auto_state").select("*").eq("id", 1).maybeSingle(),
+    supabase.from("sol_spot_auto_positions").select("*").eq("id", 1).maybeSingle(),
+    supabase.from("sol_spot_auto_trades").select("pnl_usdt,closed_at").order("closed_at", { ascending: false }).limit(500),
   ]);
-  const failed = [settingsResult, livePositionResult, paperPositionResult, tradesResult]
-    .find((result) => result.error);
-  if (failed?.error) return ["🔐 <b>REAL SOL/USDT WALLET</b>", "Status unavailable"];
+  const failed = [stateResult, positionResult, tradesResult].find((result) => result.error);
+  if (failed?.error) return ["🤖 <b>AUTOMATIC REAL SOL/USDT</b>", "Status unavailable"];
 
-  const settings = settingsResult.data;
-  const livePosition = livePositionResult.data;
-  const paperPosition = paperPositionResult.data;
-  const armed = Boolean(
-    settings?.armed && settings?.armed_until && Date.parse(settings.armed_until) > Date.now()
-  );
-  const nextAction = livePosition ? (paperPosition ? "HOLD" : "APPROVE SELL") : paperPosition ? "APPROVE BUY" : "WAIT";
-  const pnl = (tradesResult.data ?? []).reduce(
-    (sum: number, trade: any) => sum + finite(trade.pnl_usdt),
-    0
-  );
-
-  return [
-    "🔐 <b>REAL SOL/USDT WALLET</b>",
-    `Wallet: <b>${short(settings?.wallet_public_key)}</b>`,
-    `Mode: <b>${armed ? "🟢 ARMED" : "⚫ DISARMED"}</b>${armed ? ` until ${israelTime(settings?.armed_until)}` : ""}`,
-    `Maximum buy: <b>${money(settings?.max_position_usdt)}</b> · manual wallet approval`,
-    livePosition
-      ? `Tracked position: <b>${finite(livePosition.quantity_sol).toFixed(6)} SOL</b> · cost ${money(livePosition.cost_usdt)}`
-      : "Tracked position: <b>none</b>",
-    `Next action: <b>${nextAction}</b>`,
-    `Completed real PnL: <b>${signed(pnl)} USDT</b>`,
-    "The bot never stores the wallet seed phrase or private key.",
-  ];
-}
-
-async function loadLegacyFuturesSection(): Promise<string[]> {
-  const supabase = getSupabaseAdmin({ noStore: true });
-  const [stateResult, positionsResult, tradesResult] = await Promise.all([
-    supabase.from("binance_futures_state").select("*").eq("id", 1).maybeSingle(),
-    supabase.from("binance_futures_positions").select("position_id").limit(2),
-    supabase.from("binance_futures_trades").select("net_pnl_usdt").limit(500),
-  ]);
-  const failed = [stateResult, positionsResult, tradesResult].find((result) => result.error);
-  if (failed?.error) return ["₿ <b>BTC FUTURES PAPER</b>", "Status unavailable"];
   const state = stateResult.data;
+  const position = positionResult.data;
   const trades = tradesResult.data ?? [];
-  const pnl = trades.reduce((sum: number, trade: any) => sum + finite(trade.net_pnl_usdt), 0);
+  const heartbeatAge = state?.last_heartbeat_at ? Date.now() - Date.parse(state.last_heartbeat_at) : Number.POSITIVE_INFINITY;
+  const online = Number.isFinite(heartbeatAge) && heartbeatAge < 90_000;
+  const mode = !state?.enabled
+    ? "⚫ DISABLED"
+    : !state?.armed
+      ? "🟠 DISARMED"
+      : online
+        ? `🟢 ${String(state.status ?? "running").replaceAll("_", " ").toUpperCase()}`
+        : "🔴 OFFLINE";
+  const pnl = trades.reduce((sum: number, trade: any) => sum + finite(trade.pnl_usdt), 0);
+
   return [
-    "₿ <b>BTC FUTURES PAPER (LEGACY)</b>",
-    `Status: <b>${healthLabel(state)}</b>`,
-    `Bankroll: <b>${money(state?.bankroll_usdt)}</b> · Open slots: <b>${positionsResult.data?.length ?? 0}</b>`,
-    `Completed: <b>${trades.length}</b> · PnL: <b>${signed(pnl)} USDT</b>`,
+    "🤖 <b>AUTOMATIC REAL SOL/USDT</b>",
+    `Mode: <b>${mode}</b>`,
+    `Wallet: <b>${short(state?.wallet_public_key)}</b>`,
+    `Balances: <b>${finite(state?.sol_balance).toFixed(5)} SOL</b> · <b>${money(state?.usdt_balance)}</b>`,
+    `Maximum trade: <b>${money(state?.max_position_usdt)}</b> · no per-trade approvals`,
+    position
+      ? `Real position: <b>${finite(position.quantity_sol).toFixed(6)} SOL</b> · cost ${money(position.cost_basis_usdt)}`
+      : "Real position: <b>flat — funds remain in USDT</b>",
+    `Realized real PnL: <b>${signed(pnl)} USDT</b>`,
+    `Today: ${state?.daily_entries ?? 0} entries · ${signed(finite(state?.daily_realized_pnl_usdt))} USDT · ${state?.consecutive_losses ?? 0} consecutive losses`,
+    state?.last_error ? `Last error: <code>${String(state.last_error).slice(0, 180)}</code>` : "Last error: none",
+    `Heartbeat: ${israelTime(state?.last_heartbeat_at)} Israel`,
+    "Successful exits settle into USDT and stay there until the next entry or withdrawal.",
   ];
 }
 
 export async function handleBinanceFuturesStats(): Promise<string> {
-  const [spot, liveWallet, futures] = await Promise.all([
-    loadSpotSection(),
-    loadLiveWalletSection(),
-    loadLegacyFuturesSection(),
-  ]);
+  const [spot, automatic] = await Promise.all([loadSpotSection(), loadAutoSection()]);
   return [
-    "📊 <b>BINANCE / SOL SPOT TRADING</b>",
+    "📊 <b>SOL / USDT TRADING</b>",
     "",
     ...spot,
     "",
-    ...liveWallet,
+    ...automatic,
     "",
-    ...futures,
-    "",
-    `🌐 <a href="https://solana-wallet-tracker-murex.vercel.app/platform/binance#sol-spot-live">Open wallet and real-trade controls</a>`,
+    `🌐 <a href="https://solana-wallet-tracker-murex.vercel.app/platform/binance#sol-spot-auto">Open automatic SOL dashboard</a>`,
   ].join("\n");
 }
