@@ -8,7 +8,6 @@ const PUMP_PROGRAM = new PublicKey("6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
 const PUMPSWAP_PROGRAM = new PublicKey("pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA");
 const PUMP_CURVE_DISCRIMINATOR = Buffer.from([23, 183, 248, 55, 96, 216, 172, 96]);
 const PUMPSWAP_POOL_DISCRIMINATOR = Buffer.from([241, 154, 109, 4, 17, 177, 109, 188]);
-const DEX_PRICE_URL = "https://api.dexscreener.com/tokens/v1/solana";
 
 function envFlag(name: string, fallback: boolean): boolean {
   const raw = process.env[name]?.trim().toLowerCase();
@@ -25,20 +24,18 @@ function envNumber(name: string, fallback: number, minimum: number, maximum: num
 export const HELIUS_PRICE_ENABLED = envFlag("HELIUS_PRICE_ENABLED", true);
 export const HELIUS_PRICE_TTL_MS = envNumber("HELIUS_PRICE_TTL_MS", 5_000, 500, 60_000);
 const HELIUS_PRICE_TIMEOUT_MS = envNumber("HELIUS_PRICE_TIMEOUT_MS", 8_000, 2_000, 20_000);
-const DEX_PRICE_FALLBACK_ENABLED = envFlag("HELIUS_PRICE_DEX_FALLBACK_ENABLED", true);
-const DEX_PRICE_FALLBACK_TTL_MS = envNumber("HELIUS_PRICE_DEX_FALLBACK_TTL_MS", 10_000, 1_000, 60_000);
 const HELIUS_API_KEY = process.env.HELIUS_API_KEY?.trim() ?? "";
 const HELIUS_RPC_URL =
   process.env.HELIUS_RPC_URL?.trim() ||
   (HELIUS_API_KEY ? `https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}` : "");
 
-export type HeliusPriceSource = "helius" | "cache" | "dex-fallback";
+export type HeliusPriceSource = "helius" | "cache";
 
 export type HeliusPrice = {
   priceUsd: number;
   priceNative: number;
   source: HeliusPriceSource;
-  poolProgram: "pumpswap" | "pump-bonding-curve" | "helius-das" | "dex-fallback";
+  poolProgram: "pumpswap" | "pump-bonding-curve" | "helius-das";
   poolAddress: string | null;
   quoteMint: string | null;
   observedAt: string;
@@ -217,42 +214,6 @@ async function indexedUsdPrice(mint: string): Promise<number | null> {
   return price;
 }
 
-async function priceFromDexFallback(
-  mint: string,
-  poolAddress?: string | null
-): Promise<HeliusPrice | null> {
-  if (!DEX_PRICE_FALLBACK_ENABLED) return null;
-  try {
-    const body = await fetchJsonQueued(`${DEX_PRICE_URL}/${encodeURIComponent(mint)}`, {
-      timeoutMs: HELIUS_PRICE_TIMEOUT_MS,
-      priority: FetchPriority.HIGH,
-      cacheTtlMs: DEX_PRICE_FALLBACK_TTL_MS,
-    });
-    const pairs = (Array.isArray(body) ? body : []).filter(
-      (item: any) => item?.chainId === "solana" && item?.baseToken?.address === mint
-    );
-    const exact = poolAddress
-      ? pairs.find((item: any) => String(item?.pairAddress ?? "") === poolAddress)
-      : null;
-    const pair = exact ?? pairs.sort(
-      (a: any, b: any) => Number(b?.liquidity?.usd ?? 0) - Number(a?.liquidity?.usd ?? 0)
-    )[0];
-    const priceUsd = positive(pair?.priceUsd);
-    if (!pair || !priceUsd) return null;
-    return {
-      priceUsd,
-      priceNative: priceUsd,
-      source: "dex-fallback",
-      poolProgram: "dex-fallback",
-      poolAddress: String(pair?.pairAddress ?? poolAddress ?? "") || null,
-      quoteMint: String(pair?.quoteToken?.address ?? "") || null,
-      observedAt: new Date().toISOString(),
-    };
-  } catch {
-    return null;
-  }
-}
-
 async function priceFromPumpSwap(
   mint: string,
   poolAddress: string,
@@ -320,28 +281,25 @@ async function priceFromPumpCurve(
 }
 
 async function resolveFresh(mint: string, poolAddress?: string | null): Promise<HeliusPrice | null> {
-  if (!HELIUS_PRICE_ENABLED || !HELIUS_RPC_URL) {
-    return priceFromDexFallback(mint, poolAddress);
-  }
+  if (!HELIUS_PRICE_ENABLED || !HELIUS_RPC_URL) return null;
 
   if (poolAddress) {
     const account = await accountInfo(poolAddress);
     if (account?.owner === PUMPSWAP_PROGRAM.toBase58()) {
-      return (await priceFromPumpSwap(mint, poolAddress, account)) ?? priceFromDexFallback(mint, poolAddress);
+      return priceFromPumpSwap(mint, poolAddress, account);
     }
     if (account?.owner === PUMP_PROGRAM.toBase58()) {
-      return (await priceFromPumpCurve(mint, poolAddress, account)) ?? priceFromDexFallback(mint, poolAddress);
+      return priceFromPumpCurve(mint, poolAddress, account);
     }
-    // Unsupported pools use the same shared queued/cached DexScreener path as
-    // the rest of the worker instead of forcing every caller to issue another
-    // independent request. This keeps fresh candidates from silently vanishing.
-    return priceFromDexFallback(mint, poolAddress);
+    // An unknown or unsupported pool is intentionally a clean null. Never infer
+    // a price from arbitrary bytes or a program layout we do not explicitly decode.
+    return null;
   }
 
   // Indexed DAS prices can be up to ten minutes old, so they are used only when
   // no pool account was supplied. High-frequency callers always provide a pool.
   const priceUsd = await indexedUsdPrice(mint);
-  if (!priceUsd) return priceFromDexFallback(mint, null);
+  if (!priceUsd) return null;
   return {
     priceUsd,
     priceNative: priceUsd,
@@ -379,6 +337,5 @@ export async function getPriceViaHelius(
 
 console.log(
   `[helius-price] enabled=${HELIUS_PRICE_ENABLED} ttlMs=${HELIUS_PRICE_TTL_MS} ` +
-    `rpc=${HELIUS_RPC_URL ? "configured" : "missing"} decoders=pumpswap,pump-bonding-curve ` +
-    `dexFallback=${DEX_PRICE_FALLBACK_ENABLED}`
+    `rpc=${HELIUS_RPC_URL ? "configured" : "missing"} decoders=pumpswap,pump-bonding-curve`
 );
