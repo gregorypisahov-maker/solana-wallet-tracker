@@ -1,0 +1,39 @@
+name: Live Winner Rug Veto
+
+on:
+  pull_request:
+    paths:
+      - "scripts/apply-live-winner-rug-veto.mjs"
+      - "scripts/apply-live-lp-probation-fix.mjs"
+      - "scripts/apply-live-safety-mode-fix.mjs"
+      - "scripts/apply-smart-duplicate-filter.mjs"
+      - "scripts/apply-deployer-blacklist-fix.mjs"
+      - "live-executor/**"
+      - "package.json"
+      - ".github/workflows/live-winner-rug-veto.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --silent
+      - name: Apply live runtime patches
+        run: |
+          node scripts/apply-smart-duplicate-filter.mjs
+          node scripts/apply-live-safety-mode-fix.mjs
+          node scripts/apply-live-lp-probation-fix.mjs
+          node scripts/apply-deployer-blacklist-fix.mjs
+          node scripts/apply-live-winner-rug-veto.mjs
+          node scripts/apply-live-winner-rug-veto.mjs
+      - name: TypeScript check after generated patches
+        run: npm run typecheck

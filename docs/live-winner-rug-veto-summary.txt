@@ -1,0 +1,1 @@
+Live entry strategy stays AI-primary. Canonical PumpSwap pools pass as burned-liquidity pools. Explicit unlocked liquidity blocks. Mature unresolved pools can use configured size. Young unresolved pools use 0.03 SOL and a historical rug-pattern veto. Default live liquidity floor is 40k USD. Existing sellability and portfolio risk controls remain unchanged.
