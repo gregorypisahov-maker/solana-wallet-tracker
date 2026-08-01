@@ -104,9 +104,6 @@ export default function BinanceDashboardPage() {
             <a href="/platform">Platform</a>
           </nav>
         </div>
-        <div className={styles.note}>
-          The legacy Bitcoin futures trader has been removed from this website. This page now shows only the SOL/USDT system.
-        </div>
       </section>
     </main>
   );
