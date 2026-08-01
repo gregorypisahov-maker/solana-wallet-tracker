@@ -128,10 +128,8 @@ export default function SolSpotLiveWallet() {
   }, [data]);
 
   const getOwnerPassword = () => {
-    if (ownerPassword) return ownerPassword;
-    const value = window.prompt("Enter the dashboard owner password");
-    if (!value) throw new Error("Owner password is required");
-    setOwnerPassword(value);
+    const value = ownerPassword.trim();
+    if (!value) throw new Error("Enter the dashboard owner password above");
     return value;
   };
 
@@ -295,6 +293,21 @@ export default function SolSpotLiveWallet() {
         <div className={styles.metric}><span>Linked wallet</span><strong>{short(settings?.wallet_public_key)}</strong><small>{linkedMatches ? "Connected address matches" : "Connect the linked address"}</small></div>
         <div className={styles.metric}><span>Arm expiry</span><strong>{settings?.armed ? israelTime(settings.armed_until) : "Disarmed"}</strong><small>Automatically expires after six hours</small></div>
         <div className={styles.metric}><span>Next action</span><strong>{data?.nextAction?.toUpperCase() ?? "—"}</strong><small>{nextLabel}</small></div>
+      </div>
+
+      <div className={styles.passwordRow}>
+        <label htmlFor="sol-live-owner-password">
+          Dashboard owner password
+          <input
+            id="sol-live-owner-password"
+            type="password"
+            value={ownerPassword}
+            onChange={(event) => setOwnerPassword(event.target.value)}
+            placeholder="Enter owner password"
+            autoComplete="current-password"
+          />
+        </label>
+        <small>Use the dashboard owner/admin password—not your Solflare password, PIN, seed phrase or private key.</small>
       </div>
 
       <div className={styles.controls}>
