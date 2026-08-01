@@ -142,8 +142,8 @@ if (!executor.includes(MARKER)) {
 
   executor = replaceOnce(
     executor,
-    '    expectedTokenAmount,\n  });',
-    `    expectedTokenAmount,\n    sourceEntrySnapshot: (sourcePosition?.entry_snapshot as Record<string, any> | null) ?? null,\n  }); // ${MARKER}`,
+    '    expectedTokenAmount,\n    mode: "live",\n  });',
+    `    expectedTokenAmount,\n    sourceEntrySnapshot: (sourcePosition?.entry_snapshot as Record<string, any> | null) ?? null,\n    mode: "live",\n  }); // ${MARKER}`,
     "source snapshot pass-through"
   );
 
