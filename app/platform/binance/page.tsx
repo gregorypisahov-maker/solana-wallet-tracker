@@ -57,7 +57,7 @@ export default function BinanceDashboardPage() {
         <div className={styles.loading}>
           <div className={styles.coin}>◎</div>
           <h1>SOL/USDT Dashboard</h1>
-          <p>Loading the spot strategy and wallet controls…</p>
+          <p>Loading the market model and automatic execution controls…</p>
         </div>
       </main>
     );
@@ -69,7 +69,7 @@ export default function BinanceDashboardPage() {
         <form onSubmit={login}>
           <div className={styles.coin}>◎</div>
           <h1>SOL/USDT Dashboard</h1>
-          <p>Use the private platform password to view the paper bot and optional wallet-approved real execution.</p>
+          <p>Use the private platform password to view the paper model and automatic real execution.</p>
           <input
             type="password"
             value={password}
@@ -95,12 +95,12 @@ export default function BinanceDashboardPage() {
             <div className={styles.coin}>◎</div>
             <div>
               <h1>SOL/USDT Trading Dashboard</h1>
-              <p>Spot paper strategy with optional wallet-approved real SOL ↔ USDT execution.</p>
+              <p>Market signals, paper validation and optional fully automatic SOL ↔ USDT execution.</p>
             </div>
           </div>
           <nav className={styles.actions} aria-label="SOL dashboard sections">
-            <a href="#sol-spot-paper">Paper bot</a>
-            <a href="#sol-spot-live">Wallet controls</a>
+            <a href="#sol-spot-paper">Paper model</a>
+            <a href="#sol-spot-auto">Automatic trading</a>
             <a href="/platform">Platform</a>
           </nav>
         </div>

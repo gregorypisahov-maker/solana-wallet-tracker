@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import SolSpotPanel from "./SolSpotPanel";
-import SolSpotLiveWallet from "./SolSpotLiveWallet";
+import SolSpotAutoPanel from "./SolSpotAutoPanel";
 
 export default function BinanceLayout({ children }: { children: ReactNode }) {
   return (
@@ -8,7 +8,7 @@ export default function BinanceLayout({ children }: { children: ReactNode }) {
       {children}
       <SolSpotPanel />
       <section
-        id="sol-spot-live"
+        id="sol-spot-auto"
         style={{
           background: "#070b12",
           padding: "0 18px calc(180px + env(safe-area-inset-bottom, 0px))",
@@ -18,7 +18,7 @@ export default function BinanceLayout({ children }: { children: ReactNode }) {
         }}
       >
         <div style={{ maxWidth: 1440, margin: "0 auto" }}>
-          <SolSpotLiveWallet />
+          <SolSpotAutoPanel />
         </div>
       </section>
     </>
