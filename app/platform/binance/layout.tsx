@@ -7,7 +7,7 @@ export default function BinanceLayout({ children }: { children: ReactNode }) {
     <>
       {children}
       <SolSpotPanel />
-      <section style={{ background: "#070b12", padding: "0 18px 56px", color: "#f4f7fb" }}>
+      <section id="sol-spot-live" style={{ background: "#070b12", padding: "0 18px 56px", color: "#f4f7fb" }}>
         <div style={{ maxWidth: 1440, margin: "0 auto" }}>
           <SolSpotLiveWallet />
         </div>
