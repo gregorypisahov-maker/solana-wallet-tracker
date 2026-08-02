@@ -6,7 +6,7 @@
     "dev": "next dev",
     "build": "node scripts/cleanNextBuild.mjs && node scripts/patch-ai-discovery-dashboard.mjs && node scripts/patch-ai-capital-paper.mjs && node scripts/prepare-background-music.mjs && next build",
     "start": "next start",
-    "single-bot": "node scripts/patch-market-bot-paper-default.mjs && node scripts/patch-single-market-bot-keyless.mjs && node scripts/patch-single-market-bot-store.mjs && node scripts/patch-single-market-bot-stablecoins.mjs && node scripts/patch-single-market-bot-telegram.mjs && node scripts/patch-single-market-bot-alert-format.mjs && tsx single-bot/marketBot.ts",
+    "single-bot": "node scripts/patch-market-bot-paper-default.mjs && node scripts/patch-single-market-bot-keyless.mjs && node scripts/patch-single-market-bot-store.mjs && node scripts/patch-single-market-bot-stablecoins.mjs && node scripts/patch-single-market-bot-telegram.mjs && tsx single-bot/marketBot.ts",
     "worker": "node scripts/retired-service.mjs worker",
     "paper-trader": "node scripts/retired-service.mjs paper-trader",
     "worker:dev": "node scripts/retired-service.mjs worker-dev",
