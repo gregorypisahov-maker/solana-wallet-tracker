@@ -1,0 +1,50 @@
+name: One-time SOL spot tuning
+
+on:
+  push:
+    paths:
+      - '.github/workflows/one-time-tune-sol-spot.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  tune:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Tune SOL spot cadence and exits
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('paper-trader/solSpotPaper.ts')
+          s = p.read_text()
+          replacements = {
+              'entryScoreThreshold: Math.round(numberEnv("SOL_SPOT_ENTRY_SCORE", 6, 4, 9))': 'entryScoreThreshold: Math.round(numberEnv("SOL_SPOT_ENTRY_SCORE", 5, 4, 9))',
+              'rewardRiskMultiple: numberEnv("SOL_SPOT_REWARD_RISK", 1.8, 1, 5)': 'rewardRiskMultiple: numberEnv("SOL_SPOT_REWARD_RISK", 1.5, 1, 5)',
+              'trailingActivationR: numberEnv("SOL_SPOT_TRAILING_ACTIVATION_R", 1, 0.5, 3)': 'trailingActivationR: numberEnv("SOL_SPOT_TRAILING_ACTIVATION_R", 0.75, 0.5, 3)',
+              'trailingGivebackPct: numberEnv("SOL_SPOT_TRAILING_GIVEBACK_PCT", 0.6, 0.15, 3)': 'trailingGivebackPct: numberEnv("SOL_SPOT_TRAILING_GIVEBACK_PCT", 0.45, 0.15, 3)',
+              'maxHoldMinutes: numberEnv("SOL_SPOT_MAX_HOLD_MINUTES", 360, 15)': 'maxHoldMinutes: numberEnv("SOL_SPOT_MAX_HOLD_MINUTES", 120, 15)',
+              'cooldownMinutes: numberEnv("SOL_SPOT_COOLDOWN_MINUTES", 30, 0)': 'cooldownMinutes: numberEnv("SOL_SPOT_COOLDOWN_MINUTES", 5, 0)',
+              'maxDailyEntries: Math.round(numberEnv("SOL_SPOT_MAX_DAILY_ENTRIES", 8, 1, 50))': 'maxDailyEntries: Math.round(numberEnv("SOL_SPOT_MAX_DAILY_ENTRIES", 16, 1, 50))',
+              'strategyVersion: "sol_spot_trend_v1_2026_08_01"': 'strategyVersion: "sol_spot_trend_v2_2026_08_02"',
+          }
+          for old, new in replacements.items():
+              if old not in s:
+                  raise SystemExit(f'missing expected anchor: {old}')
+              s = s.replace(old, new)
+          p.write_text(s)
+          PY
+          rm .github/workflows/one-time-tune-sol-spot.yml
+      - name: Commit tuning
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add paper-trader/solSpotPaper.ts .github/workflows/one-time-tune-sol-spot.yml
+          git commit -m 'fix: accelerate SOL spot entries and exits'
+          git push origin main
