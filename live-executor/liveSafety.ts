@@ -187,12 +187,14 @@ export async function evaluateLiveEntrySafety(input: {
     if (paperCall || LP_SAFETY_ENABLED) {
       const liquiditySafety = await evaluateLiquiditySafety({ mint: input.mint, pairAddress: pair?.pairAddress ?? null, dexId: pair?.dexId ?? null });
       const enforce = liveCall ? LIVE_LP_SAFETY_ENFORCE : LP_LOCK_ENFORCE;
-      const blockOnUnknown = liveCall ? true : LP_LOCK_BLOCK_ON_UNKNOWN;
+      const blockOnUnknown = liveCall ? true : false;
       const action = !enforce
         ? liquiditySafety.verdict === "LOCKED" ? "pass" : "shadow_would_block"
         : liquiditySafety.verdict === "UNLOCKED" || (liquiditySafety.verdict === "UNKNOWN" && blockOnUnknown)
           ? "block"
-          : "pass";
+          : liquiditySafety.verdict === "UNKNOWN"
+            ? "probation"
+            : "pass";
       const lpLock = {
         verdict: liquiditySafety.verdict,
         method: liquiditySafety.method,
