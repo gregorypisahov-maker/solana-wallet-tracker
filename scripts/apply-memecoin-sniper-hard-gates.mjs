@@ -3,58 +3,206 @@ import fs from "node:fs";
 const target = new URL("../paper-trader/aiDiscoveryTrader.ts", import.meta.url);
 let source = fs.readFileSync(target, "utf8");
 
-const replaceRegex = (pattern, replacement, label) => {
-  if (source.includes(replacement)) return;
-  if (!pattern.test(source)) {
-    console.warn(`[runtime-patch] sniper anchor already transformed or unavailable: ${label}`);
-    return;
-  }
+const replaceOnce = (pattern, replacement, appliedMarker, label) => {
+  if (source.includes(appliedMarker)) return;
+  if (!pattern.test(source)) throw new Error(`missing patch anchor: ${label}`);
   source = source.replace(pattern, replacement);
 };
 
-replaceRegex(
+replaceOnce(
   /const VERSION = "[^"]+";/,
+  'const VERSION = "ai_memecoin_sniper_v1_hard_gates_2026_08_02";',
   'const VERSION = "ai_memecoin_sniper_v1_hard_gates_2026_08_02";',
   "version"
 );
-replaceRegex(/const MIN_SCORE = \d+;/, 'const MIN_SCORE = 86;', "minimum score");
-replaceRegex(
+replaceOnce(/const MIN_SCORE = \d+;/, 'const MIN_SCORE = 86;', 'const MIN_SCORE = 86;', "minimum score");
+replaceOnce(
   /const MAX_OPPORTUNITY_AGE_MS = [^;]+;/,
+  'const MAX_OPPORTUNITY_AGE_MS = 90_000;',
   'const MAX_OPPORTUNITY_AGE_MS = 90_000;',
   "opportunity age"
 );
-replaceRegex(/const COOLDOWN_MS = [^;]+;/, 'const COOLDOWN_MS = 30 * 60_000;', "cooldown");
-replaceRegex(/const HARD_STOP_PCT = [^;]+;/, 'const HARD_STOP_PCT = -3.5;', "hard stop");
-replaceRegex(/const TAKE_PROFIT_PCT = [^;]+;/, 'const TAKE_PROFIT_PCT = 6;', "take profit");
-replaceRegex(/const TRAIL_ARM_PCT = [^;]+;/, 'const TRAIL_ARM_PCT = 2.5;', "trail arm");
-replaceRegex(/const TRAIL_DISTANCE_PCT = [^;]+;/, 'const TRAIL_DISTANCE_PCT = 1.5;', "trail distance");
-replaceRegex(/const MAX_HOLD_MS = [^;]+;/, 'const MAX_HOLD_MS = 12 * 60_000;', "max hold");
-
-if (!source.includes("async function passesDeployerGate(")) {
-  const anchor = "async function openTrade(\n";
-  if (source.includes(anchor)) {
-    const helper = `async function passesDeployerGate(mint: string): Promise<{ passed: boolean; reason: string; deployer: string | null }> {\n  const { data: mapping, error: mappingError } = await supabase\n    .from("deployer_by_mint")\n    .select("deployer,resolved_at")\n    .eq("mint", mint)\n    .maybeSingle();\n  if (mappingError) throw new Error(mappingError.message);\n  const deployer = mapping?.deployer ? String(mapping.deployer) : null;\n  if (!deployer) return { passed: false, reason: "deployer_unresolved", deployer: null };\n\n  const { data: reputation, error: reputationError } = await supabase\n    .from("deployer_reputation")\n    .select("rugs,tokens_seen,last_rug_at")\n    .eq("deployer", deployer)\n    .maybeSingle();\n  if (reputationError) throw new Error(reputationError.message);\n  if (Number(reputation?.rugs ?? 0) > 0) {\n    return { passed: false, reason: "deployer_prior_rug", deployer };\n  }\n  return { passed: true, reason: "deployer_clean", deployer };\n}\n\nasync function openTrade(\n`;
-    source = source.replace(anchor, helper);
-  } else {
-    console.warn("[runtime-patch] sniper anchor already transformed or unavailable: deployer helper");
-  }
-}
-
-if (!source.includes("const heliusWouldBlock = safety.details?.heliusWouldBlock === true;")) {
-  const safetyPattern = /          opportunity\.entry_safety = \{ passed: safety\.passed, reason: safety\.reason, \.\.\.safety\.details \};\n          if \(!safety\.passed && PAPER_ENTRY_SAFETY_ENFORCE\) \{[^\n]+\n/;
-  const safetyReplacement = `          opportunity.entry_safety = { passed: safety.passed, reason: safety.reason, ...safety.details };\n          const heliusWouldBlock = safety.details?.heliusWouldBlock === true;\n          const lpAction = String((safety.details?.lp_lock as any)?.action ?? "");\n          if (!safety.passed || heliusWouldBlock || lpAction === "block" || lpAction === "shadow_would_block") {\n            const reason = safety.reason ?? (heliusWouldBlock ? "helius_not_trade_eligible" : "liquidity_not_proven_safe");\n            console.warn(\`[ai-discovery-trader] sniper hard-block \${opportunity.token_symbol ?? opportunity.mint}: \${reason}\`);\n            continue;\n          }\n\n          const deployerGate = await passesDeployerGate(opportunity.mint);\n          opportunity.deployer_gate = deployerGate;\n          if (!deployerGate.passed) {\n            console.warn(\`[ai-discovery-trader] sniper hard-block \${opportunity.token_symbol ?? opportunity.mint}: \${deployerGate.reason}\`);\n            continue;\n          }\n\n          await sleep(1_500);\n          const confirmation = await evaluateLiveEntrySafety({ mint: opportunity.mint, sizeSol: FIXED_SIZE_SOL, slippageBps: QUOTE_SLIPPAGE_BPS, mode: "paper" });\n          const confirmationHeliusBlock = confirmation.details?.heliusWouldBlock === true;\n          const confirmationLpAction = String((confirmation.details?.lp_lock as any)?.action ?? "");\n          if (!confirmation.passed || confirmationHeliusBlock || confirmationLpAction === "block" || confirmationLpAction === "shadow_would_block") {\n            console.warn(\`[ai-discovery-trader] sniper confirmation failed \${opportunity.token_symbol ?? opportunity.mint}: \${confirmation.reason ?? "unstable_safety_state"}\`);\n            continue;\n          }\n`;
-  if (safetyPattern.test(source)) source = source.replace(safetyPattern, safetyReplacement);
-  else console.warn("[runtime-patch] sniper anchor already transformed or unavailable: hard safety gate");
-}
-
-source = source.replace(
-  /    60_000\n  \);\n  setInterval\(\n    \(\) =>\n      void managePositions\(\)/,
-  '    15_000\n  );\n  setInterval(\n    () =>\n      void managePositions()'
+replaceOnce(
+  /const COOLDOWN_MS = [^;]+;/,
+  'const COOLDOWN_MS = 30 * 60_000;',
+  'const COOLDOWN_MS = 30 * 60_000;',
+  "cooldown"
 );
-source = source.replace(
+replaceOnce(/const HARD_STOP_PCT = [^;]+;/, 'const HARD_STOP_PCT = -3.5;', 'const HARD_STOP_PCT = -3.5;', "hard stop");
+replaceOnce(/const TAKE_PROFIT_PCT = [^;]+;/, 'const TAKE_PROFIT_PCT = 6;', 'const TAKE_PROFIT_PCT = 6;', "take profit");
+replaceOnce(/const TRAIL_ARM_PCT = [^;]+;/, 'const TRAIL_ARM_PCT = 2.5;', 'const TRAIL_ARM_PCT = 2.5;', "trail arm");
+replaceOnce(
+  /const TRAIL_DISTANCE_PCT = [^;]+;/,
+  'const TRAIL_DISTANCE_PCT = 1.5;',
+  'const TRAIL_DISTANCE_PCT = 1.5;',
+  "trail distance"
+);
+replaceOnce(
+  /const MAX_HOLD_MS = [^;]+;/,
+  'const MAX_HOLD_MS = 12 * 60_000;',
+  'const MAX_HOLD_MS = 12 * 60_000;',
+  "max hold"
+);
+
+replaceOnce(
+  /import \{ evaluateLiveEntrySafety \} from "\.\.\/live-executor\/liveSafety";/,
+  `import { evaluateLiveEntrySafety } from "../live-executor/liveSafety";
+import { resolveDeployer } from "../lib/deployerReputation";`,
+  'import { resolveDeployer } from "../lib/deployerReputation";',
+  "deployer resolver import"
+);
+
+const deployerHelper = `async function passesDeployerGate(mint: string): Promise<{ passed: boolean; reason: string; deployer: string | null; method: string }> {
+  const resolution = await resolveDeployer(mint);
+  if (!resolution.deployer) {
+    return {
+      passed: true,
+      reason: "deployer_unresolved_shadow",
+      deployer: null,
+      method: resolution.method,
+    };
+  }
+
+  const { data: reputation, error: reputationError } = await supabase
+    .from("deployer_reputation")
+    .select("rugs,tokens_seen,last_rug_at")
+    .eq("deployer", resolution.deployer)
+    .maybeSingle();
+  if (reputationError) throw new Error(reputationError.message);
+  if (Number(reputation?.rugs ?? 0) > 0) {
+    return {
+      passed: false,
+      reason: "deployer_prior_rug",
+      deployer: resolution.deployer,
+      method: resolution.method,
+    };
+  }
+  return {
+    passed: true,
+    reason: "deployer_clean_or_unseen",
+    deployer: resolution.deployer,
+    method: resolution.method,
+  };
+}
+
+async function openTrade(
+`;
+
+replaceOnce(
+  /async function passesDeployerGate\(mint: string\): Promise<\{ passed: boolean; reason: string; deployer: string \| null(?:; method: string)? \}> \{[\s\S]*?\n\}\n\nasync function openTrade\(\n|async function openTrade\(\n/,
+  deployerHelper,
+  'reason: "deployer_unresolved_shadow"',
+  "deployer helper"
+);
+
+const safetyReplacement = `          opportunity.entry_safety = { passed: safety.passed, reason: safety.reason, ...safety.details };
+          const heliusWouldBlock = safety.details?.heliusWouldBlock === true;
+          const lpAction = String((safety.details?.lp_lock as any)?.action ?? "");
+          const primaryGateWouldBlock =
+            !safety.passed ||
+            heliusWouldBlock ||
+            lpAction === "block" ||
+            (PAPER_ENTRY_SAFETY_ENFORCE && lpAction === "shadow_would_block");
+          if (primaryGateWouldBlock) {
+            const reason =
+              safety.reason ??
+              (heliusWouldBlock
+                ? "helius_not_trade_eligible"
+                : "liquidity_not_proven_safe");
+            console.warn(
+              \`[ai-discovery-trader] sniper \${PAPER_ENTRY_SAFETY_ENFORCE ? "hard-block" : "shadow-block"} \${opportunity.token_symbol ?? opportunity.mint}: \${reason}\`
+            );
+            if (PAPER_ENTRY_SAFETY_ENFORCE) continue;
+          }
+
+          const deployerGate = await passesDeployerGate(opportunity.mint);
+          opportunity.deployer_gate = deployerGate;
+          if (!deployerGate.passed) {
+            console.warn(
+              \`[ai-discovery-trader] sniper \${PAPER_ENTRY_SAFETY_ENFORCE ? "hard-block" : "shadow-block"} \${opportunity.token_symbol ?? opportunity.mint}: \${deployerGate.reason}\`
+            );
+            if (PAPER_ENTRY_SAFETY_ENFORCE) continue;
+          } else if (deployerGate.reason === "deployer_unresolved_shadow") {
+            console.warn(
+              \`[ai-discovery-trader] sniper shadow-observe \${opportunity.token_symbol ?? opportunity.mint}: deployer_unresolved\`
+            );
+          }
+
+          await sleep(1_500);
+          const confirmation = await evaluateLiveEntrySafety({
+            mint: opportunity.mint,
+            sizeSol: FIXED_SIZE_SOL,
+            slippageBps: QUOTE_SLIPPAGE_BPS,
+            mode: "paper",
+          });
+          const confirmationHeliusBlock =
+            confirmation.details?.heliusWouldBlock === true;
+          const confirmationLpAction = String(
+            (confirmation.details?.lp_lock as any)?.action ?? ""
+          );
+          const confirmationWouldBlock =
+            !confirmation.passed ||
+            confirmationHeliusBlock ||
+            confirmationLpAction === "block" ||
+            (PAPER_ENTRY_SAFETY_ENFORCE &&
+              confirmationLpAction === "shadow_would_block");
+          if (confirmationWouldBlock) {
+            console.warn(
+              \`[ai-discovery-trader] sniper confirmation \${PAPER_ENTRY_SAFETY_ENFORCE ? "hard-block" : "shadow-block"} \${opportunity.token_symbol ?? opportunity.mint}: \${confirmation.reason ?? "unstable_safety_state"}\`
+            );
+            if (PAPER_ENTRY_SAFETY_ENFORCE) continue;
+          }
+`;
+
+replaceOnce(
+  /          opportunity\.entry_safety = \{ passed: safety\.passed, reason: safety\.reason, \.\.\.safety\.details \};\n(?:[\s\S]*?)          await openTrade\(state, opportunity, market, observationId\);/,
+  `${safetyReplacement}          await openTrade(state, opportunity, market, observationId);`,
+  'const primaryGateWouldBlock =',
+  "hard safety gate"
+);
+
+replaceOnce(
+  /    60_000\n  \);\n  setInterval\(\n    \(\) =>\n      void managePositions\(\)/,
+  `    15_000
+  );
+  setInterval(
+    () =>
+      void managePositions()`,
+  `    15_000
+  );
+  setInterval(
+    () =>
+      void managePositions()`,
+  "entry interval"
+);
+replaceOnce(
   /    10_000\n  \);\n  setInterval\(\n    \(\) =>\n      void trackCandidateOutcomes\(\)/,
-  '    2_000\n  );\n  setInterval(\n    () =>\n      void trackCandidateOutcomes()'
+  `    2_000
+  );
+  setInterval(
+    () =>
+      void trackCandidateOutcomes()`,
+  `    2_000
+  );
+  setInterval(
+    () =>
+      void trackCandidateOutcomes()`,
+  "position interval"
 );
 
 fs.writeFileSync(target, source);
+
+const enforce =
+  !["0", "false", "off", "no"].includes(
+    String(process.env.AI_PAPER_ENTRY_SAFETY_ENFORCE ?? "true")
+      .trim()
+      .toLowerCase()
+  );
+const blockOnUnknown =
+  String(process.env.LP_LOCK_BLOCK_ON_UNKNOWN ?? "false")
+    .trim()
+    .toLowerCase() === "true";
+console.log(
+  `[runtime-patch] memecoin sniper gate mode enforce=${enforce} blockOnUnknown=${blockOnUnknown}`
+);
 console.log("[runtime-patch] memecoin sniper hard gates applied and verified");
