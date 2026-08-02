@@ -155,8 +155,8 @@ const safetyReplacement = `          opportunity.entry_safety = { passed: safety
 `;
 
 replaceOnce(
-  /          opportunity\.entry_safety = \{ passed: safety\.passed, reason: safety\.reason, \.\.\.safety\.details \};\n(?:[\s\S]*?)          await openTrade\(state, opportunity, market, observationId\);/,
-  `${safetyReplacement}          await openTrade(state, opportunity, market, observationId);`,
+  /          opportunity\.entry_safety = \{ passed: safety\.passed, reason: safety\.reason, \.\.\.safety\.details \};\n          if \(!safety\.passed && PAPER_ENTRY_SAFETY_ENFORCE\) \{[^\n]*\n/,
+  safetyReplacement,
   'const primaryGateWouldBlock =',
   "hard safety gate"
 );
