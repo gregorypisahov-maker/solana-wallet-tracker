@@ -24,7 +24,7 @@ export const SOL_SPOT_PAPER_CONFIG = {
   positionCheckMs: numberEnv("SOL_SPOT_POSITION_CHECK_MS", 5_000, 2_000),
   leaseRefreshMs: numberEnv("SOL_SPOT_LEASE_REFRESH_MS", 15_000, 5_000),
   leaseSeconds: Math.round(numberEnv("SOL_SPOT_LEASE_SECONDS", 45, 20, 300)),
-  entryScoreThreshold: Math.round(numberEnv("SOL_SPOT_ENTRY_SCORE", 6, 4, 9)),
+  entryScoreThreshold: Math.round(numberEnv("SOL_SPOT_ENTRY_SCORE", 5, 4, 9)),
   riskPctPerTrade: numberEnv("SOL_SPOT_RISK_PCT", 0.35, 0.05, 2),
   maxPositionPct: numberEnv("SOL_SPOT_MAX_POSITION_PCT", 20, 2, 50),
   maxPositionUsdt: numberEnv("SOL_SPOT_MAX_POSITION_USDT", 200, 10),
@@ -32,12 +32,12 @@ export const SOL_SPOT_PAPER_CONFIG = {
   minStopPct: numberEnv("SOL_SPOT_MIN_STOP_PCT", 0.8, 0.2, 5),
   maxStopPct: numberEnv("SOL_SPOT_MAX_STOP_PCT", 1.8, 0.5, 8),
   atrStopMultiplier: numberEnv("SOL_SPOT_ATR_STOP_MULTIPLIER", 1.5, 0.5, 5),
-  rewardRiskMultiple: numberEnv("SOL_SPOT_REWARD_RISK", 1.8, 1, 5),
-  trailingActivationR: numberEnv("SOL_SPOT_TRAILING_ACTIVATION_R", 1, 0.5, 3),
-  trailingGivebackPct: numberEnv("SOL_SPOT_TRAILING_GIVEBACK_PCT", 0.6, 0.15, 3),
-  maxHoldMinutes: numberEnv("SOL_SPOT_MAX_HOLD_MINUTES", 360, 15),
-  cooldownMinutes: numberEnv("SOL_SPOT_COOLDOWN_MINUTES", 30, 0),
-  maxDailyEntries: Math.round(numberEnv("SOL_SPOT_MAX_DAILY_ENTRIES", 8, 1, 50)),
+  rewardRiskMultiple: numberEnv("SOL_SPOT_REWARD_RISK", 1.5, 1, 5),
+  trailingActivationR: numberEnv("SOL_SPOT_TRAILING_ACTIVATION_R", 0.75, 0.5, 3),
+  trailingGivebackPct: numberEnv("SOL_SPOT_TRAILING_GIVEBACK_PCT", 0.45, 0.15, 3),
+  maxHoldMinutes: numberEnv("SOL_SPOT_MAX_HOLD_MINUTES", 120, 15),
+  cooldownMinutes: numberEnv("SOL_SPOT_COOLDOWN_MINUTES", 5, 0),
+  maxDailyEntries: Math.round(numberEnv("SOL_SPOT_MAX_DAILY_ENTRIES", 16, 1, 50)),
   dailyLossLimitUsdt: numberEnv("SOL_SPOT_DAILY_LOSS_LIMIT_USDT", 20, 1),
   maxConsecutiveLosses: Math.round(numberEnv("SOL_SPOT_MAX_CONSECUTIVE_LOSSES", 3, 1, 10)),
   takerFeePctPerSide: numberEnv("SOL_SPOT_TAKER_FEE_PCT", 0.1, 0, 1),
@@ -688,7 +688,7 @@ class SolSpotPaperBot {
     const positionId = randomUUID();
     const openedAt = new Date();
     const signalSnapshot = {
-      strategyVersion: "sol_spot_trend_v1_2026_08_01",
+      strategyVersion: "sol_spot_trend_v2_2026_08_02",
       symbol: SOL_SPOT_PAPER_CONFIG.symbol,
       candleCloseTime: new Date(candle.closeTimeMs).toISOString(),
       decision: decision.snapshot,
@@ -844,7 +844,7 @@ class SolSpotPaperBot {
         now + SOL_SPOT_PAPER_CONFIG.cooldownMinutes * 60_000
       );
       const exitSnapshot = {
-        strategyVersion: "sol_spot_trend_v1_2026_08_01",
+        strategyVersion: "sol_spot_trend_v2_2026_08_02",
         marketPrice,
         trailingFloorPrice: position.trailingFloorPrice,
         highestPriceSeen: position.highestPriceSeen,
