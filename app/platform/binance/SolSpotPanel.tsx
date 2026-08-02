@@ -107,6 +107,20 @@ export default function SolSpotPanel() {
   }, [refresh]);
 
   const status = useMemo(() => (data ? stateLabel(data) : null), [data]);
+  const visibleScans = useMemo(() => {
+    if (!data) return [];
+    const rows: any[] = [];
+    let keptOpenStatus = false;
+    for (const scan of data.scans) {
+      if (scan.action === "position_open") {
+        if (keptOpenStatus) continue;
+        keptOpenStatus = true;
+      }
+      rows.push(scan);
+      if (rows.length >= 8) break;
+    }
+    return rows;
+  }, [data]);
 
   return (
     <section className={styles.section} id="sol-spot-paper">
@@ -202,13 +216,19 @@ export default function SolSpotPanel() {
                 <div className={styles.rows}>
                   {data.scans.length === 0 ? (
                     <p className={styles.empty}>No scan has been recorded yet.</p>
-                  ) : data.scans.slice(0, 8).map((scan) => (
-                    <div className={styles.row} key={`${scan.symbol}-${scan.candle_close_time}`}>
-                      <time>{israelTime(scan.candle_close_time)}</time>
-                      <div><b>{readable(scan.action)}</b><small>{Array.isArray(scan.reasons) ? scan.reasons.map(readable).join(", ") : "—"}</small></div>
-                      <strong>{scan.score ?? "—"}/{scan.threshold ?? data.config.entryScoreThreshold}</strong>
-                    </div>
-                  ))}
+                  ) : visibleScans.map((scan) => {
+                    const positionOpen = scan.action === "position_open";
+                    return (
+                      <div className={styles.row} key={`${scan.symbol}-${scan.candle_close_time}`}>
+                        <time>{israelTime(scan.candle_close_time)}</time>
+                        <div>
+                          <b>{positionOpen ? "position active" : readable(scan.action)}</b>
+                          <small>{positionOpen ? "Monitoring the current SOL position" : Array.isArray(scan.reasons) ? scan.reasons.map(readable).join(", ") : "—"}</small>
+                        </div>
+                        <strong>{positionOpen ? "OPEN" : `${scan.score ?? "—"}/${scan.threshold ?? data.config.entryScoreThreshold}`}</strong>
+                      </div>
+                    );
+                  })}
                 </div>
               </article>
 
