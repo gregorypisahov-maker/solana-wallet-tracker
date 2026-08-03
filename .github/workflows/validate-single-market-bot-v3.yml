@@ -18,7 +18,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
       - run: npm ci
       - name: Apply runtime patch chain
@@ -40,7 +40,7 @@ jobs:
             reportDiagnostics: true,
             compilerOptions: {
               target: ts.ScriptTarget.ES2022,
-              module: ts.ModuleKind.ESNext,
+              module: ts.ModuleKind.NodeNext,
               moduleResolution: ts.ModuleResolutionKind.NodeNext,
             },
           });
