@@ -32,6 +32,7 @@ jobs:
           node scripts/patch-single-market-bot-v3-core.mjs
           node scripts/patch-single-market-bot-v3-dashboard.mjs
           node scripts/patch-single-market-bot-v3-normalized-stats.mjs
+          node scripts/patch-single-market-bot-v3-mobile-dashboard.mjs
       - name: Validate generated TypeScript syntax
         run: |
           node <<'NODE'
@@ -59,6 +60,8 @@ jobs:
             'CLASSIC_SPL_TOKEN_PROGRAM',
             'token-2022',
             'normalizedPnl',
+            'table-scroll',
+            'Swipe sideways to view all columns',
             'Win rate',
             'single_market_bot_rollbacks',
           ]) {
