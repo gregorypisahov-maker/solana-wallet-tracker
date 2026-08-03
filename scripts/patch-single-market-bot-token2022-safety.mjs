@@ -67,14 +67,14 @@ async function inspectTokenSafety(mint: string): Promise<any> {
     signal: AbortSignal.timeout(12_000),
   });
   const payload = await response.json().catch(() => null);
-  if (!response.ok || payload?.error) throw new Error(`token_safety_rpc_failed_${response.status}`);
+  if (!response.ok || payload?.error) throw new Error("token_safety_rpc_failed_" + response.status);
   const account = payload?.result?.value;
   if (!account) throw new Error("token_safety_mint_missing");
   const program = String(account.owner ?? "");
   if (program === CLASSIC_SPL_TOKEN_PROGRAM) {
     return { safe: true, standard: "classic-spl", program, extensions: [], warnings: [] };
   }
-  if (program !== TOKEN_2022_PROGRAM) throw new Error(`unsupported_token_program_${program || "unknown"}`);
+  if (program !== TOKEN_2022_PROGRAM) throw new Error("unsupported_token_program_" + (program || "unknown"));
 
   const info = account?.data?.parsed?.info;
   if (!info || typeof info !== "object") throw new Error("token2022_mint_unparsed");
@@ -111,7 +111,7 @@ async function inspectTokenSafety(mint: string): Promise<any> {
     if (!name || name === "uninitialized") continue;
     extensions.push(name);
     if (blockedFragments.some((fragment) => name.includes(fragment))) {
-      throw new Error(`token2022_blocked_extension_${name}`);
+      throw new Error("token2022_blocked_extension_" + name);
     }
     if (name.includes("defaultaccountstate")) {
       if (JSON.stringify(entry).toLowerCase().includes("frozen")) {
@@ -126,12 +126,12 @@ async function inspectTokenSafety(mint: string): Promise<any> {
       const mutable = hasPresentAuthority(entry, "transferfeeconfigauthority");
       if (mutable) throw new Error("token2022_mutable_transfer_fee");
       if (maximumBps > TOKEN_2022_MAX_IMMUTABLE_FEE_BPS) {
-        throw new Error(`token2022_transfer_fee_${maximumBps}_bps`);
+        throw new Error("token2022_transfer_fee_" + maximumBps + "_bps");
       }
-      warnings.push(`immutable-transfer-fee-${maximumBps}-bps`);
+      warnings.push("immutable-transfer-fee-" + maximumBps + "-bps");
       continue;
     }
-    if (!safeNames.has(name)) throw new Error(`token2022_unknown_extension_${name}`);
+    if (!safeNames.has(name)) throw new Error("token2022_unknown_extension_" + name);
   }
 
   return { safe: true, standard: "token-2022", program, extensions, warnings };
@@ -159,7 +159,7 @@ async function confirmToken2022RoundTrip(
   const recoveries = attempts.map((attempt) => attempt.recoveryPct);
   const spreadPct = Math.max(...recoveries) - Math.min(...recoveries);
   if (spreadPct > TOKEN_2022_MAX_QUOTE_SPREAD_PCT) {
-    throw new Error(`token2022_unstable_quotes_${spreadPct.toFixed(2)}pct`);
+    throw new Error("token2022_unstable_quotes_" + spreadPct.toFixed(2) + "pct");
   }
   if (Math.max(...recoveries) >= TOKEN_2022_INSTANT_PROFIT_CONFIRM_PCT && Math.min(...recoveries) < 100.10) {
     throw new Error("token2022_instant_profit_not_repeatable");
