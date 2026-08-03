@@ -30,6 +30,7 @@ jobs:
           node scripts/patch-single-market-bot-telegram.mjs
           node scripts/patch-single-market-bot-v3-core.mjs
           node scripts/patch-single-market-bot-v3-dashboard.mjs
+          node scripts/patch-single-market-bot-v3-normalized-stats.mjs
       - name: Validate generated TypeScript syntax
         run: |
           node <<'NODE'
@@ -54,6 +55,7 @@ jobs:
             'PAPER_SCALE_TARGET_USDC',
             'recentLossCount',
             'confidenceSizing',
+            'normalizedPnl',
             'Win rate',
             'single_market_bot_rollbacks',
           ]) {
