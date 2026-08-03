@@ -13,17 +13,27 @@ const USDC_MINT = process.env.USDC_MINT ?? "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGk
 const MODE = process.env.MARKET_BOT_MODE === "live" ? "live" : "paper";
 const ENABLED = process.env.MARKET_BOT_ENABLED === "true";
 const SCAN_MS = positiveInt("MARKET_SCAN_MS", 30_000);
-const POSITION_CHECK_MS = positiveInt("MARKET_POSITION_CHECK_MS", 10_000);
+const POSITION_CHECK_MS = positiveInt("MARKET_POSITION_CHECK_MS", 5_000);
 const TRADE_SIZE_USDC = positiveNumber("MARKET_TRADE_SIZE_USDC", 3);
-const MIN_SCORE = positiveNumber("MARKET_MIN_SCORE", 72);
+const MIN_SCORE = positiveNumber("MARKET_MIN_SCORE", 78);
 const MIN_LIQUIDITY_USD = positiveNumber("MARKET_MIN_LIQUIDITY_USD", 500_000);
 const MIN_MCAP_USD = positiveNumber("MARKET_MIN_MCAP_USD", 5_000_000);
 const MAX_PRICE_IMPACT_PCT = positiveNumber("MARKET_MAX_PRICE_IMPACT_PCT", 1);
-const MIN_ROUND_TRIP_PCT = positiveNumber("MARKET_MIN_ROUND_TRIP_PCT", 97);
-const TAKE_PROFIT_PCT = positiveNumber("MARKET_TAKE_PROFIT_PCT", 4);
-const STOP_LOSS_PCT = positiveNumber("MARKET_STOP_LOSS_PCT", 2);
-const TRAILING_STOP_PCT = positiveNumber("MARKET_TRAILING_STOP_PCT", 2);
-const MAX_HOLD_MINUTES = positiveInt("MARKET_MAX_HOLD_MINUTES", 90);
+const MIN_ROUND_TRIP_PCT = positiveNumber("MARKET_MIN_ROUND_TRIP_PCT", 98.5);
+const MIN_5M_CHANGE_PCT = positiveNumber("MARKET_MIN_5M_CHANGE_PCT", 0.10);
+const MAX_5M_CHANGE_PCT = positiveNumber("MARKET_MAX_5M_CHANGE_PCT", 2.50);
+const MIN_1H_CHANGE_PCT = positiveNumber("MARKET_MIN_1H_CHANGE_PCT", 0.25);
+const MAX_1H_CHANGE_PCT = positiveNumber("MARKET_MAX_1H_CHANGE_PCT", 6);
+const MIN_5M_BUY_VOLUME_RATIO = positiveNumber("MARKET_MIN_5M_BUY_VOLUME_RATIO", 1.10);
+const MIN_1H_BUY_VOLUME_RATIO = positiveNumber("MARKET_MIN_1H_BUY_VOLUME_RATIO", 1.00);
+const MIN_5M_TRADERS = positiveInt("MARKET_MIN_5M_TRADERS", 10);
+const MAX_24H_DRAWDOWN_PCT = positiveNumber("MARKET_MAX_24H_DRAWDOWN_PCT", 8);
+const MAX_24H_LIQUIDITY_DROP_PCT = positiveNumber("MARKET_MAX_24H_LIQUIDITY_DROP_PCT", 8);
+const TAKE_PROFIT_PCT = positiveNumber("MARKET_TAKE_PROFIT_PCT", 2);
+const STOP_LOSS_PCT = positiveNumber("MARKET_STOP_LOSS_PCT", 1.5);
+const TRAILING_ACTIVATION_PCT = positiveNumber("MARKET_TRAILING_ACTIVATION_PCT", 0.8);
+const TRAILING_STOP_PCT = positiveNumber("MARKET_TRAILING_STOP_PCT", 0.8);
+const MAX_HOLD_MINUTES = positiveInt("MARKET_MAX_HOLD_MINUTES", 45);
 const MAX_DAILY_LOSS_USDC = positiveNumber("MARKET_MAX_DAILY_LOSS_USDC", 1);
 const MAX_DAILY_ENTRIES = positiveInt("MARKET_MAX_DAILY_ENTRIES", 5);
 const COOLDOWN_MINUTES = positiveInt("MARKET_REENTRY_COOLDOWN_MINUTES", 120);
@@ -57,6 +67,13 @@ function todayUtc(): string {
 function usdcRaw(value: number): string {
   return String(Math.floor(value * 1_000_000));
 }
+function usdcFromRaw(value: string | number | bigint): number {
+  return Number(value) / 1_000_000;
+}
+function volumeRatio(buyVolume: number, sellVolume: number): number {
+  if (sellVolume > 0) return buyVolume / sellVolume;
+  return buyVolume > 0 ? 2 : 0;
+}
 
 async function jup(path: string): Promise<any> {
   const response = await fetch(`https://api.jup.ag${path}`, {
@@ -89,6 +106,7 @@ type Position = {
   score: number;
   entryPriceUsd: number;
   highWaterPriceUsd: number;
+  highWaterExitUsdc: number;
   sizeUsdc: number;
   tokenAmountRaw: string;
   tokenDecimals: number;
@@ -111,6 +129,13 @@ type Candidate = {
   sells: number;
   volume: number;
   priceChange: number;
+  priceChange5m: number;
+  priceChange1h: number;
+  priceChange24h: number;
+  liquidityChange24h: number;
+  buyVolumeRatio5m: number;
+  buyVolumeRatio1h: number;
+  traders5m: number;
   score: number;
   reasons: string[];
   raw: any;
@@ -144,47 +169,74 @@ async function patchState(values: Record<string, unknown>): Promise<void> {
   if (error) throw error;
 }
 
-function stats(token: any): any {
-  return token?.stats1h ?? token?.stats5m ?? token?.stats6h ?? token?.stats24h ?? {};
-}
-
 function scoreToken(token: any): Candidate | null {
   const mint = String(token?.id ?? token?.address ?? "");
   const symbol = String(token?.symbol ?? "").toUpperCase();
   if (!mint || stableSymbols.has(symbol)) return null;
-  const s = stats(token);
+
+  const s5m = token?.stats5m;
+  const s1h = token?.stats1h;
+  const s24h = token?.stats24h ?? {};
+  if (!s5m || !s1h) return null;
+
   const price = n(token?.usdPrice);
   const liquidity = n(token?.liquidity ?? token?.liquidityUsd ?? token?.stats24h?.liquidity);
   const mcap = n(token?.mcap ?? token?.marketCap);
   const holders = n(token?.holderCount);
   const organic = n(token?.organicScore);
   const verified = token?.isVerified === true || (Array.isArray(token?.tags) && token.tags.includes("verified"));
-  const buys = n(s?.numBuys ?? s?.buys);
-  const sells = n(s?.numSells ?? s?.sells);
-  const volume = n(s?.buyVolume + s?.sellVolume) || n(s?.volume ?? s?.volumeChange);
-  const priceChange = n(s?.priceChange);
+  const audit = token?.audit ?? {};
+
+  const buys5m = n(s5m?.numBuys ?? s5m?.buys);
+  const sells5m = n(s5m?.numSells ?? s5m?.sells);
+  const buys1h = n(s1h?.numBuys ?? s1h?.buys);
+  const sells1h = n(s1h?.numSells ?? s1h?.sells);
+  const buyVolume5m = n(s5m?.buyVolume);
+  const sellVolume5m = n(s5m?.sellVolume);
+  const buyVolume1h = n(s1h?.buyVolume);
+  const sellVolume1h = n(s1h?.sellVolume);
+  const buyVolumeRatio5m = volumeRatio(buyVolume5m, sellVolume5m);
+  const buyVolumeRatio1h = volumeRatio(buyVolume1h, sellVolume1h);
+  const traders5m = n(s5m?.numTraders);
+  const volume1h = buyVolume1h + sellVolume1h;
+  const priceChange5m = n(s5m?.priceChange, Number.NaN);
+  const priceChange1h = n(s1h?.priceChange, Number.NaN);
+  const priceChange24h = n(s24h?.priceChange);
+  const liquidityChange24h = n(s24h?.liquidityChange);
+
   if (price <= 0 || liquidity < MIN_LIQUIDITY_USD || mcap < MIN_MCAP_USD) return null;
+  if (!Number.isFinite(priceChange5m) || !Number.isFinite(priceChange1h)) return null;
+  if (priceChange5m < MIN_5M_CHANGE_PCT || priceChange5m > MAX_5M_CHANGE_PCT) return null;
+  if (priceChange1h < MIN_1H_CHANGE_PCT || priceChange1h > MAX_1H_CHANGE_PCT) return null;
+  if (buyVolumeRatio5m < MIN_5M_BUY_VOLUME_RATIO || buyVolumeRatio1h < MIN_1H_BUY_VOLUME_RATIO) return null;
+  if (traders5m < MIN_5M_TRADERS) return null;
+  if (priceChange24h < -MAX_24H_DRAWDOWN_PCT) return null;
+  if (liquidityChange24h < -MAX_24H_LIQUIDITY_DROP_PCT) return null;
+  if (audit?.mintAuthorityDisabled !== true || audit?.freezeAuthorityDisabled !== true) return null;
 
   let score = 0;
   const reasons: string[] = [];
-  if (verified) { score += 12; reasons.push("verified"); }
-  if (organic >= 80) { score += 20; reasons.push("high organic activity"); }
-  else if (organic >= 60) { score += 12; reasons.push("medium organic activity"); }
-  if (liquidity >= 5_000_000) { score += 18; reasons.push("deep liquidity"); }
-  else if (liquidity >= 1_000_000) { score += 12; reasons.push("good liquidity"); }
-  else score += 7;
-  if (mcap >= 25_000_000) score += 10;
+  if (verified) { score += 10; reasons.push("verified"); }
+  if (organic >= 80) { score += 16; reasons.push("high organic activity"); }
+  else if (organic >= 60) { score += 10; reasons.push("medium organic activity"); }
+  if (liquidity >= 5_000_000) { score += 14; reasons.push("deep liquidity"); }
+  else if (liquidity >= 1_000_000) { score += 10; reasons.push("good liquidity"); }
+  else score += 5;
+  if (mcap >= 25_000_000) score += 8;
+  else score += 5;
+  if (holders >= 25_000) score += 8;
+  else if (holders >= 5_000) score += 5;
+
+  if (priceChange5m >= 0.25 && priceChange5m <= 1.5) { score += 18; reasons.push("5m momentum confirmed"); }
+  else score += 10;
+  if (priceChange1h >= 0.5 && priceChange1h <= 4) { score += 12; reasons.push("1h trend aligned"); }
   else score += 6;
-  if (holders >= 25_000) score += 10;
-  else if (holders >= 5_000) score += 6;
-  if (priceChange >= 0.5 && priceChange <= 6) { score += 16; reasons.push("controlled momentum"); }
-  else if (priceChange > 6 && priceChange <= 12) { score += 7; reasons.push("extended momentum"); }
-  else if (priceChange < -2) score -= 12;
-  const ratio = sells > 0 ? buys / sells : buys > 0 ? 2 : 0;
-  if (ratio >= 1.3 && ratio <= 3) { score += 12; reasons.push("buy pressure"); }
-  else if (ratio < 0.8) score -= 10;
-  if (volume >= 500_000) score += 8;
-  if (priceChange > 12) score -= 15;
+  if (buyVolumeRatio5m >= 1.25) { score += 12; reasons.push("5m buy-volume pressure"); }
+  else score += 6;
+  if (buyVolumeRatio1h >= 1.10) score += 6;
+  if (volume1h >= 500_000) score += 6;
+  if (priceChange24h >= 0) score += 4;
+  if (liquidityChange24h >= 0) score += 4;
 
   return {
     mint,
@@ -197,10 +249,17 @@ function scoreToken(token: any): Candidate | null {
     holders,
     organic,
     verified,
-    buys,
-    sells,
-    volume,
-    priceChange,
+    buys: buys1h,
+    sells: sells1h,
+    volume: volume1h,
+    priceChange: priceChange1h,
+    priceChange5m,
+    priceChange1h,
+    priceChange24h,
+    liquidityChange24h,
+    buyVolumeRatio5m,
+    buyVolumeRatio1h,
+    traders5m,
     score,
     reasons,
     raw: token,
@@ -235,14 +294,14 @@ async function tokenPrice(mint: string): Promise<number> {
   return price;
 }
 
-async function validateRoundTrip(candidate: Candidate): Promise<{ buyQuote: any; recoveryPct: number }> {
+async function validateRoundTrip(candidate: Candidate): Promise<{ buyQuote: any; sellQuote: any; recoveryPct: number }> {
   const buyQuote = await getQuote(USDC_MINT, candidate.mint, usdcRaw(TRADE_SIZE_USDC));
   const impact = n(buyQuote.priceImpactPct) * 100;
   if (impact > MAX_PRICE_IMPACT_PCT) throw new Error(`price_impact_${impact.toFixed(2)}pct`);
   const sellQuote = await getQuote(candidate.mint, USDC_MINT, String(buyQuote.outAmount));
   const recoveryPct = Number((BigInt(sellQuote.outAmount) * 10_000n) / BigInt(usdcRaw(TRADE_SIZE_USDC))) / 100;
   if (recoveryPct < MIN_ROUND_TRIP_PCT) throw new Error(`round_trip_${recoveryPct.toFixed(2)}pct`);
-  return { buyQuote, recoveryPct };
+  return { buyQuote, sellQuote, recoveryPct };
 }
 
 async function openPosition(candidate: Candidate): Promise<void> {
@@ -256,6 +315,7 @@ async function openPosition(candidate: Candidate): Promise<void> {
     entryTx = result.signature;
   }
 
+  const initialExitUsdc = usdcFromRaw(validation.sellQuote.outAmount);
   const { data: trade, error } = await supabase
     .from("single_market_bot_trades")
     .insert({
@@ -271,7 +331,20 @@ async function openPosition(candidate: Candidate): Promise<void> {
       token_decimals: candidate.decimals,
       high_water_price_usd: candidate.price,
       entry_tx: entryTx,
-      metadata: { reasons: candidate.reasons, recoveryPct: validation.recoveryPct, candidate: candidate.raw },
+      metadata: {
+        reasons: candidate.reasons,
+        recoveryPct: validation.recoveryPct,
+        entryTiming: {
+          priceChange5m: candidate.priceChange5m,
+          priceChange1h: candidate.priceChange1h,
+          priceChange24h: candidate.priceChange24h,
+          liquidityChange24h: candidate.liquidityChange24h,
+          buyVolumeRatio5m: candidate.buyVolumeRatio5m,
+          buyVolumeRatio1h: candidate.buyVolumeRatio1h,
+          traders5m: candidate.traders5m,
+        },
+        candidate: candidate.raw,
+      },
     })
     .select("id")
     .single();
@@ -285,6 +358,7 @@ async function openPosition(candidate: Candidate): Promise<void> {
     score: candidate.score,
     entryPriceUsd: candidate.price,
     highWaterPriceUsd: candidate.price,
+    highWaterExitUsdc: initialExitUsdc,
     sizeUsdc: TRADE_SIZE_USDC,
     tokenAmountRaw,
     tokenDecimals: candidate.decimals,
@@ -298,30 +372,39 @@ async function openPosition(candidate: Candidate): Promise<void> {
     cash_usdc: MODE === "paper" ? n(state.cash_usdc) - TRADE_SIZE_USDC : state.cash_usdc,
     last_error: null,
   });
-  await telegram(`🟢 Market bot ${MODE.toUpperCase()} entry\n${candidate.symbol}\nScore: ${candidate.score}\nSize: ${TRADE_SIZE_USDC} USDC\nPrice: $${candidate.price}\nReasons: ${candidate.reasons.join(", ")}\nTx: ${entryTx ?? "paper"}`);
+  await telegram(`🟢 Market bot ${MODE.toUpperCase()} entry\n${candidate.symbol}\nScore: ${candidate.score}\nSize: ${TRADE_SIZE_USDC} USDC\n5m: ${candidate.priceChange5m.toFixed(2)}% · 1h: ${candidate.priceChange1h.toFixed(2)}%\n5m buy-volume ratio: ${candidate.buyVolumeRatio5m.toFixed(2)}\nReasons: ${candidate.reasons.join(", ")}\nTx: ${entryTx ?? "paper"}`);
 }
 
-function exitReason(position: Position, price: number): string | null {
-  const pnlPct = ((price / position.entryPriceUsd) - 1) * 100;
-  const drawdownFromHigh = ((price / position.highWaterPriceUsd) - 1) * 100;
+function exitReason(position: Position, executableExitUsdc: number): string | null {
+  const pnlPct = ((executableExitUsdc / position.sizeUsdc) - 1) * 100;
+  const highWater = Math.max(position.highWaterExitUsdc || position.sizeUsdc, position.sizeUsdc * 0.01);
+  const drawdownFromHigh = ((executableExitUsdc / highWater) - 1) * 100;
   const ageMinutes = (Date.now() - Date.parse(position.openedAt)) / 60_000;
   if (pnlPct >= TAKE_PROFIT_PCT) return "take_profit";
   if (pnlPct <= -STOP_LOSS_PCT) return "hard_stop";
-  if (position.highWaterPriceUsd > position.entryPriceUsd * 1.015 && drawdownFromHigh <= -TRAILING_STOP_PCT) return "trailing_stop";
+  if (highWater >= position.sizeUsdc * (1 + TRAILING_ACTIVATION_PCT / 100) && drawdownFromHigh <= -TRAILING_STOP_PCT) return "trailing_stop";
   if (ageMinutes >= MAX_HOLD_MINUTES) return "max_hold";
   return null;
 }
 
-async function closePosition(position: Position, price: number, reason: string): Promise<void> {
+async function executableExitValue(position: Position, price: number): Promise<number> {
+  if (MODE !== "paper") return position.sizeUsdc * (price / position.entryPriceUsd);
+  const quote = await getQuote(position.mint, USDC_MINT, position.tokenAmountRaw);
+  const exitUsdc = usdcFromRaw(quote.outAmount);
+  if (!Number.isFinite(exitUsdc) || exitUsdc < 0) throw new Error("paper_exit_quote_invalid");
+  return exitUsdc;
+}
+
+async function closePosition(position: Position, price: number, reason: string, quotedExitUsdc?: number): Promise<void> {
   const state = await loadState();
   let exitTx: string | null = null;
-  let exitUsdc = position.sizeUsdc * (price / position.entryPriceUsd);
+  let exitUsdc = quotedExitUsdc ?? position.sizeUsdc * (price / position.entryPriceUsd);
   if (MODE === "live") {
     const balance = await getTokenBalanceRaw(position.mint);
     if (BigInt(balance.amountRaw) <= 0n) throw new Error("position_token_balance_zero");
     const result = await executeExactInSwap(position.mint, USDC_MINT, balance.amountRaw);
     exitTx = result.signature;
-    exitUsdc = Number(result.expectedOutputRaw) / 1_000_000;
+    exitUsdc = usdcFromRaw(result.expectedOutputRaw);
   }
   const pnl = exitUsdc - position.sizeUsdc;
   const pnlPct = (pnl / position.sizeUsdc) * 100;
@@ -353,7 +436,7 @@ async function closePosition(position: Position, price: number, reason: string):
     halt_reason: halted ? "daily_loss_limit" : null,
     last_error: null,
   });
-  await telegram(`${pnl >= 0 ? "🟢" : "🔴"} Market bot ${MODE.toUpperCase()} exit\n${position.symbol}\nReason: ${reason}\nPnL: ${pnl >= 0 ? "+" : ""}${pnl.toFixed(3)} USDC (${pnlPct.toFixed(2)}%)\nTx: ${exitTx ?? "paper"}`);
+  await telegram(`${pnl >= 0 ? "🟢" : "🔴"} Market bot ${MODE.toUpperCase()} exit\n${position.symbol}\nReason: ${reason}\nExecutable exit: ${exitUsdc.toFixed(4)} USDC\nPnL: ${pnl >= 0 ? "+" : ""}${pnl.toFixed(3)} USDC (${pnlPct.toFixed(2)}%)\nTx: ${exitTx ?? "paper"}`);
 }
 
 async function scanOnce(): Promise<void> {
@@ -375,9 +458,21 @@ async function scanOnce(): Promise<void> {
       last_scan_at: new Date().toISOString(),
       last_heartbeat_at: new Date().toISOString(),
       scanner_snapshot: {
+        strategyVersion: "market_timing_v2_2026_08_03",
         scanned: candidates.length,
         eligible: eligible.length,
-        top: candidates.slice(0, 10).map((c) => ({ mint: c.mint, symbol: c.symbol, score: c.score, price: c.price, liquidity: c.liquidity, priceChange: c.priceChange, reasons: c.reasons })),
+        top: candidates.slice(0, 10).map((c) => ({
+          mint: c.mint,
+          symbol: c.symbol,
+          score: c.score,
+          price: c.price,
+          liquidity: c.liquidity,
+          priceChange: c.priceChange1h,
+          priceChange5m: c.priceChange5m,
+          priceChange24h: c.priceChange24h,
+          buyVolumeRatio5m: c.buyVolumeRatio5m,
+          reasons: c.reasons,
+        })),
       },
       last_error: null,
     });
@@ -404,13 +499,21 @@ async function checkPosition(): Promise<void> {
     const position = state.open_position as Position | null;
     if (!position) return;
     const price = await tokenPrice(position.mint);
+    if (state.last_error) await patchState({ last_error: null });
+    const executableExitUsdc = await executableExitValue(position, price);
+    let positionChanged = false;
     if (price > position.highWaterPriceUsd) {
       position.highWaterPriceUsd = price;
-      await patchState({ open_position: position });
+      positionChanged = true;
       await supabase.from("single_market_bot_trades").update({ high_water_price_usd: price, updated_at: new Date().toISOString() }).eq("id", position.tradeId);
     }
-    const reason = exitReason(position, price);
-    if (reason) await closePosition(position, price, reason);
+    if (!position.highWaterExitUsdc || executableExitUsdc > position.highWaterExitUsdc) {
+      position.highWaterExitUsdc = executableExitUsdc;
+      positionChanged = true;
+    }
+    if (positionChanged) await patchState({ open_position: position });
+    const reason = exitReason(position, executableExitUsdc);
+    if (reason) await closePosition(position, price, reason, executableExitUsdc);
   } catch (error) {
     await patchState({ last_error: error instanceof Error ? error.message : String(error) }).catch(() => undefined);
   } finally {
@@ -445,11 +548,32 @@ app.get("/api/status", async (_req: Request, res: Response) => {
   const state = await loadState();
   const { data: trades } = await supabase.from("single_market_bot_trades").select("*").order("created_at", { ascending: false }).limit(20);
   res.setHeader("cache-control", "no-store");
-  res.json({ service: "single-market-bot", wallet: getWalletPublicKey(), config: { enabled: ENABLED, mode: MODE, tradeSizeUsdc: TRADE_SIZE_USDC, minScore: MIN_SCORE, takeProfitPct: TAKE_PROFIT_PCT, stopLossPct: STOP_LOSS_PCT, trailingStopPct: TRAILING_STOP_PCT, maxHoldMinutes: MAX_HOLD_MINUTES, maxDailyLossUsdc: MAX_DAILY_LOSS_USDC }, state, trades: trades ?? [] });
+  res.json({
+    service: "single-market-bot",
+    wallet: getWalletPublicKey(),
+    config: {
+      enabled: ENABLED,
+      mode: MODE,
+      strategyVersion: "market_timing_v2_2026_08_03",
+      tradeSizeUsdc: TRADE_SIZE_USDC,
+      minScore: MIN_SCORE,
+      min5mChangePct: MIN_5M_CHANGE_PCT,
+      max5mChangePct: MAX_5M_CHANGE_PCT,
+      min5mBuyVolumeRatio: MIN_5M_BUY_VOLUME_RATIO,
+      takeProfitPct: TAKE_PROFIT_PCT,
+      stopLossPct: STOP_LOSS_PCT,
+      trailingActivationPct: TRAILING_ACTIVATION_PCT,
+      trailingStopPct: TRAILING_STOP_PCT,
+      maxHoldMinutes: MAX_HOLD_MINUTES,
+      maxDailyLossUsdc: MAX_DAILY_LOSS_USDC,
+    },
+    state,
+    trades: trades ?? [],
+  });
 });
 app.get("/", (_req: Request, res: Response) => {
-  res.type("html").send(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Solana Market Bot</title><style>body{font-family:system-ui;background:#081019;color:#edf5ff;margin:0;padding:22px}.wrap{max-width:1100px;margin:auto}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px}.card{background:#111c29;border:1px solid #26384d;border-radius:14px;padding:15px;margin:12px 0}.v{font-size:24px;font-weight:750}.muted{color:#9fb2c9}table{width:100%;border-collapse:collapse}td,th{padding:9px;border-bottom:1px solid #26384d;text-align:left;font-size:12px}code{word-break:break-all;color:#b9d8ff}.on{color:#6ce89a}.off{color:#ffc766}.bad{color:#ff7e7e}</style></head><body><div class="wrap"><h1>Solana Market Bot</h1><div class="muted">Jupiter market-wide scanner · one position · automatic exits · Telegram alerts</div><div id="app">Loading…</div></div><script>const f=n=>Number(n||0);async function r(){const x=await fetch('/api/status',{cache:'no-store'}).then(r=>r.json()),s=x.state||{},p=s.open_position,top=s.scanner_snapshot?.top||[],tr=x.trades||[];document.getElementById('app').innerHTML='<div class="grid"><div class="card"><div class="muted">Mode</div><div class="v '+(x.config.enabled?'on':'off')+'">'+(x.config.enabled?x.config.mode.toUpperCase():'DISABLED')+'</div></div><div class="card"><div class="muted">Cash</div><div class="v">'+f(s.cash_usdc).toFixed(2)+' USDC</div></div><div class="card"><div class="muted">PnL</div><div class="v '+(f(s.realized_pnl_usdc)<0?'bad':'on')+'">'+f(s.realized_pnl_usdc).toFixed(3)+'</div></div><div class="card"><div class="muted">Entries today</div><div class="v">'+f(s.entries_today)+'</div></div><div class="card"><div class="muted">Scanned</div><div class="v">'+f(s.scanner_snapshot?.scanned)+'</div></div></div><div class="card"><div class="muted">Wallet</div><code>'+x.wallet+'</code><div class="muted" style="margin-top:8px">Open position</div><div>'+(p?p.symbol+' · '+p.sizeUsdc+' USDC · score '+p.score:'None')+'</div><div class="muted" style="margin-top:8px">Last error</div><div>'+(s.last_error||'None')+'</div></div><div class="card"><h2>Top market candidates</h2><table><tr><th>Token</th><th>Score</th><th>1h move</th><th>Liquidity</th><th>Reasons</th></tr>'+top.map(t=>'<tr><td>'+t.symbol+'</td><td>'+t.score+'</td><td>'+f(t.priceChange).toFixed(2)+'%</td><td>$'+Math.round(f(t.liquidity)).toLocaleString()+'</td><td>'+((t.reasons||[]).join(', '))+'</td></tr>').join('')+'</table></div><div class="card"><h2>Recent trades</h2><table><tr><th>Time</th><th>Token</th><th>Status</th><th>Size</th><th>PnL</th><th>Exit</th></tr>'+tr.map(t=>'<tr><td>'+t.created_at+'</td><td>'+t.symbol+'</td><td>'+t.status+'</td><td>'+t.size_usdc+'</td><td>'+(t.pnl_usdc??'—')+'</td><td>'+(t.exit_reason??'—')+'</td></tr>').join('')+'</table></div>';}r();setInterval(r,5000)</script></body></html>`);
+  res.type("html").send(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Solana Market Bot</title><style>body{font-family:system-ui;background:#081019;color:#edf5ff;margin:0;padding:22px}.wrap{max-width:1100px;margin:auto}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px}.card{background:#111c29;border:1px solid #26384d;border-radius:14px;padding:15px;margin:12px 0}.v{font-size:24px;font-weight:750}.muted{color:#9fb2c9}table{width:100%;border-collapse:collapse}td,th{padding:9px;border-bottom:1px solid #26384d;text-align:left;font-size:12px}code{word-break:break-all;color:#b9d8ff}.on{color:#6ce89a}.off{color:#ffc766}.bad{color:#ff7e7e}</style></head><body><div class="wrap"><h1>Solana Market Bot</h1><div class="muted">Jupiter market-wide scanner · timing v2 · executable paper exits · Telegram alerts</div><div id="app">Loading…</div></div><script>const f=n=>Number(n||0);async function r(){const x=await fetch('/api/status',{cache:'no-store'}).then(r=>r.json()),s=x.state||{},p=s.open_position,top=s.scanner_snapshot?.top||[],tr=x.trades||[];document.getElementById('app').innerHTML='<div class="grid"><div class="card"><div class="muted">Mode</div><div class="v '+(x.config.enabled?'on':'off')+'">'+(x.config.enabled?x.config.mode.toUpperCase():'DISABLED')+'</div></div><div class="card"><div class="muted">Cash</div><div class="v">'+f(s.cash_usdc).toFixed(2)+' USDC</div></div><div class="card"><div class="muted">PnL</div><div class="v '+(f(s.realized_pnl_usdc)<0?'bad':'on')+'">'+f(s.realized_pnl_usdc).toFixed(3)+'</div></div><div class="card"><div class="muted">Entries today</div><div class="v">'+f(s.entries_today)+'</div></div><div class="card"><div class="muted">Scanned</div><div class="v">'+f(s.scanner_snapshot?.scanned)+'</div></div></div><div class="card"><div class="muted">Strategy</div><div>'+x.config.strategyVersion+'</div><div class="muted" style="margin-top:8px">Wallet</div><code>'+x.wallet+'</code><div class="muted" style="margin-top:8px">Open position</div><div>'+(p?p.symbol+' · '+p.sizeUsdc+' USDC · score '+p.score:'None')+'</div><div class="muted" style="margin-top:8px">Last error</div><div>'+(s.last_error||'None')+'</div></div><div class="card"><h2>Top market candidates</h2><table><tr><th>Token</th><th>Score</th><th>5m</th><th>1h</th><th>5m buy vol.</th><th>Liquidity</th></tr>'+top.map(t=>'<tr><td>'+t.symbol+'</td><td>'+t.score+'</td><td>'+f(t.priceChange5m).toFixed(2)+'%</td><td>'+f(t.priceChange).toFixed(2)+'%</td><td>'+f(t.buyVolumeRatio5m).toFixed(2)+'x</td><td>$'+Math.round(f(t.liquidity)).toLocaleString()+'</td></tr>').join('')+'</table></div><div class="card"><h2>Recent trades</h2><table><tr><th>Time</th><th>Token</th><th>Status</th><th>Size</th><th>PnL</th><th>Exit</th></tr>'+tr.map(t=>'<tr><td>'+t.created_at+'</td><td>'+t.symbol+'</td><td>'+t.status+'</td><td>'+t.size_usdc+'</td><td>'+(t.pnl_usdc??'—')+'</td><td>'+(t.exit_reason??'—')+'</td></tr>').join('')+'</table></div>';}r();setInterval(r,5000)</script></body></html>`);
 });
 
-app.listen(PORT, "0.0.0.0", () => console.log(`[single-market-bot] listening port=${PORT} enabled=${ENABLED} mode=${MODE} wallet=${getWalletPublicKey()}`));
+app.listen(PORT, "0.0.0.0", () => console.log(`[single-market-bot] listening port=${PORT} enabled=${ENABLED} mode=${MODE} wallet=${getWalletPublicKey()} strategy=market_timing_v2_2026_08_03`));
 bootstrap().catch((error) => { console.error("[single-market-bot] bootstrap failed", error); process.exit(1); });
