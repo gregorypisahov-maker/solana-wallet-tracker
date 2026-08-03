@@ -9,6 +9,10 @@ const TELEGRAM_BOT_TOKEN = cleanEnv(process.env.TELEGRAM_BOT_TOKEN);
 const TELEGRAM_CHAT_ID = cleanEnv(process.env.TELEGRAM_CHAT_ID);
 const POLL_MS = Math.max(2_000, Number(process.env.TELEGRAM_ALERT_RELAY_POLL_MS) || 5_000);
 const MAX_ATTEMPTS = Math.max(1, Number(process.env.TELEGRAM_ALERT_RELAY_MAX_ATTEMPTS) || 5);
+const STALE_SENDING_MS = Math.max(
+  60_000,
+  Number(process.env.TELEGRAM_ALERT_RELAY_STALE_SENDING_MS) || 5 * 60_000,
+);
 const supabase = getSupabaseAdmin();
 let relayRunning = false;
 let relayStarted = false;
@@ -35,10 +39,26 @@ async function sendMessage(message: string): Promise<void> {
   }
 }
 
+async function recoverStaleClaims(): Promise<void> {
+  const cutoff = new Date(Date.now() - STALE_SENDING_MS).toISOString();
+  const { error } = await supabase
+    .from("telegram_alert_outbox")
+    .update({
+      status: "failed",
+      claimed_at: null,
+      last_error: "Relay claim expired before completion; queued for retry.",
+    })
+    .eq("status", "sending")
+    .lt("claimed_at", cutoff);
+  if (error) throw new Error(error.message);
+}
+
 async function processOutbox(): Promise<void> {
   if (relayRunning || !TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return;
   relayRunning = true;
   try {
+    await recoverStaleClaims();
+
     const { data, error } = await supabase
       .from("telegram_alert_outbox")
       .select("id,message,attempts")
@@ -64,7 +84,12 @@ async function processOutbox(): Promise<void> {
         await sendMessage(String(claimed.message));
         const { error: sentError } = await supabase
           .from("telegram_alert_outbox")
-          .update({ status: "sent", sent_at: new Date().toISOString(), last_error: null })
+          .update({
+            status: "sent",
+            sent_at: new Date().toISOString(),
+            claimed_at: null,
+            last_error: null,
+          })
           .eq("id", claimed.id);
         if (sentError) throw new Error(sentError.message);
         console.log(`[telegram-alert-relay] delivered alert ${claimed.id}`);
@@ -74,6 +99,7 @@ async function processOutbox(): Promise<void> {
           .from("telegram_alert_outbox")
           .update({
             status: "failed",
+            claimed_at: null,
             attempts: Number(claimed.attempts ?? 0) + 1,
             last_error: reason.slice(0, 1_000),
           })
@@ -95,7 +121,9 @@ export function startTelegramAlertRelay(): void {
     console.error("[telegram-alert-relay] TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID are required. Relay disabled.");
     return;
   }
-  console.log(`[telegram-alert-relay] started; pollMs=${POLL_MS}`);
+  console.log(
+    `[telegram-alert-relay] started; pollMs=${POLL_MS} staleSendingMs=${STALE_SENDING_MS}`,
+  );
   void processOutbox();
   setInterval(() => void processOutbox(), POLL_MS);
 }
