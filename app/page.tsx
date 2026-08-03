@@ -15,10 +15,20 @@ type DashboardData = {
     totalPnlUsdc: number;
     cashUsdc: number;
     startingCashUsdc: number;
+    returnPct: number;
+    grossProfit: number;
+    grossLoss: number;
+    profitFactor: number | null;
+    averageWinUsdc: number;
+    averageLossUsdc: number;
+    expectancyUsdc: number;
+    bestTrade: { symbol: string; pnlUsdc: number; pnlPct: number } | null;
+    worstTrade: { symbol: string; pnlUsdc: number; pnlPct: number } | null;
   };
 };
 
-const money = (value: number) => `${value >= 0 ? "+" : "-"}$${Math.abs(value).toFixed(3)}`;
+const signedMoney = (value: number) => `${value >= 0 ? "+" : "−"}$${Math.abs(value).toFixed(3)}`;
+const money = (value: number) => `$${Math.abs(value).toFixed(3)}`;
 const pct = (value: number) => `${value >= 0 ? "+" : ""}${value.toFixed(2)}%`;
 const time = (value?: string | null) => {
   if (!value || !Number.isFinite(Date.parse(value))) return "—";
@@ -28,7 +38,6 @@ const time = (value?: string | null) => {
     day: "2-digit",
     hour: "2-digit",
     minute: "2-digit",
-    second: "2-digit",
     hour12: false,
   }).format(new Date(value));
 };
@@ -70,10 +79,7 @@ export default function Dashboard() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ password }),
     });
-    if (!response.ok) {
-      setError("Wrong password");
-      return;
-    }
+    if (!response.ok) return setError("Wrong password");
     setPassword("");
     await refresh();
   };
@@ -89,169 +95,60 @@ export default function Dashboard() {
   }, [data, filter]);
 
   if (!data) {
-    return (
-      <main style={styles.center}>
-        {needsLogin ? (
-          <form onSubmit={login} style={styles.loginCard}>
-            <h1 style={{ margin: 0 }}>Solana Tracker</h1>
-            <p style={styles.muted}>Private live trading dashboard</p>
-            <input style={styles.input} type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="Dashboard password" autoFocus />
-            <button style={styles.primaryButton}>Open dashboard</button>
-            {error && <strong style={styles.lossText}>{error}</strong>}
-          </form>
-        ) : (
-          <div style={styles.loginCard}><h2>Loading live bot data…</h2>{error && <p style={styles.lossText}>{error}</p>}</div>
-        )}
-      </main>
-    );
+    return <main className="center">{needsLogin ? (
+      <form onSubmit={login} className="login-card">
+        <div className="logo">S</div><h1>Solana Market Bot</h1><p className="muted">Private performance dashboard</p>
+        <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Dashboard password" autoFocus />
+        <button className="primary">Open dashboard</button>{error && <strong className="negative">{error}</strong>}
+      </form>
+    ) : <div className="login-card"><h2>Loading bot data…</h2>{error && <p className="negative">{error}</p>}</div>}</main>;
   }
 
+  const { stats, state } = data;
   const open = data.openPosition;
   const live = Date.now() - Date.parse(data.generatedAt) < 15_000;
-  const mode = String(data.state?.mode ?? "paper").toUpperCase();
+  const mode = String(state?.mode ?? "paper").toUpperCase();
+  const pnlTone = stats.totalPnlUsdc >= 0 ? "positive" : "negative";
 
   return (
-    <main style={styles.page}>
-      <header style={styles.header}>
-        <div>
-          <small style={styles.eyebrow}>SINGLE MARKET BOT</small>
-          <h1 style={styles.title}>Live Trading Dashboard</h1>
-          <p style={styles.muted}>Refreshes every 5 seconds · Israel time</p>
-        </div>
-        <div style={{ ...styles.status, ...(live ? styles.statusLive : styles.statusStale) }}>
-          <span style={styles.dot} /> {live ? "LIVE" : "STALE"} · {mode}
-        </div>
-      </header>
+    <main className="page">
+      <style jsx global>{`
+        *{box-sizing:border-box} body{margin:0;background:#070b12;color:#f7f9fc;font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif} button,input{font:inherit}
+        .page{min-height:100vh;padding:28px 18px 60px;background:radial-gradient(circle at 8% -10%,rgba(89,243,177,.14),transparent 30%),radial-gradient(circle at 95% 5%,rgba(97,129,255,.10),transparent 26%),#070b12}.shell{max-width:1180px;margin:auto}.topbar{display:flex;justify-content:space-between;align-items:center;gap:18px;margin-bottom:24px}.brand{display:flex;align-items:center;gap:14px}.logo{width:46px;height:46px;border-radius:14px;display:grid;place-items:center;font-size:23px;font-weight:950;color:#07130d;background:linear-gradient(135deg,#59f3b1,#83e8ff);box-shadow:0 10px 34px rgba(89,243,177,.2)}h1,h2,p{margin:0}.title{font-size:clamp(28px,5vw,44px);letter-spacing:-.045em}.subtitle,.muted{color:#8f9db2}.subtitle{margin-top:4px}.badge{display:inline-flex;align-items:center;gap:8px;padding:10px 14px;border-radius:999px;font-size:13px;font-weight:900;letter-spacing:.05em;border:1px solid rgba(89,243,177,.32);background:rgba(89,243,177,.09);color:#65f0ae;white-space:nowrap}.badge.stale{color:#ff8090;border-color:rgba(255,128,144,.35);background:rgba(255,128,144,.09)}.dot{width:8px;height:8px;border-radius:50%;background:currentColor;box-shadow:0 0 12px currentColor}.hero{display:grid;grid-template-columns:1.15fr .85fr;gap:16px;margin-bottom:16px}.hero-card,.card,.metric{border:1px solid #1f2b3b;background:linear-gradient(145deg,rgba(19,29,43,.96),rgba(12,19,30,.96));box-shadow:0 18px 60px rgba(0,0,0,.18)}.hero-card{border-radius:24px;padding:25px;min-height:190px;position:relative;overflow:hidden}.hero-card:after{content:"";position:absolute;width:170px;height:170px;border-radius:50%;right:-60px;bottom:-80px;background:rgba(89,243,177,.08);filter:blur(2px)}.eyebrow{font-size:12px;font-weight:900;letter-spacing:.15em;color:#7f8da3}.hero-value{font-size:clamp(42px,8vw,70px);font-weight:950;letter-spacing:-.055em;margin:14px 0 8px}.hero-row{display:flex;gap:20px;flex-wrap:wrap;margin-top:22px}.mini strong{display:block;font-size:18px;margin-top:3px}.positive{color:#63eead}.negative{color:#ff7d8f}.metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px}.metric{border-radius:18px;padding:17px;min-height:108px}.metric-label{color:#8f9db2;font-size:13px}.metric-value{display:block;font-size:25px;font-weight:900;margin-top:9px;letter-spacing:-.03em}.metric-note{display:block;color:#637188;font-size:12px;margin-top:5px}.card{border-radius:22px;padding:22px;margin-bottom:16px}.card-head{display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap;margin-bottom:18px}.card-title{font-size:24px;letter-spacing:-.03em;margin-top:5px}.position{border-color:rgba(89,243,177,.38);box-shadow:0 18px 65px rgba(39,221,146,.06)}.position-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}.position-item{border:1px solid #1e2b3c;background:#0a111c;border-radius:15px;padding:14px}.position-item span{display:block;color:#8290a5;font-size:12px}.position-item strong{display:block;margin-top:7px;font-size:17px;overflow-wrap:anywhere}.filters{display:flex;gap:7px}.filter{border:1px solid #2c3b50;background:#0b121e;color:#8897ad;border-radius:999px;padding:8px 12px;font-weight:850;font-size:12px}.filter.active{background:#eef4fa;color:#07101a;border-color:#eef4fa}.trade-list{display:grid;gap:9px}.trade{display:grid;grid-template-columns:76px minmax(170px,1fr) 100px 100px 110px;align-items:center;gap:12px;border:1px solid #1c2939;background:#0a111c;border-radius:15px;padding:14px}.trade.win{border-left:4px solid #59f3b1}.trade.loss{border-left:4px solid #ff7387}.result{font-size:13px;font-weight:950;letter-spacing:.08em}.trade-main strong{display:block;font-size:17px}.trade-main small,.trade-cell small{color:#75849a}.trade-cell strong{display:block;margin-top:4px}.trade-pnl{text-align:right;font-size:18px;font-weight:950}.footer{color:#66758a;font-size:12px;text-align:center;padding-top:8px}.error{border:1px solid rgba(255,115,135,.35);background:rgba(255,115,135,.08);color:#ff8090;padding:13px;border-radius:14px;margin-bottom:15px}.center{min-height:100vh;display:grid;place-items:center;padding:20px;background:#070b12}.login-card{width:min(420px,100%);border:1px solid #1f2b3b;background:#101925;border-radius:22px;padding:26px;display:grid;gap:14px}.login-card input{padding:14px;border-radius:12px;border:1px solid #2c3b50;background:#080e17;color:white}.primary{padding:14px;border:0;border-radius:12px;font-weight:900;background:#59f3b1;color:#06100b}
+        @media(max-width:850px){.hero{grid-template-columns:1fr}.metrics{grid-template-columns:repeat(2,1fr)}.position-grid{grid-template-columns:repeat(2,1fr)}.trade{grid-template-columns:58px minmax(130px,1fr) 82px}.trade-cell.size,.trade-cell.return{display:none}.topbar{align-items:flex-start}.badge{margin-top:4px}}
+        @media(max-width:520px){.page{padding:18px 12px 44px}.topbar{display:block}.badge{margin-top:14px}.hero-card{padding:20px;min-height:165px}.metrics{gap:8px}.metric{padding:14px;min-height:98px}.metric-value{font-size:22px}.card{padding:17px}.position-grid{grid-template-columns:1fr 1fr}.trade{grid-template-columns:50px minmax(100px,1fr) 88px;padding:12px;gap:8px}.trade-pnl{font-size:15px}.filters{width:100%}.filter{flex:1}.card-head{align-items:flex-start}}
+      `}</style>
+      <div className="shell">
+        <header className="topbar">
+          <div className="brand"><div className="logo">S</div><div><h1 className="title">Solana Market Bot</h1><p className="subtitle">Market-wide scanner · executable paper results</p></div></div>
+          <div className={`badge ${live ? "" : "stale"}`}><span className="dot" />{live ? "LIVE" : "STALE"} · {mode}</div>
+        </header>
+        {error && <div className="error">{error}</div>}
 
-      {error && <div style={styles.errorBox}>{error}</div>}
+        <section className="hero">
+          <div className="hero-card"><span className="eyebrow">TOTAL PERFORMANCE</span><div className={`hero-value ${pnlTone}`}>{signedMoney(stats.totalPnlUsdc)}</div><span className={pnlTone}>{pct(stats.returnPct)} return</span><div className="hero-row"><div className="mini"><span className="muted">Cash</span><strong>${stats.cashUsdc.toFixed(3)}</strong></div><div className="mini"><span className="muted">Starting cash</span><strong>${stats.startingCashUsdc.toFixed(2)}</strong></div><div className="mini"><span className="muted">Trades</span><strong>{stats.completed}</strong></div></div></div>
+          <div className="hero-card"><span className="eyebrow">WIN RATE</span><div className="hero-value">{(stats.winRate * 100).toFixed(1)}%</div><div className="hero-row"><div className="mini"><span className="muted">Wins</span><strong className="positive">{stats.wins}</strong></div><div className="mini"><span className="muted">Losses</span><strong className="negative">{stats.losses}</strong></div><div className="mini"><span className="muted">Profit factor</span><strong>{stats.profitFactor == null ? "∞" : stats.profitFactor.toFixed(2)}</strong></div></div></div>
+        </section>
 
-      <section style={styles.statsGrid}>
-        <Stat label="Cash" value={`$${data.stats.cashUsdc.toFixed(3)}`} />
-        <Stat label="Total PnL" value={money(data.stats.totalPnlUsdc)} tone={data.stats.totalPnlUsdc >= 0 ? "win" : "loss"} />
-        <Stat label="Wins" value={String(data.stats.wins)} tone="win" />
-        <Stat label="Losses" value={String(data.stats.losses)} tone="loss" />
-        <Stat label="Win rate" value={`${(data.stats.winRate * 100).toFixed(1)}%`} />
-        <Stat label="Completed" value={String(data.stats.completed)} />
-      </section>
+        <section className="metrics">
+          <Metric label="Average win" value={money(stats.averageWinUsdc)} tone="positive" note="per winning trade" />
+          <Metric label="Average loss" value={money(stats.averageLossUsdc)} tone="negative" note="per losing trade" />
+          <Metric label="Expectancy" value={signedMoney(stats.expectancyUsdc)} tone={stats.expectancyUsdc >= 0 ? "positive" : "negative"} note="average per trade" />
+          <Metric label="Entries today" value={String(state?.entries_today ?? 0)} note={state?.halted ? `Halted: ${state.halt_reason}` : "Scanner active"} />
+          <Metric label="Gross profit" value={money(stats.grossProfit)} tone="positive" />
+          <Metric label="Gross loss" value={money(stats.grossLoss)} tone="negative" />
+          <Metric label="Best trade" value={stats.bestTrade ? `${stats.bestTrade.symbol} ${signedMoney(stats.bestTrade.pnlUsdc)}` : "—"} tone="positive" note={stats.bestTrade ? pct(stats.bestTrade.pnlPct) : undefined} />
+          <Metric label="Worst trade" value={stats.worstTrade ? `${stats.worstTrade.symbol} ${signedMoney(stats.worstTrade.pnlUsdc)}` : "—"} tone="negative" note={stats.worstTrade ? pct(stats.worstTrade.pnlPct) : undefined} />
+        </section>
 
-      <section style={{ ...styles.card, ...(open ? styles.openCard : styles.closedCard) }}>
-        <div style={styles.cardHeader}>
-          <div>
-            <small style={styles.eyebrow}>{open ? "● OPEN POSITION" : "NO OPEN POSITION"}</small>
-            <h2 style={{ margin: "6px 0 0", fontSize: 30 }}>{open ? String(open.symbol ?? open.token_symbol ?? "UNKNOWN") : "Waiting for next entry"}</h2>
-          </div>
-          <strong style={{ fontSize: 18 }}>{open ? "ACTIVE NOW" : "SCANNING"}</strong>
-        </div>
-        {open ? (
-          <div style={styles.positionGrid}>
-            <PositionItem label="Size" value={`$${Number(open.size_usdc ?? 0).toFixed(3)}`} />
-            <PositionItem label="Entry price" value={`$${Number(open.entry_price_usd ?? 0).toFixed(8)}`} />
-            <PositionItem label="Current / last price" value={`$${Number(open.current_price_usd ?? open.last_price_usd ?? open.entry_price_usd ?? 0).toFixed(8)}`} />
-            <PositionItem label="High-water price" value={`$${Number(open.high_water_price_usd ?? open.entry_price_usd ?? 0).toFixed(8)}`} />
-            <PositionItem label="Entry time" value={time(open.opened_at ?? open.entry_time ?? open.created_at)} />
-            <PositionItem label="Score" value={String(open.score ?? "—")} />
-          </div>
-        ) : (
-          <p style={{ ...styles.muted, marginTop: 18 }}>The scanner is active. A position will appear here immediately after entry.</p>
-        )}
-      </section>
+        <section className="card position"><div className="card-head"><div><span className="eyebrow">{open ? "● OPEN POSITION" : "SCANNER STATUS"}</span><h2 className="card-title">{open ? String(open.symbol ?? "Unknown token") : "Waiting for the next setup"}</h2></div><strong className={open ? "positive" : "muted"}>{open ? "ACTIVE NOW" : "SCANNING"}</strong></div>{open ? <div className="position-grid"><Position label="Size" value={`$${Number(open.sizeUsdc ?? open.size_usdc ?? 0).toFixed(2)}`} /><Position label="Score" value={String(open.score ?? "—")} /><Position label="Entry price" value={`$${Number(open.entryPriceUsd ?? open.entry_price_usd ?? 0).toPrecision(6)}`} /><Position label="High-water" value={`$${Number(open.highWaterPriceUsd ?? open.high_water_price_usd ?? 0).toPrecision(6)}`} /><Position label="Opened" value={time(open.openedAt ?? open.opened_at ?? open.created_at)} /><Position label="Token" value={String(open.name ?? open.symbol ?? "—")} /><Position label="Mint" value={String(open.mint ?? "—")} /><Position label="Trade ID" value={String(open.tradeId ?? open.trade_id ?? "—")} /></div> : <p className="muted">The worker is alive and checking the market. A new position will appear here as soon as all entry conditions pass.</p>}</section>
 
-      <section style={styles.card}>
-        <div style={styles.cardHeader}>
-          <div>
-            <small style={styles.eyebrow}>TRADE HISTORY</small>
-            <h2 style={{ margin: "6px 0 0" }}>Wins and losses</h2>
-          </div>
-          <div style={styles.filters}>
-            {(["all", "wins", "losses"] as const).map((item) => (
-              <button key={item} onClick={() => setFilter(item)} style={{ ...styles.filterButton, ...(filter === item ? styles.filterActive : {}) }}>
-                {item.toUpperCase()}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        <div style={styles.tradeList}>
-          {visibleTrades.map((trade) => {
-            const pnl = Number(trade.pnl_usdc ?? 0);
-            const isWin = pnl > 0;
-            const isLoss = pnl < 0;
-            const result = isWin ? "WIN" : isLoss ? "LOSS" : "FLAT";
-            return (
-              <article key={trade.id} style={{ ...styles.tradeRow, ...(isWin ? styles.winRow : isLoss ? styles.lossRow : {}) }}>
-                <div style={styles.resultBlock}>
-                  <strong style={{ fontSize: 20, color: isWin ? "#5df2a1" : isLoss ? "#ff7185" : "#d8deea" }}>{result}</strong>
-                  <small style={styles.muted}>#{trade.id}</small>
-                </div>
-                <div style={styles.tradeMain}>
-                  <strong style={{ fontSize: 18 }}>{trade.symbol ?? "UNKNOWN"}</strong>
-                  <small style={styles.muted}>{String(trade.exit_reason ?? trade.status ?? "—").replaceAll("_", " ")} · {time(trade.updated_at ?? trade.created_at)}</small>
-                </div>
-                <div style={styles.tradeMeta}>
-                  <small style={styles.muted}>Size</small>
-                  <strong>${Number(trade.size_usdc ?? 0).toFixed(2)}</strong>
-                </div>
-                <div style={styles.tradeMeta}>
-                  <small style={styles.muted}>Return</small>
-                  <strong style={{ color: isWin ? "#5df2a1" : isLoss ? "#ff7185" : "#d8deea" }}>{pct(Number(trade.pnl_pct ?? 0))}</strong>
-                </div>
-                <div style={styles.pnlBlock}>
-                  <strong style={{ fontSize: 21, color: isWin ? "#5df2a1" : isLoss ? "#ff7185" : "#d8deea" }}>{money(pnl)}</strong>
-                </div>
-              </article>
-            );
-          })}
-          {visibleTrades.length === 0 && <p style={styles.muted}>No trades match this filter.</p>}
-        </div>
-      </section>
-
-      <footer style={styles.footer}>Last dashboard update: {time(data.generatedAt)} · Last scanner activity: {time(data.state?.last_scan_at)}</footer>
+        <section className="card"><div className="card-head"><div><span className="eyebrow">RECENT ACTIVITY</span><h2 className="card-title">Trade history</h2></div><div className="filters">{(["all","wins","losses"] as const).map(item => <button key={item} onClick={() => setFilter(item)} className={`filter ${filter === item ? "active" : ""}`}>{item.toUpperCase()}</button>)}</div></div><div className="trade-list">{visibleTrades.map(trade => { const pnl = Number(trade.pnl_usdc ?? 0); const win = pnl > 0; const loss = pnl < 0; return <article key={trade.id} className={`trade ${win ? "win" : loss ? "loss" : ""}`}><div><div className={`result ${win ? "positive" : loss ? "negative" : ""}`}>{win ? "WIN" : loss ? "LOSS" : "FLAT"}</div><small className="muted">#{trade.id}</small></div><div className="trade-main"><strong>{trade.symbol ?? "UNKNOWN"}</strong><small>{String(trade.exit_reason ?? trade.status ?? "—").replaceAll("_"," ")} · {time(trade.updated_at ?? trade.created_at)}</small></div><div className="trade-cell size"><small>Size</small><strong>${Number(trade.size_usdc ?? 0).toFixed(2)}</strong></div><div className="trade-cell return"><small>Return</small><strong className={win ? "positive" : loss ? "negative" : ""}>{pct(Number(trade.pnl_pct ?? 0))}</strong></div><div className={`trade-pnl ${win ? "positive" : loss ? "negative" : ""}`}>{signedMoney(pnl)}</div></article>})}{visibleTrades.length === 0 && <p className="muted">No trades match this filter.</p>}</div></section>
+        <footer className="footer">Updated {time(data.generatedAt)} · Last scan {time(state?.last_scan_at)} · Strategy {state?.scanner_snapshot?.strategyVersion ?? "market timing v2"}</footer>
+      </div>
     </main>
   );
 }
 
-function Stat({ label, value, tone }: { label: string; value: string; tone?: "win" | "loss" }) {
-  return <div style={styles.stat}><small style={styles.muted}>{label}</small><strong style={{ fontSize: 27, color: tone === "win" ? "#5df2a1" : tone === "loss" ? "#ff7185" : "#f5f7fb" }}>{value}</strong></div>;
-}
-
-function PositionItem({ label, value }: { label: string; value: string }) {
-  return <div style={styles.positionItem}><small style={styles.muted}>{label}</small><strong>{value}</strong></div>;
-}
-
-const styles: Record<string, any> = {
-  page: { minHeight: "100vh", background: "#080b12", color: "#f5f7fb", padding: "28px", fontFamily: "Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, sans-serif" },
-  center: { minHeight: "100vh", display: "grid", placeItems: "center", background: "#080b12", color: "#f5f7fb", padding: 24, fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif" },
-  loginCard: { width: "min(420px, 100%)", background: "#101521", border: "1px solid #20293a", borderRadius: 20, padding: 28, display: "grid", gap: 16 },
-  input: { borderRadius: 12, border: "1px solid #313b50", background: "#0a0e17", color: "white", padding: "14px 16px", fontSize: 16 },
-  primaryButton: { border: 0, borderRadius: 12, background: "#5df2a1", color: "#07100b", padding: "14px 16px", fontWeight: 800, cursor: "pointer" },
-  header: { display: "flex", justifyContent: "space-between", alignItems: "center", gap: 20, maxWidth: 1180, margin: "0 auto 24px" },
-  title: { margin: "5px 0 4px", fontSize: "clamp(30px, 5vw, 48px)", letterSpacing: "-0.04em" },
-  eyebrow: { color: "#8c98ad", fontWeight: 800, letterSpacing: "0.13em" },
-  muted: { color: "#8c98ad" },
-  status: { borderRadius: 999, padding: "10px 14px", fontWeight: 900, whiteSpace: "nowrap" },
-  statusLive: { background: "rgba(93,242,161,.12)", color: "#5df2a1", border: "1px solid rgba(93,242,161,.35)" },
-  statusStale: { background: "rgba(255,113,133,.12)", color: "#ff7185", border: "1px solid rgba(255,113,133,.35)" },
-  dot: { display: "inline-block", width: 8, height: 8, borderRadius: 999, background: "currentColor", marginRight: 5 },
-  errorBox: { maxWidth: 1180, margin: "0 auto 18px", padding: 14, background: "rgba(255,113,133,.12)", color: "#ff7185", borderRadius: 12 },
-  statsGrid: { maxWidth: 1180, margin: "0 auto 20px", display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 12 },
-  stat: { background: "#101521", border: "1px solid #20293a", borderRadius: 16, padding: 18, display: "grid", gap: 8 },
-  card: { maxWidth: 1180, margin: "0 auto 20px", background: "#101521", border: "1px solid #20293a", borderRadius: 20, padding: 22 },
-  openCard: { border: "1px solid rgba(93,242,161,.55)", boxShadow: "0 0 35px rgba(93,242,161,.08)" },
-  closedCard: { border: "1px solid #20293a" },
-  cardHeader: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 18, flexWrap: "wrap" },
-  positionGrid: { marginTop: 20, display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: 12 },
-  positionItem: { background: "#0a0e17", border: "1px solid #20293a", borderRadius: 14, padding: 15, display: "grid", gap: 7 },
-  filters: { display: "flex", gap: 8 },
-  filterButton: { border: "1px solid #303a4d", background: "transparent", color: "#9aa6ba", borderRadius: 999, padding: "8px 12px", fontWeight: 800, cursor: "pointer" },
-  filterActive: { background: "#edf2f7", color: "#080b12", borderColor: "#edf2f7" },
-  tradeList: { marginTop: 18, display: "grid", gap: 10 },
-  tradeRow: { display: "grid", gridTemplateColumns: "90px minmax(180px, 1fr) 90px 100px 110px", alignItems: "center", gap: 14, padding: 15, background: "#0b1019", border: "1px solid #20293a", borderRadius: 14 },
-  winRow: { borderLeft: "5px solid #5df2a1" },
-  lossRow: { borderLeft: "5px solid #ff7185" },
-  resultBlock: { display: "grid", gap: 3 },
-  tradeMain: { display: "grid", gap: 5 },
-  tradeMeta: { display: "grid", gap: 5 },
-  pnlBlock: { textAlign: "right" },
-  lossText: { color: "#ff7185" },
-  footer: { maxWidth: 1180, margin: "0 auto", color: "#6f7c91", fontSize: 13, paddingBottom: 30 },
-};
+function Metric({ label, value, tone, note }: { label: string; value: string; tone?: string; note?: string }) { return <div className="metric"><span className="metric-label">{label}</span><strong className={`metric-value ${tone ?? ""}`}>{value}</strong>{note && <small className="metric-note">{note}</small>}</div>; }
+function Position({ label, value }: { label: string; value: string }) { return <div className="position-item"><span>{label}</span><strong>{value}</strong></div>; }
