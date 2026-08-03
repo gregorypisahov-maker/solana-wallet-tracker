@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "build": "node scripts/cleanNextBuild.mjs && node scripts/prepare-background-music.mjs && next build",
+    "build": "node scripts/cleanNextBuild.mjs && next build",
     "start": "next start",
     "single-bot": "node scripts/patch-market-bot-paper-default.mjs && node scripts/patch-single-market-bot-keyless.mjs && node scripts/patch-single-market-bot-store.mjs && node scripts/patch-single-market-bot-stablecoins.mjs && node scripts/patch-single-market-bot-telegram.mjs && tsx single-bot/marketBot.ts",
     "worker": "node scripts/retired-service.mjs worker",
