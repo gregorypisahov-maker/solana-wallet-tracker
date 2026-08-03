@@ -425,8 +425,7 @@ export function startSolEma10xPaperBot(): void {
         .from("sol_ema_10x_state")
         .update({ last_error: message.slice(0, 500), last_heartbeat_at: now, updated_at: now })
         .eq("id", 1)
-        .then(() => undefined)
-        .catch(() => undefined);
+        .then(() => undefined, () => undefined);
     } finally {
       running = false;
     }
