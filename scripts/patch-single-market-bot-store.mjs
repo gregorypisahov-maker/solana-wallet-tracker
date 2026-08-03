@@ -21,5 +21,3 @@ if (source !== original) {
 } else {
   throw new Error("[patch-single-market-bot-store] expected anchors missing");
 }
-
-await import("./patch-single-market-bot-rate-limit.mjs");
