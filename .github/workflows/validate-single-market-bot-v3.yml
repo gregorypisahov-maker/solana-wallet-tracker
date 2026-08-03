@@ -33,6 +33,7 @@ jobs:
           node scripts/patch-single-market-bot-v3-dashboard.mjs
           node scripts/patch-single-market-bot-v3-normalized-stats.mjs
           node scripts/patch-single-market-bot-v3-mobile-dashboard.mjs
+          node scripts/patch-single-market-bot-continuous-paper.mjs
       - name: Validate generated TypeScript syntax
         run: |
           node <<'NODE'
@@ -62,6 +63,9 @@ jobs:
             'confirmToken2022RoundTrip',
             'token2022_blocked_extension_',
             'quoteConfirmation',
+            'CONTINUOUS_PAPER_TRADING',
+            'continuousPaperTrading',
+            'No daily loss or entry halt',
             'normalizedPnl',
             'table-scroll',
             'Swipe sideways to view all columns',
@@ -73,5 +77,11 @@ jobs:
           if (source.includes('tokenTags.includes("token-2022")')) {
             throw new Error('Blanket Token-2022 ban is still present');
           }
-          console.log('Generated single market bot v3 source is syntactically valid and extension-aware.');
+          if (source.includes('const halted = dailyPnl <= -MAX_DAILY_LOSS_USDC;')) {
+            throw new Error('Paper daily-loss halt is still unguarded');
+          }
+          if (source.includes('state.halted || state.open_position || n(state.entries_today) >= MAX_DAILY_ENTRIES')) {
+            throw new Error('Paper daily-entry/halt gate is still unguarded');
+          }
+          console.log('Generated single market bot v3 source is syntactically valid, extension-aware, and continuous in paper mode.');
           NODE
