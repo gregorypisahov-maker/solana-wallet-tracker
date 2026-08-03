@@ -6,7 +6,7 @@
     "dev": "next dev",
     "build": "node scripts/cleanNextBuild.mjs && next build",
     "start": "next start",
-    "single-bot": "node scripts/patch-market-bot-paper-default.mjs && node scripts/patch-single-market-bot-keyless.mjs && node scripts/patch-single-market-bot-store.mjs && node scripts/patch-single-market-bot-stablecoins.mjs && node scripts/patch-single-market-bot-telegram.mjs && node scripts/patch-single-market-bot-v3-core.mjs && node scripts/patch-single-market-bot-v3-dashboard.mjs && node scripts/patch-single-market-bot-v3-normalized-stats.mjs && tsx single-bot/marketBot.ts",
+    "single-bot": "node scripts/patch-market-bot-paper-default.mjs && node scripts/patch-single-market-bot-keyless.mjs && node scripts/patch-single-market-bot-store.mjs && node scripts/patch-single-market-bot-stablecoins.mjs && node scripts/patch-single-market-bot-classic-spl-only.mjs && node scripts/patch-single-market-bot-telegram.mjs && node scripts/patch-single-market-bot-v3-core.mjs && node scripts/patch-single-market-bot-v3-dashboard.mjs && node scripts/patch-single-market-bot-v3-normalized-stats.mjs && tsx single-bot/marketBot.ts",
     "worker": "node scripts/retired-service.mjs worker",
     "paper-trader": "node scripts/retired-service.mjs paper-trader",
     "worker:dev": "node scripts/retired-service.mjs worker-dev",

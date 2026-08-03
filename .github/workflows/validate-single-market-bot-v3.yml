@@ -27,6 +27,7 @@ jobs:
           node scripts/patch-single-market-bot-keyless.mjs
           node scripts/patch-single-market-bot-store.mjs
           node scripts/patch-single-market-bot-stablecoins.mjs
+          node scripts/patch-single-market-bot-classic-spl-only.mjs
           node scripts/patch-single-market-bot-telegram.mjs
           node scripts/patch-single-market-bot-v3-core.mjs
           node scripts/patch-single-market-bot-v3-dashboard.mjs
@@ -55,6 +56,8 @@ jobs:
             'PAPER_SCALE_TARGET_USDC',
             'recentLossCount',
             'confidenceSizing',
+            'CLASSIC_SPL_TOKEN_PROGRAM',
+            'token-2022',
             'normalizedPnl',
             'Win rate',
             'single_market_bot_rollbacks',
