@@ -1,0 +1,63 @@
+name: Validate single market bot v3
+
+on:
+  pull_request:
+    paths:
+      - "single-bot/**"
+      - "scripts/patch-single-market-bot-*.mjs"
+      - "scripts/patch-market-bot-paper-default.mjs"
+      - "package.json"
+      - "supabase/migrations/**"
+      - ".github/workflows/validate-single-market-bot-v3.yml"
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Apply runtime patch chain
+        run: |
+          node scripts/patch-market-bot-paper-default.mjs
+          node scripts/patch-single-market-bot-keyless.mjs
+          node scripts/patch-single-market-bot-store.mjs
+          node scripts/patch-single-market-bot-stablecoins.mjs
+          node scripts/patch-single-market-bot-telegram.mjs
+          node scripts/patch-single-market-bot-v3-core.mjs
+          node scripts/patch-single-market-bot-v3-dashboard.mjs
+      - name: Validate generated TypeScript syntax
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+          const ts = require('typescript');
+          const source = fs.readFileSync('single-bot/marketBot.ts', 'utf8');
+          const result = ts.transpileModule(source, {
+            reportDiagnostics: true,
+            compilerOptions: {
+              target: ts.ScriptTarget.ES2022,
+              module: ts.ModuleKind.NodeNext,
+              moduleResolution: ts.ModuleResolutionKind.NodeNext,
+            },
+          });
+          const errors = (result.diagnostics || []).filter((d) => d.category === ts.DiagnosticCategory.Error);
+          if (errors.length) {
+            for (const error of errors) console.error(ts.flattenDiagnosticMessageText(error.messageText, '\n'));
+            process.exit(1);
+          }
+          for (const required of [
+            'market_timing_v3_2026_08_03',
+            'PAPER_SCALE_TARGET_USDC',
+            'recentLossCount',
+            'confidenceSizing',
+            'Win rate',
+            'single_market_bot_rollbacks',
+          ]) {
+            if (!source.includes(required)) throw new Error(`Generated bot missing ${required}`);
+          }
+          console.log('Generated single market bot v3 source is syntactically valid.');
+          NODE
