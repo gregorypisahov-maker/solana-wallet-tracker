@@ -9,9 +9,13 @@ const TELEGRAM_BOT_TOKEN = cleanEnv(process.env.TELEGRAM_BOT_TOKEN);
 const TELEGRAM_CHAT_ID = cleanEnv(process.env.TELEGRAM_CHAT_ID);
 const POLL_MS = Math.max(2_000, Number(process.env.TELEGRAM_ALERT_RELAY_POLL_MS) || 5_000);
 const MAX_ATTEMPTS = Math.max(1, Number(process.env.TELEGRAM_ALERT_RELAY_MAX_ATTEMPTS) || 5);
+const SEND_TIMEOUT_MS = Math.max(
+  3_000,
+  Number(process.env.TELEGRAM_ALERT_RELAY_SEND_TIMEOUT_MS) || 10_000,
+);
 const STALE_SENDING_MS = Math.max(
-  60_000,
-  Number(process.env.TELEGRAM_ALERT_RELAY_STALE_SENDING_MS) || 5 * 60_000,
+  SEND_TIMEOUT_MS * 3,
+  Number(process.env.TELEGRAM_ALERT_RELAY_STALE_SENDING_MS) || 60_000,
 );
 const supabase = getSupabaseAdmin();
 let relayRunning = false;
@@ -24,18 +28,30 @@ interface AlertRow {
 }
 
 async function sendMessage(message: string): Promise<void> {
-  const response = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      chat_id: TELEGRAM_CHAT_ID,
-      text: message,
-      parse_mode: "HTML",
-      disable_web_page_preview: false,
-    }),
-  });
-  if (!response.ok) {
-    throw new Error(`Telegram sendMessage failed: ${response.status} ${await response.text()}`);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), SEND_TIMEOUT_MS);
+  try {
+    const response = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        chat_id: TELEGRAM_CHAT_ID,
+        text: message,
+        parse_mode: "HTML",
+        disable_web_page_preview: false,
+      }),
+      signal: controller.signal,
+    });
+    if (!response.ok) {
+      throw new Error(`Telegram sendMessage failed: ${response.status} ${await response.text()}`);
+    }
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new Error(`Telegram sendMessage timed out after ${SEND_TIMEOUT_MS}ms`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
   }
 }
 
@@ -122,7 +138,7 @@ export function startTelegramAlertRelay(): void {
     return;
   }
   console.log(
-    `[telegram-alert-relay] started; pollMs=${POLL_MS} staleSendingMs=${STALE_SENDING_MS}`,
+    `[telegram-alert-relay] started; pollMs=${POLL_MS} sendTimeoutMs=${SEND_TIMEOUT_MS} staleSendingMs=${STALE_SENDING_MS}`,
   );
   void processOutbox();
   setInterval(() => void processOutbox(), POLL_MS);
