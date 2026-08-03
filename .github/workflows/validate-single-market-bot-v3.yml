@@ -27,9 +27,9 @@ jobs:
           node scripts/patch-single-market-bot-keyless.mjs
           node scripts/patch-single-market-bot-store.mjs
           node scripts/patch-single-market-bot-stablecoins.mjs
-          node scripts/patch-single-market-bot-classic-spl-only.mjs
           node scripts/patch-single-market-bot-telegram.mjs
           node scripts/patch-single-market-bot-v3-core.mjs
+          node scripts/patch-single-market-bot-token2022-safety.mjs
           node scripts/patch-single-market-bot-v3-dashboard.mjs
           node scripts/patch-single-market-bot-v3-normalized-stats.mjs
           node scripts/patch-single-market-bot-v3-mobile-dashboard.mjs
@@ -57,8 +57,11 @@ jobs:
             'PAPER_SCALE_TARGET_USDC',
             'recentLossCount',
             'confidenceSizing',
-            'CLASSIC_SPL_TOKEN_PROGRAM',
-            'token-2022',
+            'TOKEN_2022_PROGRAM',
+            'inspectTokenSafety',
+            'confirmToken2022RoundTrip',
+            'token2022_blocked_extension_',
+            'quoteConfirmation',
             'normalizedPnl',
             'table-scroll',
             'Swipe sideways to view all columns',
@@ -67,5 +70,8 @@ jobs:
           ]) {
             if (!source.includes(required)) throw new Error(`Generated bot missing ${required}`);
           }
-          console.log('Generated single market bot v3 source is syntactically valid.');
+          if (source.includes('tokenTags.includes("token-2022")')) {
+            throw new Error('Blanket Token-2022 ban is still present');
+          }
+          console.log('Generated single market bot v3 source is syntactically valid and extension-aware.');
           NODE
