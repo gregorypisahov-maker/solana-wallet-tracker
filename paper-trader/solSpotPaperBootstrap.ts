@@ -52,10 +52,14 @@ export async function startSolSpotPaperBootstrap(): Promise<void> {
     process.env.BINANCE_SPOT_REST_URL?.trim() || "https://data-api.binance.vision";
 
   try {
-    const { startSolSpotPaperBot } = await import("./solSpotPaper");
+    const [{ startSolSpotPaperBot }, { startSolEma10xPaperBot }] = await Promise.all([
+      import("./solSpotPaper"),
+      import("./solEma10xPaper"),
+    ]);
     startSolSpotPaperBot();
+    startSolEma10xPaperBot();
     console.log(
-      `[sol-spot-bootstrap] module loaded with marketData=${process.env.BINANCE_SPOT_REST_URL}`
+      `[sol-spot-bootstrap] modules loaded with marketData=${process.env.BINANCE_SPOT_REST_URL}`
     );
     setTimeout(() => void verifyHeartbeat(), BOOTSTRAP_WATCHDOG_MS);
   } catch (error) {
