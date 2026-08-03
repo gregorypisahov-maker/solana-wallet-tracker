@@ -1,0 +1,171 @@
+name: Temporary cleanup fix
+
+on:
+  push:
+    branches:
+      - cleanup/fix-build-and-prune-dead-code
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  apply-and-verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: cleanup/fix-build-and-prune-dead-code
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Apply exact requested changes
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('paper-trader/solEma10xPaper.ts')
+          text = p.read_text()
+          old = '        .then(() => undefined)\n        .catch(() => undefined);'
+          new = '        .then(() => undefined, () => undefined);'
+          count = text.count(old)
+          if count != 1:
+              raise SystemExit(f'Expected exactly one target PromiseLike pattern, found {count}')
+          p.write_text(text.replace(old, new, 1))
+          PY
+
+          files=(
+            "paper trader"
+            "scripts/apply-ai-early-exit-credit-budget.mjs"
+            "scripts/apply-ai-helius-shadow-outcomes.mjs"
+            "scripts/apply-ai-paper-entry-fallback.mjs"
+            "scripts/apply-ai-split-exit.mjs"
+            "scripts/apply-gecko-discovery-cooldown-fix.mjs"
+            "scripts/apply-memecoin-sniper-hard-gates.mjs"
+            "scripts/patch-ai-capital-paper.mjs"
+            "scripts/patch-ai-discovery-dashboard.mjs"
+            "scripts/patch-ai-live-position.mjs"
+            "scripts/patch-ai-profit-floor.mjs"
+            "scripts/patch-binance-bidirectional-dashboard.mjs"
+            "scripts/patch-consensus-cooldown.mjs"
+            "scripts/patch-daily-usd-profit.mjs"
+            "scripts/patch-dashboard-egress-lite.mjs"
+            "scripts/patch-dashboard-sol-price-fallback.mjs"
+            "scripts/patch-live-capital-sizing.mjs"
+            "scripts/patch-moonshot-intelligence.mjs"
+            "scripts/patch-single-bot-helius-auth.mjs"
+            "scripts/patch-single-bot-ignore-reasons.mjs"
+            "scripts/patch-single-market-bot-alert-format.mjs"
+            "scripts/patch-single-market-bot-rate-limit.mjs"
+            "scripts/patch-sol-spot-resilience.mjs"
+            "scripts/patch-storefront-public-copy.mjs"
+            "scripts/patch-telegram-resilience.mjs"
+            "scripts/patch-telegram-sol-spot.mjs"
+            "scripts/patch-wallet-discovery.mjs"
+            "scripts/patch-wallet-lab-dashboard.mjs"
+            "scripts/patch-wallet-lab-qualified-activation.mjs"
+          )
+          for f in "${files[@]}"; do
+            test -f "$f" || { echo "Missing requested deletion: $f"; exit 1; }
+          done
+          rm -- "${files[@]}"
+
+          protected=(
+            "scripts/patch-market-bot-paper-default.mjs"
+            "scripts/patch-single-market-bot-keyless.mjs"
+            "scripts/patch-single-market-bot-store.mjs"
+            "scripts/patch-single-market-bot-stablecoins.mjs"
+            "scripts/patch-single-market-bot-telegram.mjs"
+            "scripts/cleanNextBuild.mjs"
+            "scripts/retired-service.mjs"
+          )
+          for f in "${protected[@]}"; do
+            test -f "$f" || { echo "Protected live script missing: $f"; exit 1; }
+          done
+
+      - name: Regenerate lockfile
+        run: npm install
+
+      - name: Verify npm ci dry run
+        shell: bash
+        run: |
+          set -o pipefail
+          npm ci --dry-run 2>&1 | tee /tmp/npm-ci-dry-run.txt
+
+      - name: Verify npm ci
+        shell: bash
+        run: |
+          set -o pipefail
+          npm ci 2>&1 | tee /tmp/npm-ci.txt
+
+      - name: Verify build
+        shell: bash
+        run: |
+          set -o pipefail
+          npm run build 2>&1 | tee /tmp/npm-build.txt
+
+      - name: Commit requested changes only
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm .github/workflows/_temporary_cleanup_fix.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --cached --name-status
+          git commit -m "fix build, sync lockfile, and prune dead scripts"
+          git push origin HEAD:cleanup/fix-build-and-prune-dead-code
+
+      - name: Open PR with verification results
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tail -n 35 /tmp/npm-ci-dry-run.txt > /tmp/dry-tail.txt
+          tail -n 35 /tmp/npm-ci.txt > /tmp/ci-tail.txt
+          tail -n 60 /tmp/npm-build.txt > /tmp/build-tail.txt
+          {
+            echo '## Summary'
+            echo '- Fix the Supabase PromiseLike rejection handler in `paper-trader/solEma10xPaper.ts`.'
+            echo '- Regenerate `package-lock.json` from the current `package.json`.'
+            echo '- Delete exactly the 29 requested dead files.'
+            echo
+            echo '## Verification'
+            echo '- `npm ci --dry-run`: **PASS**'
+            echo '- `npm ci`: **PASS**'
+            echo '- `npm run build`: **PASS**'
+            echo
+            echo '<details><summary>npm ci --dry-run output (tail)</summary>'
+            echo
+            echo '```text'
+            cat /tmp/dry-tail.txt
+            echo '```'
+            echo '</details>'
+            echo
+            echo '<details><summary>npm ci output (tail)</summary>'
+            echo
+            echo '```text'
+            cat /tmp/ci-tail.txt
+            echo '```'
+            echo '</details>'
+            echo
+            echo '<details><summary>npm run build output (tail)</summary>'
+            echo
+            echo '```text'
+            cat /tmp/build-tail.txt
+            echo '```'
+            echo '</details>'
+          } > /tmp/pr-body.md
+
+          existing=$(gh pr list --head cleanup/fix-build-and-prune-dead-code --base main --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            gh pr edit "$existing" --title "Fix build, sync lockfile, and prune dead code" --body-file /tmp/pr-body.md
+          else
+            gh pr create --base main --head cleanup/fix-build-and-prune-dead-code --title "Fix build, sync lockfile, and prune dead code" --body-file /tmp/pr-body.md
+          fi
