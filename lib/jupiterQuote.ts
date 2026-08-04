@@ -24,7 +24,7 @@ function headers(): Record<string, string> {
 }
 
 function retryable(status: number): boolean {
-  return status === 408 || status === 425 || status === 429 || status >= 500;
+  return status === 408 || status === 425 || status >= 500;
 }
 
 export async function getJupiterQuote(input: {
@@ -67,6 +67,11 @@ export async function getJupiterQuote(input: {
       }
 
       const body = await response.text().catch(() => "");
+      if (response.status === 429) {
+        const retryAfter = response.headers.get("retry-after") || "";
+        throw new Error(`jupiter_quote_http_429:${body.slice(0, 200)};retry_after=${retryAfter}`);
+      }
+
       lastError = `jupiter_quote_http_${response.status}:${body.slice(0, 300)}`;
       if (response.status === 400 || response.status === 404) {
         return { outLamports: 0n, route: false, raw: null };
@@ -74,6 +79,7 @@ export async function getJupiterQuote(input: {
       if (!retryable(response.status)) throw new Error(lastError);
     } catch (error) {
       lastError = error instanceof Error ? error.message : String(error);
+      if (/jupiter_quote_http_429/i.test(lastError)) throw new Error(lastError);
     } finally {
       clearTimeout(timer);
     }
