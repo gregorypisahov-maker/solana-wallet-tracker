@@ -29,18 +29,21 @@ function isTradeLifecycleAlert(message: string): boolean {
     normalized.includes('trade opened') ||
     normalized.includes('position opened') ||
     normalized.includes('live buy executed') ||
-    normalized.includes('live trade buy');
+    normalized.includes('live trade buy') ||
+    normalized.includes('paper sniper opened');
 
   const closed =
     normalized.includes('trade closed') ||
     normalized.includes('position closed') ||
     normalized.includes('live sell executed') ||
-    normalized.includes('live trade sell');
+    normalized.includes('live trade sell') ||
+    normalized.includes('paper sniper closed');
 
   return opened || closed;
 }
 
-function shouldDeliverTelegramAlert(message: string): boolean {
+function shouldDeliverTelegramAlert(message: string, forceOperational: boolean): boolean {
+  if (forceOperational) return true;
   if (TELEGRAM_ALERT_MODE === 'all') return true;
   if (TELEGRAM_ALERT_MODE === 'off' || TELEGRAM_ALERT_MODE === 'none') return false;
   return isTradeLifecycleAlert(message);
@@ -64,12 +67,9 @@ async function enqueueTelegramAlert(message: string, reason: string): Promise<bo
   }
 }
 
-export async function sendTelegramAlert(message: string): Promise<void> {
-  if (!shouldDeliverTelegramAlert(message)) {
-    return;
-  }
+export async function sendTelegramAlert(message: string, options?: { forceOperational?: boolean }): Promise<void> {
+  if (!shouldDeliverTelegramAlert(message, options?.forceOperational === true)) return;
 
-  // One shared token for alerts and inbound commands when available on this service.
   const token = cleanEnv(process.env.TELEGRAM_BOT_TOKEN);
   const chatId = cleanEnv(process.env.TELEGRAM_CHAT_ID);
   if (!token || !chatId) {
@@ -103,12 +103,9 @@ export async function sendTelegramAlert(message: string): Promise<void> {
       await enqueueTelegramAlert(message, `direct_http_${res.status}`);
     }
   } catch (error) {
-    const reason =
-      error instanceof Error && error.name === 'AbortError'
-        ? `timed out after ${TELEGRAM_TIMEOUT_MS}ms`
-        : error instanceof Error
-          ? error.message
-          : String(error);
+    const reason = error instanceof Error && error.name === 'AbortError'
+      ? `timed out after ${TELEGRAM_TIMEOUT_MS}ms`
+      : error instanceof Error ? error.message : String(error);
     console.error('Telegram send failed:', reason);
     await enqueueTelegramAlert(message, 'direct_network_failure');
   } finally {
@@ -129,70 +126,31 @@ export function formatConsensusAlert(data: {
   confidenceGrade?: 'A' | 'B' | 'C' | 'D';
   signalSource?: 'wallet_consensus' | 'proven_trader_copy';
   leaderWallet?: string;
-  leaderProfile?: {
-    closedTrades: number;
-    winRate: number;
-    realizedPnlSol: number;
-    profitFactor: number | null;
-  };
+  leaderProfile?: { closedTrades: number; winRate: number; realizedPnlSol: number; profitFactor: number | null };
 }) {
   const dex = `https://dexscreener.com/solana/${data.tokenMint}`;
   const gmgn = `https://gmgn.ai/sol/token/${data.tokenMint}`;
-
   const lines = [
-    data.signalSource === 'proven_trader_copy'
-      ? '🎯 <b>Verified Profitable Trader Copy</b>'
-      : '🚨 <b>Smart Wallet Consensus</b>',
-    '',
-    `🪙 <b>${data.symbol ?? 'Unknown'}</b>`,
-    '',
-    `⭐ Score: <b>${data.score}/100</b>`,
-    `👥 Wallets: <b>${data.walletsCount}</b>`,
+    data.signalSource === 'proven_trader_copy' ? '🎯 <b>Verified Profitable Trader Copy</b>' : '🚨 <b>Smart Wallet Consensus</b>',
+    '', `🪙 <b>${data.symbol ?? 'Unknown'}</b>`, '',
+    `⭐ Score: <b>${data.score}/100</b>`, `👥 Wallets: <b>${data.walletsCount}</b>`,
     `◎ Total Bought: <b>${data.totalSol.toFixed(2)} SOL</b>`,
     `💰 Market Cap: <b>$${Math.round(data.marketCap ?? 0).toLocaleString()}</b>`,
     `💧 Liquidity: <b>$${Math.round(data.liquidityUsd ?? 0).toLocaleString()}</b>`,
   ];
-
   if (data.signalSource === 'proven_trader_copy' && data.leaderProfile) {
-    lines.push(
-      '',
-      `🧠 Leader: <code>${data.leaderWallet ?? 'verified'}</code>`,
+    lines.push('', `🧠 Leader: <code>${data.leaderWallet ?? 'verified'}</code>`,
       `Closed swaps: <b>${data.leaderProfile.closedTrades}</b>`,
       `Win rate: <b>${(data.leaderProfile.winRate * 100).toFixed(1)}%</b>`,
       `Profit factor: <b>${data.leaderProfile.profitFactor?.toFixed(2) ?? 'n/a'}</b>`,
-      `Realized PnL: <b>${data.leaderProfile.realizedPnlSol.toFixed(2)} SOL</b>`,
-      'Paper size: <b>50% of normal</b>',
-    );
+      `Realized PnL: <b>${data.leaderProfile.realizedPnlSol.toFixed(2)} SOL</b>`, 'Paper size: <b>50% of normal</b>');
   }
-
-  const hasTrustData =
-    data.weightedWalletScore !== undefined ||
-    data.averageTrustScore !== undefined ||
-    data.confidenceGrade !== undefined;
-
-  if (hasTrustData) {
+  if (data.weightedWalletScore !== undefined || data.averageTrustScore !== undefined || data.confidenceGrade !== undefined) {
     lines.push('');
-    if (data.weightedWalletScore !== undefined) {
-      lines.push(`⚖️ Weighted Score: <b>${data.weightedWalletScore.toFixed(2)}</b> (raw ${data.walletsCount})`);
-    }
-    if (data.averageTrustScore !== undefined) {
-      lines.push(`🛡️ Avg Wallet Trust: <b>${data.averageTrustScore.toFixed(1)}/100</b>`);
-    }
-    if (data.confidenceGrade !== undefined) {
-      const gradeEmoji = { A: '🟢', B: '🟡', C: '🟠', D: '🔴' }[data.confidenceGrade];
-      lines.push(`${gradeEmoji} Confidence Grade: <b>${data.confidenceGrade}</b>`);
-    }
+    if (data.weightedWalletScore !== undefined) lines.push(`⚖️ Weighted Score: <b>${data.weightedWalletScore.toFixed(2)}</b> (raw ${data.walletsCount})`);
+    if (data.averageTrustScore !== undefined) lines.push(`🛡️ Avg Wallet Trust: <b>${data.averageTrustScore.toFixed(1)}/100</b>`);
+    if (data.confidenceGrade !== undefined) lines.push(`${{ A: '🟢', B: '🟡', C: '🟠', D: '🔴' }[data.confidenceGrade]} Confidence Grade: <b>${data.confidenceGrade}</b>`);
   }
-
-  lines.push(
-    '',
-    '🧬 Mint',
-    `<code>${data.tokenMint}</code>`,
-    '',
-    `📈 DexScreener\n${dex}`,
-    '',
-    `⚡ GMGN\n${gmgn}`,
-  );
-
+  lines.push('', '🧬 Mint', `<code>${data.tokenMint}</code>`, '', `📈 DexScreener\n${dex}`, '', `⚡ GMGN\n${gmgn}`);
   return lines.join('\n');
 }
