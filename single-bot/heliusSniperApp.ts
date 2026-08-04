@@ -5,5 +5,12 @@ import { startHeliusMillisecondSniper } from "./heliusMillisecondSniper";
 // sniperPaperApp, but its timed discovery loop is disabled before import.
 process.env.ENABLE_MOMENTUM_SCALPER = "false";
 
-startHeliusMillisecondSniper();
-await import("./sniperPaperApp");
+async function main(): Promise<void> {
+  startHeliusMillisecondSniper();
+  await import("./sniperPaperApp");
+}
+
+main().catch((error) => {
+  console.error("[helius-sniper-app] fatal startup error", error);
+  process.exit(1);
+});
