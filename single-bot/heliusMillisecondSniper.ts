@@ -19,6 +19,7 @@ const JUPITER_429_BACKOFF_MS = Math.max(2_000, Number(process.env.SNIPER_JUPITER
 const MAX_PENDING = Math.max(1, Number(process.env.SNIPER_MAX_PENDING || 20));
 const MAX_ATTEMPTS_PER_TICK = Math.max(1, Number(process.env.SNIPER_MAX_ATTEMPTS_PER_TICK || 1));
 const MAX_IMMEDIATE_ROUND_TRIP_LOSS_PCT = Math.min(-0.1, Number(process.env.SNIPER_MAX_IMMEDIATE_ROUND_TRIP_LOSS_PCT || -3));
+const MIN_POOL_LIQUIDITY_USD = Math.max(0, Number(process.env.SNIPER_MIN_POOL_LIQUIDITY_USD || 25_000));
 const DEX_URL = "https://api.dexscreener.com/tokens/v1/solana";
 
 const BLOCKED_MINTS = new Set([
@@ -72,7 +73,12 @@ async function pairFor(mint: string) {
   if (!response.ok) return null;
   const body = await response.json() as any[];
   const pair = (Array.isArray(body) ? body : []).filter((p) => p?.chainId === "solana" && p?.baseToken?.address === mint && Number(p?.priceUsd || 0) > 0).sort((a, b) => Number(b?.liquidity?.usd || 0) - Number(a?.liquidity?.usd || 0))[0];
-  return pair ? { address: String(pair.pairAddress), priceUsd: Number(pair.priceUsd), symbol: String(pair.baseToken?.symbol || mint.slice(0, 8)) } : null;
+  return pair ? {
+    address: String(pair.pairAddress),
+    priceUsd: Number(pair.priceUsd),
+    symbol: String(pair.baseToken?.symbol || mint.slice(0, 8)),
+    liquidityUsd: Number(pair.liquidity?.usd || 0),
+  } : null;
 }
 
 async function waitForJupiterSlot() {
@@ -99,6 +105,11 @@ async function attempt(item: Candidate) {
   if (latencyBeforeQuote > TTL_MS) return reject(item, `stale_before_quote_ms=${latencyBeforeQuote}`);
   if (BLOCKED_MINTS.has(item.mint)) return reject(item, "blocked_mint");
 
+  const pair = await pairFor(item.mint);
+  if (!pair || pair.liquidityUsd < MIN_POOL_LIQUIDITY_USD) return false;
+  const normalizedSymbol = pair.symbol.trim().toUpperCase();
+  if (BLOCKED_SYMBOLS.has(normalizedSymbol)) return reject(item, `blocked_symbol=${normalizedSymbol}`);
+
   const tradeInputSol = SIZE_SOL - legOverheadSol();
   if (tradeInputSol <= 0) throw new Error("position_size_below_entry_transaction_cost");
 
@@ -124,11 +135,6 @@ async function attempt(item: Candidate) {
     return reject(item, `round_trip_cost_pct=${immediateRoundTripNetPct.toFixed(3)};floor=${MAX_IMMEDIATE_ROUND_TRIP_LOSS_PCT.toFixed(3)}`);
   }
 
-  const pair = await pairFor(item.mint);
-  if (!pair) return false;
-  const normalizedSymbol = pair.symbol.trim().toUpperCase();
-  if (BLOCKED_SYMBOLS.has(normalizedSymbol)) return reject(item, `blocked_symbol=${normalizedSymbol}`);
-
   const now = new Date().toISOString();
   const latency = Date.now() - item.detectedAt;
   if (latency > TTL_MS) return reject(item, `stale_before_open_ms=${latency}`);
@@ -138,6 +144,8 @@ async function attempt(item: Candidate) {
     detected_at: new Date(item.detectedAt).toISOString(), detection_to_entry_ms: latency,
     attempts: item.attempts, capital_debited_sol: SIZE_SOL, swap_input_sol: tradeInputSol,
     token_raw_amount: conservativeTokens.toString(), slippage_bps: SLIPPAGE_BPS,
+    pool_liquidity_usd: pair.liquidityUsd,
+    min_pool_liquidity_usd: MIN_POOL_LIQUIDITY_USD,
     jupiter_buy: buy.raw, jupiter_sell_check: sell.raw,
     entry_costs: routeFeeSummary(buy.raw), exit_preview_costs: routeFeeSummary(sell.raw),
     immediate_round_trip_net_sol: roundTripNetSol,
@@ -149,9 +157,9 @@ async function attempt(item: Candidate) {
   const { error } = await supabase.rpc("open_paper_scalp", { p_position_id: randomUUID(), p_mint: item.mint, p_token_symbol: pair.symbol, p_pair_address: pair.address, p_entry_price_usd: pair.priceUsd, p_entry_time: now, p_size_sol: SIZE_SOL, p_entry_snapshot: snapshot });
   if (error) { if (/already open|daily entry|disabled|halted|insufficient/i.test(error.message)) return false; throw error; }
   entriesSinceHeartbeat += 1;
-  await audit("entered", item.mint, `latency_ms=${latency};attempts=${item.attempts};round_trip_net=${roundTripNetSol.toFixed(6)}`, true);
-  await telegram(`✅ <b>PAPER SNIPER OPENED</b>\n\n🪙 <b>${pair.symbol}</b>\nSize: <b>${SIZE_SOL.toFixed(3)} SOL</b>\nSource: <b>${item.source}</b>\nDetection → entry: <b>${latency} ms</b>\nJupiter attempts: <b>${item.attempts}</b>\nWorst-case immediate round trip: <b>${roundTripNetSol.toFixed(6)} SOL</b>\nEstimated immediate cost: <b>${((1 - roundTripNetSol / SIZE_SOL) * 100).toFixed(2)}%</b>\n\nMint:\n<code>${item.mint}</code>`);
-  console.log(`[helius-sniper] ENTER ${pair.symbol} ${item.mint} latency=${latency}ms netRoundTrip=${roundTripNetSol.toFixed(6)}`);
+  await audit("entered", item.mint, `latency_ms=${latency};attempts=${item.attempts};liquidity_usd=${pair.liquidityUsd.toFixed(0)};round_trip_net=${roundTripNetSol.toFixed(6)}`, true);
+  await telegram(`✅ <b>PAPER SNIPER OPENED</b>\n\n🪙 <b>${pair.symbol}</b>\nSize: <b>${SIZE_SOL.toFixed(3)} SOL</b>\nSource: <b>${item.source}</b>\nPool liquidity: <b>$${pair.liquidityUsd.toFixed(0)}</b>\nDetection → entry: <b>${latency} ms</b>\nJupiter attempts: <b>${item.attempts}</b>\nWorst-case immediate round trip: <b>${roundTripNetSol.toFixed(6)} SOL</b>\nEstimated immediate cost: <b>${((1 - roundTripNetSol / SIZE_SOL) * 100).toFixed(2)}%</b>\n\nMint:\n<code>${item.mint}</code>`);
+  console.log(`[helius-sniper] ENTER ${pair.symbol} ${item.mint} liquidityUsd=${pair.liquidityUsd.toFixed(0)} latency=${latency}ms netRoundTrip=${roundTripNetSol.toFixed(6)}`);
   return true;
 }
 
@@ -204,13 +212,19 @@ function subscribe(connection: Connection, program: PublicKey, source: string) {
       const mint = await extractMint(connection, signature);
       if (!mint || seen.has(mint) || BLOCKED_MINTS.has(mint)) return;
       seen.set(mint, detectedAt);
-      trimPendingForNewest();
-      pending.set(mint, { mint, signature, detectedAt, attempts: 0, source, nextAttemptAt: detectedAt });
       detectionsSinceHeartbeat += 1;
       await audit("detected", mint, `source=${source};signature=${signature}`);
+
+      if (source !== "pumpswap_pool") {
+        await audit("skipped", mint, `source=${source};reason=awaiting_pumpswap_migration`);
+        return;
+      }
+
+      trimPendingForNewest();
+      pending.set(mint, { mint, signature, detectedAt, attempts: 0, source, nextAttemptAt: detectedAt });
       if (Date.now() - lastDetectionAlertAt >= DETECTION_ALERT_MIN_MS) {
         lastDetectionAlertAt = Date.now();
-        void telegram(`🚀 <b>SNIPER LAUNCH DETECTED</b>\n\nSource: <b>${source}</b>\nMint:\n<code>${mint}</code>\n\nJupiter queue active; newest launches are prioritized.`);
+        void telegram(`🚀 <b>SNIPER POOL MIGRATION DETECTED</b>\n\nSource: <b>${source}</b>\nMint:\n<code>${mint}</code>\n\nLiquidity gate runs before Jupiter quoting; newest migrations are prioritized.`);
       }
       void processQueue();
     } catch (error) { console.warn(`[helius-sniper] parse failed ${signature}`, error); }
@@ -224,8 +238,8 @@ export function startHeliusMillisecondSniper() {
   Promise.all([subscribe(connection, PUMP_PROGRAM, "pump_create"), subscribe(connection, PUMPSWAP_PROGRAM, "pumpswap_pool")])
     .then((ids) => {
       subscriptionIds = ids;
-      console.log(`[helius-sniper] ACTIVE subscriptions=${ids.join(",")} retry=${RETRY_MS}ms jupiterMinInterval=${JUPITER_MIN_INTERVAL_MS}ms maxPending=${MAX_PENDING} ttlMs=${TTL_MS} costFloorPct=${MAX_IMMEDIATE_ROUND_TRIP_LOSS_PCT} liveCostSimulation=true`);
-      void telegram(`🟢 <b>HELIUS SNIPER ONLINE</b>\n\nSubscriptions: <b>${ids.length}</b>\nJupiter minimum interval: <b>${JUPITER_MIN_INTERVAL_MS} ms</b>\nCandidate TTL: <b>${(TTL_MS / 1000).toFixed(1)} sec</b>\nMax immediate cost: <b>${Math.abs(MAX_IMMEDIATE_ROUND_TRIP_LOSS_PCT).toFixed(1)}%</b>\nMax pending: <b>${MAX_PENDING}</b>\nPosition size: <b>${SIZE_SOL.toFixed(3)} SOL paper</b>\nLive-cost simulation: <b>ON</b>`);
+      console.log(`[helius-sniper] ACTIVE subscriptions=${ids.join(",")} retry=${RETRY_MS}ms jupiterMinInterval=${JUPITER_MIN_INTERVAL_MS}ms maxPending=${MAX_PENDING} ttlMs=${TTL_MS} minPoolLiquidityUsd=${MIN_POOL_LIQUIDITY_USD} costFloorPct=${MAX_IMMEDIATE_ROUND_TRIP_LOSS_PCT} liveCostSimulation=true queueSource=pumpswap_pool`);
+      void telegram(`🟢 <b>HELIUS SNIPER ONLINE</b>\n\nSubscriptions: <b>${ids.length}</b>\nTrade queue source: <b>pumpswap_pool migrations only</b>\nMinimum pool liquidity: <b>$${MIN_POOL_LIQUIDITY_USD.toFixed(0)}</b>\nJupiter minimum interval: <b>${JUPITER_MIN_INTERVAL_MS} ms</b>\nCandidate TTL: <b>${(TTL_MS / 1000).toFixed(1)} sec</b>\nMax immediate cost: <b>${Math.abs(MAX_IMMEDIATE_ROUND_TRIP_LOSS_PCT).toFixed(1)}%</b>\nMax pending: <b>${MAX_PENDING}</b>\nPosition size: <b>${SIZE_SOL.toFixed(3)} SOL paper</b>\nLive-cost simulation: <b>ON</b>`);
     })
     .catch((error) => {
       console.error("[helius-sniper] websocket subscription failed", error);
