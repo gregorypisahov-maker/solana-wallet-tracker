@@ -11,8 +11,6 @@ function configureHeliusEndpoints(): { rpc: string; ws: string; source: string }
   const apiKey = clean(process.env.HELIUS_API_KEY);
   const configuredRpc = clean(process.env.HELIUS_RPC_URL);
 
-  // A valid API key is the source of truth. This deliberately ignores a stale
-  // or malformed HELIUS_WS_URL, which previously caused an endless 401 loop.
   if (apiKey) {
     const rpc = `https://mainnet.helius-rpc.com/?api-key=${encodeURIComponent(apiKey)}`;
     const ws = `wss://mainnet.helius-rpc.com/?api-key=${encodeURIComponent(apiKey)}`;
@@ -21,10 +19,7 @@ function configureHeliusEndpoints(): { rpc: string; ws: string; source: string }
     return { rpc, ws, source: "HELIUS_API_KEY" };
   }
 
-  if (!configuredRpc) {
-    throw new Error("HELIUS_API_KEY_or_HELIUS_RPC_URL_missing");
-  }
-
+  if (!configuredRpc) throw new Error("HELIUS_API_KEY_or_HELIUS_RPC_URL_missing");
   const rpcUrl = new URL(configuredRpc);
   if (rpcUrl.protocol !== "https:" && rpcUrl.protocol !== "http:") {
     throw new Error("HELIUS_RPC_URL_invalid_protocol");
@@ -66,13 +61,11 @@ async function main(): Promise<void> {
   console.log(`[helius-sniper-app] Helius endpoints normalized from ${endpoints.source}; custom WS override ignored`);
   await preflightHelius(endpoints.rpc);
 
-  // Research is paper-only and controlled by champion_strategy_state.enabled.
-  // It records accepted and rejected candidates but cannot open positions.
   const { startChampionResearchScheduler } = await import("../paper-trader/championResearch");
+  const { startChampionPaperScheduler } = await import("../paper-trader/championPaper");
   startChampionResearchScheduler();
+  startChampionPaperScheduler();
 
-  // Import only after endpoint normalization so the worker cannot initialize
-  // with a stale Railway HELIUS_WS_URL value.
   const { startHeliusMillisecondSniper } = await import("./heliusMillisecondSniper");
   startHeliusMillisecondSniper();
   await import("./sniperPaperApp");
