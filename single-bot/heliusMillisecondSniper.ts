@@ -9,7 +9,7 @@ const supabase = getSupabaseAdmin();
 const PUMP_PROGRAM = new PublicKey("6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P");
 const PUMPSWAP_PROGRAM = new PublicKey("pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA");
 const RETRY_MS = Math.max(100, Number(process.env.SNIPER_ROUTE_RETRY_MS || 250));
-const TTL_MS = Math.max(15_000, Number(process.env.SNIPER_CANDIDATE_TTL_MS || 90_000));
+const TTL_MS = Math.max(3_000, Number(process.env.SNIPER_CANDIDATE_TTL_MS || 8_000));
 const SIZE_SOL = Math.max(0.01, Number(process.env.SNIPER_POSITION_SIZE_SOL || 0.2));
 const SLIPPAGE_BPS = Math.min(200, Math.max(10, Number(process.env.SNIPER_SLIPPAGE_BPS || 200)));
 const HEARTBEAT_MS = Math.max(300_000, Number(process.env.SNIPER_TELEGRAM_HEARTBEAT_MS || 1_800_000));
@@ -18,7 +18,15 @@ const JUPITER_MIN_INTERVAL_MS = Math.max(250, Number(process.env.SNIPER_JUPITER_
 const JUPITER_429_BACKOFF_MS = Math.max(2_000, Number(process.env.SNIPER_JUPITER_429_BACKOFF_MS || 10_000));
 const MAX_PENDING = Math.max(1, Number(process.env.SNIPER_MAX_PENDING || 20));
 const MAX_ATTEMPTS_PER_TICK = Math.max(1, Number(process.env.SNIPER_MAX_ATTEMPTS_PER_TICK || 1));
+const MAX_IMMEDIATE_ROUND_TRIP_LOSS_PCT = Math.min(-0.1, Number(process.env.SNIPER_MAX_IMMEDIATE_ROUND_TRIP_LOSS_PCT || -3));
 const DEX_URL = "https://api.dexscreener.com/tokens/v1/solana";
+
+const BLOCKED_MINTS = new Set([
+  JUPITER_SOL_MINT,
+  "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", // USDC
+  "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB", // USDT
+]);
+const BLOCKED_SYMBOLS = new Set(["SOL", "WSOL", "USDC", "USDT", "USD"]);
 
 type Candidate = {
   mint: string;
@@ -79,21 +87,52 @@ async function quote(params: Parameters<typeof getJupiterQuote>[0]) {
   return getJupiterQuote(params);
 }
 
+async function reject(item: Candidate, reason: string) {
+  pending.delete(item.mint);
+  await audit("rejected", item.mint, reason);
+  console.log(`[helius-sniper] REJECT mint=${item.mint} reason=${reason}`);
+  return false;
+}
+
 async function attempt(item: Candidate) {
+  const latencyBeforeQuote = Date.now() - item.detectedAt;
+  if (latencyBeforeQuote > TTL_MS) return reject(item, `stale_before_quote_ms=${latencyBeforeQuote}`);
+  if (BLOCKED_MINTS.has(item.mint)) return reject(item, "blocked_mint");
+
   const tradeInputSol = SIZE_SOL - legOverheadSol();
   if (tradeInputSol <= 0) throw new Error("position_size_below_entry_transaction_cost");
+
   const buy = await quote({ inputMint: JUPITER_SOL_MINT, outputMint: item.mint, rawTokenAmount: lamports(tradeInputSol), slippageBps: SLIPPAGE_BPS });
   if (!buy.route || buy.outLamports <= 0n) return false;
+  if (String((buy.raw as any)?.outputMint || "") !== item.mint) return reject(item, "jupiter_output_mint_mismatch");
+
   const conservativeTokens = conservativeQuoteOutputRaw(buy);
   if (conservativeTokens <= 0n) return false;
+
   const sell = await quote({ inputMint: item.mint, outputMint: JUPITER_SOL_MINT, rawTokenAmount: conservativeTokens.toString(), slippageBps: SLIPPAGE_BPS });
   if (!sell.route || sell.outLamports <= 0n) return false;
+  if (String((sell.raw as any)?.inputMint || "") !== item.mint || String((sell.raw as any)?.outputMint || "") !== JUPITER_SOL_MINT) {
+    return reject(item, "jupiter_round_trip_mint_mismatch");
+  }
+
+  const latencyAfterQuotes = Date.now() - item.detectedAt;
+  if (latencyAfterQuotes > TTL_MS) return reject(item, `stale_after_quotes_ms=${latencyAfterQuotes}`);
+
   const roundTripNetSol = conservativeSolProceeds(sell);
-  if (roundTripNetSol < SIZE_SOL * 0.82) return false;
+  const immediateRoundTripNetPct = ((roundTripNetSol / SIZE_SOL) - 1) * 100;
+  if (immediateRoundTripNetPct < MAX_IMMEDIATE_ROUND_TRIP_LOSS_PCT) {
+    return reject(item, `round_trip_cost_pct=${immediateRoundTripNetPct.toFixed(3)};floor=${MAX_IMMEDIATE_ROUND_TRIP_LOSS_PCT.toFixed(3)}`);
+  }
+
   const pair = await pairFor(item.mint);
   if (!pair) return false;
+  const normalizedSymbol = pair.symbol.trim().toUpperCase();
+  if (BLOCKED_SYMBOLS.has(normalizedSymbol)) return reject(item, `blocked_symbol=${normalizedSymbol}`);
+
   const now = new Date().toISOString();
   const latency = Date.now() - item.detectedAt;
+  if (latency > TTL_MS) return reject(item, `stale_before_open_ms=${latency}`);
+
   const snapshot = {
     source: "helius_websocket", launch_source: item.source, detection_signature: item.signature,
     detected_at: new Date(item.detectedAt).toISOString(), detection_to_entry_ms: latency,
@@ -102,7 +141,8 @@ async function attempt(item: Candidate) {
     jupiter_buy: buy.raw, jupiter_sell_check: sell.raw,
     entry_costs: routeFeeSummary(buy.raw), exit_preview_costs: routeFeeSummary(sell.raw),
     immediate_round_trip_net_sol: roundTripNetSol,
-    immediate_round_trip_net_pct: ((roundTripNetSol / SIZE_SOL) - 1) * 100,
+    immediate_round_trip_net_pct: immediateRoundTripNetPct,
+    entry_cost_gate_pct: MAX_IMMEDIATE_ROUND_TRIP_LOSS_PCT,
     simulation_policy: "Jupiter worst-case threshold plus route-change, partial-fill, network, priority and Jito penalties",
     paper_only: true,
   };
@@ -132,7 +172,7 @@ async function processQueue() {
         continue;
       }
       item.attempts += 1;
-      item.nextAttemptAt = Date.now() + Math.min(5_000, RETRY_MS * Math.max(1, item.attempts));
+      item.nextAttemptAt = Date.now() + Math.min(2_000, RETRY_MS * Math.max(1, item.attempts));
       try {
         if (await attempt(item)) pending.delete(item.mint);
       } catch (error) {
@@ -162,7 +202,7 @@ function subscribe(connection: Connection, program: PublicKey, source: string) {
     const detectedAt = Date.now();
     try {
       const mint = await extractMint(connection, signature);
-      if (!mint || seen.has(mint)) return;
+      if (!mint || seen.has(mint) || BLOCKED_MINTS.has(mint)) return;
       seen.set(mint, detectedAt);
       trimPendingForNewest();
       pending.set(mint, { mint, signature, detectedAt, attempts: 0, source, nextAttemptAt: detectedAt });
@@ -184,8 +224,8 @@ export function startHeliusMillisecondSniper() {
   Promise.all([subscribe(connection, PUMP_PROGRAM, "pump_create"), subscribe(connection, PUMPSWAP_PROGRAM, "pumpswap_pool")])
     .then((ids) => {
       subscriptionIds = ids;
-      console.log(`[helius-sniper] ACTIVE subscriptions=${ids.join(",")} retry=${RETRY_MS}ms jupiterMinInterval=${JUPITER_MIN_INTERVAL_MS}ms maxPending=${MAX_PENDING} liveCostSimulation=true`);
-      void telegram(`🟢 <b>HELIUS SNIPER ONLINE</b>\n\nSubscriptions: <b>${ids.length}</b>\nJupiter minimum interval: <b>${JUPITER_MIN_INTERVAL_MS} ms</b>\nCandidate TTL: <b>${Math.round(TTL_MS / 1000)} sec</b>\nMax pending: <b>${MAX_PENDING}</b>\nPosition size: <b>${SIZE_SOL.toFixed(3)} SOL paper</b>\nLive-cost simulation: <b>ON</b>`);
+      console.log(`[helius-sniper] ACTIVE subscriptions=${ids.join(",")} retry=${RETRY_MS}ms jupiterMinInterval=${JUPITER_MIN_INTERVAL_MS}ms maxPending=${MAX_PENDING} ttlMs=${TTL_MS} costFloorPct=${MAX_IMMEDIATE_ROUND_TRIP_LOSS_PCT} liveCostSimulation=true`);
+      void telegram(`🟢 <b>HELIUS SNIPER ONLINE</b>\n\nSubscriptions: <b>${ids.length}</b>\nJupiter minimum interval: <b>${JUPITER_MIN_INTERVAL_MS} ms</b>\nCandidate TTL: <b>${(TTL_MS / 1000).toFixed(1)} sec</b>\nMax immediate cost: <b>${Math.abs(MAX_IMMEDIATE_ROUND_TRIP_LOSS_PCT).toFixed(1)}%</b>\nMax pending: <b>${MAX_PENDING}</b>\nPosition size: <b>${SIZE_SOL.toFixed(3)} SOL paper</b>\nLive-cost simulation: <b>ON</b>`);
     })
     .catch((error) => {
       console.error("[helius-sniper] websocket subscription failed", error);
