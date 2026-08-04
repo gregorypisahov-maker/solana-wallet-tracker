@@ -1,7 +1,7 @@
-// The old Gecko/DexScreener discovery scheduler must not compete with the
-// event-driven Helius launch stream. Position management remains enabled by
-// sniperPaperApp, but its timed discovery loop is disabled before import.
+// Champion-only service entrypoint.
+// The legacy momentum scalper and Helius launch sniper are intentionally disabled.
 process.env.ENABLE_MOMENTUM_SCALPER = "false";
+process.env.ENABLE_HELIUS_MILLISECOND_SNIPER = "false";
 
 function clean(value: string | undefined): string {
   return (value ?? "").trim().replace(/^[\"']|[\"']$/g, "").trim();
@@ -50,7 +50,7 @@ async function preflightHelius(rpc: string): Promise<void> {
     if (parsed.error) {
       throw new Error(`Helius RPC rejected preflight: ${parsed.error.message ?? "unknown error"}`);
     }
-    console.log("[helius-sniper-app] Helius authentication preflight passed");
+    console.log("[champion-app] Helius authentication preflight passed");
   } finally {
     clearTimeout(timeout);
   }
@@ -58,7 +58,7 @@ async function preflightHelius(rpc: string): Promise<void> {
 
 async function main(): Promise<void> {
   const endpoints = configureHeliusEndpoints();
-  console.log(`[helius-sniper-app] Helius endpoints normalized from ${endpoints.source}; custom WS override ignored`);
+  console.log(`[champion-app] Helius endpoints normalized from ${endpoints.source}`);
   await preflightHelius(endpoints.rpc);
 
   const { startChampionResearchScheduler } = await import("../paper-trader/championResearch");
@@ -66,12 +66,11 @@ async function main(): Promise<void> {
   startChampionResearchScheduler();
   startChampionPaperScheduler();
 
-  const { startHeliusMillisecondSniper } = await import("./heliusMillisecondSniper");
-  startHeliusMillisecondSniper();
+  // Dashboard import starts the Express server. No sniper scheduler is imported or started.
   await import("./sniperPaperApp");
 }
 
 main().catch((error) => {
-  console.error("[helius-sniper-app] fatal startup error", error);
+  console.error("[champion-app] fatal startup error", error);
   process.exit(1);
 });
