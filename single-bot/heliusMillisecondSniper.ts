@@ -14,18 +14,37 @@ const SIZE_SOL = Math.max(0.01, Number(process.env.SNIPER_POSITION_SIZE_SOL || 0
 const SLIPPAGE_BPS = Math.min(200, Math.max(10, Number(process.env.SNIPER_SLIPPAGE_BPS || 200)));
 const HEARTBEAT_MS = Math.max(300_000, Number(process.env.SNIPER_TELEGRAM_HEARTBEAT_MS || 1_800_000));
 const DETECTION_ALERT_MIN_MS = Math.max(0, Number(process.env.SNIPER_TELEGRAM_DETECTION_MIN_INTERVAL_MS || 15_000));
+const JUPITER_MIN_INTERVAL_MS = Math.max(250, Number(process.env.SNIPER_JUPITER_MIN_INTERVAL_MS || 800));
+const JUPITER_429_BACKOFF_MS = Math.max(2_000, Number(process.env.SNIPER_JUPITER_429_BACKOFF_MS || 10_000));
+const MAX_PENDING = Math.max(1, Number(process.env.SNIPER_MAX_PENDING || 20));
+const MAX_ATTEMPTS_PER_TICK = Math.max(1, Number(process.env.SNIPER_MAX_ATTEMPTS_PER_TICK || 1));
 const DEX_URL = "https://api.dexscreener.com/tokens/v1/solana";
+
+type Candidate = {
+  mint: string;
+  signature: string;
+  detectedAt: number;
+  attempts: number;
+  source: string;
+  nextAttemptAt: number;
+};
+
 const seen = new Map<string, number>();
-const pending = new Map<string, { mint: string; signature: string; detectedAt: number; attempts: number; source: string }>();
+const pending = new Map<string, Candidate>();
 let processing = false;
 let lastDetectionAlertAt = 0;
 let detectionsSinceHeartbeat = 0;
 let entriesSinceHeartbeat = 0;
 let subscriptionIds: number[] = [];
+let nextJupiterRequestAt = 0;
+let globalJupiterBackoffUntil = 0;
+let jupiter429SinceHeartbeat = 0;
 
 function rpcUrl() { const key = process.env.HELIUS_API_KEY?.trim() || ""; return process.env.HELIUS_RPC_URL?.trim() || `https://mainnet.helius-rpc.com/?api-key=${key}`; }
 function wsUrl() { const key = process.env.HELIUS_API_KEY?.trim() || ""; return process.env.HELIUS_WS_URL?.trim() || `wss://mainnet.helius-rpc.com/?api-key=${key}`; }
 function lamports(sol: number) { return String(Math.floor(sol * 1_000_000_000)); }
+function sleep(ms: number) { return new Promise((resolve) => setTimeout(resolve, ms)); }
+function isRateLimitError(error: unknown) { return /jupiter_quote_http_429|rate limit exceeded/i.test(error instanceof Error ? error.message : String(error)); }
 async function telegram(message: string) { try { await sendTelegramAlert(message, { forceOperational: true }); } catch (error) { console.warn("[helius-sniper] Telegram alert failed", error); } }
 
 async function audit(kind: string, mint: string | null, message: string, selected = false) {
@@ -48,14 +67,26 @@ async function pairFor(mint: string) {
   return pair ? { address: String(pair.pairAddress), priceUsd: Number(pair.priceUsd), symbol: String(pair.baseToken?.symbol || mint.slice(0, 8)) } : null;
 }
 
-async function attempt(item: { mint: string; signature: string; detectedAt: number; attempts: number; source: string }) {
+async function waitForJupiterSlot() {
+  const waitUntil = Math.max(nextJupiterRequestAt, globalJupiterBackoffUntil);
+  const delay = waitUntil - Date.now();
+  if (delay > 0) await sleep(delay);
+  nextJupiterRequestAt = Date.now() + JUPITER_MIN_INTERVAL_MS;
+}
+
+async function quote(params: Parameters<typeof getJupiterQuote>[0]) {
+  await waitForJupiterSlot();
+  return getJupiterQuote(params);
+}
+
+async function attempt(item: Candidate) {
   const tradeInputSol = SIZE_SOL - legOverheadSol();
   if (tradeInputSol <= 0) throw new Error("position_size_below_entry_transaction_cost");
-  const buy = await getJupiterQuote({ inputMint: JUPITER_SOL_MINT, outputMint: item.mint, rawTokenAmount: lamports(tradeInputSol), slippageBps: SLIPPAGE_BPS });
+  const buy = await quote({ inputMint: JUPITER_SOL_MINT, outputMint: item.mint, rawTokenAmount: lamports(tradeInputSol), slippageBps: SLIPPAGE_BPS });
   if (!buy.route || buy.outLamports <= 0n) return false;
   const conservativeTokens = conservativeQuoteOutputRaw(buy);
   if (conservativeTokens <= 0n) return false;
-  const sell = await getJupiterQuote({ inputMint: item.mint, outputMint: JUPITER_SOL_MINT, rawTokenAmount: conservativeTokens.toString(), slippageBps: SLIPPAGE_BPS });
+  const sell = await quote({ inputMint: item.mint, outputMint: JUPITER_SOL_MINT, rawTokenAmount: conservativeTokens.toString(), slippageBps: SLIPPAGE_BPS });
   if (!sell.route || sell.outLamports <= 0n) return false;
   const roundTripNetSol = conservativeSolProceeds(sell);
   if (roundTripNetSol < SIZE_SOL * 0.82) return false;
@@ -85,15 +116,44 @@ async function attempt(item: { mint: string; signature: string; detectedAt: numb
 }
 
 async function processQueue() {
-  if (processing) return; processing = true;
+  if (processing || Date.now() < globalJupiterBackoffUntil) return;
+  processing = true;
   try {
-    for (const [mint, item] of pending) {
-      if (Date.now() - item.detectedAt > TTL_MS) { pending.delete(mint); await audit("expired", mint, `no_executable_round_trip_within_ms=${TTL_MS}`); continue; }
+    const now = Date.now();
+    const candidates = [...pending.values()]
+      .filter((item) => item.nextAttemptAt <= now)
+      .sort((a, b) => b.detectedAt - a.detectedAt)
+      .slice(0, MAX_ATTEMPTS_PER_TICK);
+
+    for (const item of candidates) {
+      if (Date.now() - item.detectedAt > TTL_MS) {
+        pending.delete(item.mint);
+        await audit("expired", item.mint, `no_executable_round_trip_within_ms=${TTL_MS}`);
+        continue;
+      }
       item.attempts += 1;
-      try { if (await attempt(item)) pending.delete(mint); }
-      catch (error) { console.warn(`[helius-sniper] route attempt failed mint=${mint}`, error); }
+      item.nextAttemptAt = Date.now() + Math.min(5_000, RETRY_MS * Math.max(1, item.attempts));
+      try {
+        if (await attempt(item)) pending.delete(item.mint);
+      } catch (error) {
+        if (isRateLimitError(error)) {
+          jupiter429SinceHeartbeat += 1;
+          globalJupiterBackoffUntil = Date.now() + JUPITER_429_BACKOFF_MS;
+          console.warn(`[helius-sniper] Jupiter 429; backing off ${JUPITER_429_BACKOFF_MS}ms pending=${pending.size}`);
+          break;
+        }
+        console.warn(`[helius-sniper] route attempt failed mint=${item.mint}`, error);
+      }
     }
-  } finally { processing = false; }
+  } finally {
+    processing = false;
+  }
+}
+
+function trimPendingForNewest() {
+  if (pending.size < MAX_PENDING) return;
+  const oldest = [...pending.values()].sort((a, b) => a.detectedAt - b.detectedAt)[0];
+  if (oldest) pending.delete(oldest.mint);
 }
 
 function subscribe(connection: Connection, program: PublicKey, source: string) {
@@ -104,12 +164,13 @@ function subscribe(connection: Connection, program: PublicKey, source: string) {
       const mint = await extractMint(connection, signature);
       if (!mint || seen.has(mint)) return;
       seen.set(mint, detectedAt);
-      pending.set(mint, { mint, signature, detectedAt, attempts: 0, source });
+      trimPendingForNewest();
+      pending.set(mint, { mint, signature, detectedAt, attempts: 0, source, nextAttemptAt: detectedAt });
       detectionsSinceHeartbeat += 1;
       await audit("detected", mint, `source=${source};signature=${signature}`);
       if (Date.now() - lastDetectionAlertAt >= DETECTION_ALERT_MIN_MS) {
         lastDetectionAlertAt = Date.now();
-        void telegram(`🚀 <b>SNIPER LAUNCH DETECTED</b>\n\nSource: <b>${source}</b>\nMint:\n<code>${mint}</code>\n\nJupiter route search started every <b>${RETRY_MS} ms</b>.`);
+        void telegram(`🚀 <b>SNIPER LAUNCH DETECTED</b>\n\nSource: <b>${source}</b>\nMint:\n<code>${mint}</code>\n\nJupiter queue active; newest launches are prioritized.`);
       }
       void processQueue();
     } catch (error) { console.warn(`[helius-sniper] parse failed ${signature}`, error); }
@@ -123,8 +184,8 @@ export function startHeliusMillisecondSniper() {
   Promise.all([subscribe(connection, PUMP_PROGRAM, "pump_create"), subscribe(connection, PUMPSWAP_PROGRAM, "pumpswap_pool")])
     .then((ids) => {
       subscriptionIds = ids;
-      console.log(`[helius-sniper] ACTIVE subscriptions=${ids.join(",")} retry=${RETRY_MS}ms ttl=${TTL_MS}ms liveCostSimulation=true`);
-      void telegram(`🟢 <b>HELIUS SNIPER ONLINE</b>\n\nSubscriptions: <b>${ids.length}</b>\nRoute retry: <b>${RETRY_MS} ms</b>\nCandidate TTL: <b>${Math.round(TTL_MS / 1000)} sec</b>\nPosition size: <b>${SIZE_SOL.toFixed(3)} SOL paper</b>\nLive-cost simulation: <b>ON</b>`);
+      console.log(`[helius-sniper] ACTIVE subscriptions=${ids.join(",")} retry=${RETRY_MS}ms jupiterMinInterval=${JUPITER_MIN_INTERVAL_MS}ms maxPending=${MAX_PENDING} liveCostSimulation=true`);
+      void telegram(`🟢 <b>HELIUS SNIPER ONLINE</b>\n\nSubscriptions: <b>${ids.length}</b>\nJupiter minimum interval: <b>${JUPITER_MIN_INTERVAL_MS} ms</b>\nCandidate TTL: <b>${Math.round(TTL_MS / 1000)} sec</b>\nMax pending: <b>${MAX_PENDING}</b>\nPosition size: <b>${SIZE_SOL.toFixed(3)} SOL paper</b>\nLive-cost simulation: <b>ON</b>`);
     })
     .catch((error) => {
       console.error("[helius-sniper] websocket subscription failed", error);
@@ -132,9 +193,11 @@ export function startHeliusMillisecondSniper() {
     });
   setInterval(() => void processQueue(), RETRY_MS);
   setInterval(() => {
-    void telegram(`💓 <b>HELIUS SNIPER HEARTBEAT</b>\n\nStatus: <b>${subscriptionIds.length ? "CONNECTED" : "STARTING / DISCONNECTED"}</b>\nSubscriptions: <b>${subscriptionIds.length}</b>\nLaunches detected: <b>${detectionsSinceHeartbeat}</b>\nEntries opened: <b>${entriesSinceHeartbeat}</b>\nPending candidates: <b>${pending.size}</b>\nRoute retry: <b>${RETRY_MS} ms</b>`);
+    const backoffSeconds = Math.max(0, Math.ceil((globalJupiterBackoffUntil - Date.now()) / 1000));
+    void telegram(`💓 <b>HELIUS SNIPER HEARTBEAT</b>\n\nStatus: <b>${subscriptionIds.length ? "CONNECTED" : "STARTING / DISCONNECTED"}</b>\nSubscriptions: <b>${subscriptionIds.length}</b>\nLaunches detected: <b>${detectionsSinceHeartbeat}</b>\nEntries opened: <b>${entriesSinceHeartbeat}</b>\nPending candidates: <b>${pending.size}</b>\nJupiter 429s: <b>${jupiter429SinceHeartbeat}</b>\nCurrent backoff: <b>${backoffSeconds} sec</b>`);
     detectionsSinceHeartbeat = 0;
     entriesSinceHeartbeat = 0;
+    jupiter429SinceHeartbeat = 0;
   }, HEARTBEAT_MS);
   setInterval(() => { const cutoff = Date.now() - 3_600_000; for (const [mint, at] of seen) if (at < cutoff) seen.delete(mint); }, 60_000);
 }
