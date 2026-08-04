@@ -210,8 +210,10 @@ function subscribe(connection: Connection, program: PublicKey, source: string) {
     const detectedAt = Date.now();
     try {
       const mint = await extractMint(connection, signature);
-      if (!mint || seen.has(mint) || BLOCKED_MINTS.has(mint)) return;
-      seen.set(mint, detectedAt);
+      if (!mint || BLOCKED_MINTS.has(mint)) return;
+      const seenKey = `${source}:${mint}`;
+      if (seen.has(seenKey)) return;
+      seen.set(seenKey, detectedAt);
       detectionsSinceHeartbeat += 1;
       await audit("detected", mint, `source=${source};signature=${signature}`);
 
