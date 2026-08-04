@@ -8,6 +8,13 @@ const JUPITER_BASE = (
 const JUPITER_QUOTE_URL = `${JUPITER_BASE}/quote`;
 const HTTP_TIMEOUT_MS = Math.max(3_000, Number(process.env.JUPITER_HTTP_TIMEOUT_MS) || 12_000);
 const HTTP_ATTEMPTS = Math.max(1, Math.min(5, Number(process.env.JUPITER_HTTP_ATTEMPTS) || 3));
+const MIN_REQUEST_INTERVAL_MS = Math.max(
+  JUPITER_API_KEY ? 1_100 : 2_100,
+  Number(process.env.JUPITER_MIN_REQUEST_INTERVAL_MS) || 0,
+);
+
+let nextAllowedRequestAt = 0;
+let requestChain: Promise<void> = Promise.resolve();
 
 export const JUPITER_SOL_MINT = "So11111111111111111111111111111111111111112";
 
@@ -25,6 +32,28 @@ function headers(): Record<string, string> {
 
 function retryable(status: number): boolean {
   return status === 408 || status === 425 || status >= 500;
+}
+
+async function acquireRequestSlot(): Promise<void> {
+  const previous = requestChain;
+  let release!: () => void;
+  requestChain = new Promise<void>((resolve) => { release = resolve; });
+  await previous;
+  try {
+    const delay = nextAllowedRequestAt - Date.now();
+    if (delay > 0) await sleep(delay);
+    nextAllowedRequestAt = Date.now() + MIN_REQUEST_INTERVAL_MS;
+  } finally {
+    release();
+  }
+}
+
+export function getJupiterClientStatus() {
+  return {
+    baseUrl: JUPITER_BASE,
+    apiKeyConfigured: Boolean(JUPITER_API_KEY),
+    minRequestIntervalMs: MIN_REQUEST_INTERVAL_MS,
+  };
 }
 
 export async function getJupiterQuote(input: {
@@ -51,6 +80,7 @@ export async function getJupiterQuote(input: {
 
   let lastError = "jupiter_quote_failed";
   for (let attempt = 1; attempt <= HTTP_ATTEMPTS; attempt += 1) {
+    await acquireRequestSlot();
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), HTTP_TIMEOUT_MS);
     try {
@@ -67,15 +97,12 @@ export async function getJupiterQuote(input: {
       }
 
       const body = await response.text().catch(() => "");
-      if (response.status === 429) {
-        const retryAfter = response.headers.get("retry-after") || "";
-        throw new Error(`jupiter_quote_http_429:${body.slice(0, 200)};retry_after=${retryAfter}`);
-      }
-
-      lastError = `jupiter_quote_http_${response.status}:${body.slice(0, 300)}`;
+      const retryAfter = response.headers.get("retry-after");
+      lastError = `jupiter_quote_http_${response.status}${retryAfter ? `_retry_after_${retryAfter}` : ""}:${body.slice(0, 300)}`;
       if (response.status === 400 || response.status === 404) {
         return { outLamports: 0n, route: false, raw: null };
       }
+      if (response.status === 429) throw new Error(lastError);
       if (!retryable(response.status)) throw new Error(lastError);
     } catch (error) {
       lastError = error instanceof Error ? error.message : String(error);
