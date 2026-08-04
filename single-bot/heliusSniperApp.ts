@@ -61,6 +61,11 @@ async function main(): Promise<void> {
   console.log(`[champion-app] Helius endpoints normalized from ${endpoints.source}`);
   await preflightHelius(endpoints.rpc);
 
+  // Refuse startup while the two-week freeze is active if any strategy
+  // environment value or frozen version has changed.
+  const { enforceChampionStrategyFreeze } = await import("../paper-trader/championStrategyLock");
+  await enforceChampionStrategyFreeze();
+
   const { startChampionResearchScheduler } = await import("../paper-trader/championResearch");
   const { startChampionPaperScheduler } = await import("../paper-trader/championPaper");
   startChampionResearchScheduler();
