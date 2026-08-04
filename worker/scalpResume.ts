@@ -10,22 +10,28 @@ export async function resumeScalper(): Promise<{ success: boolean; message: stri
   try {
     const { data, error } = await supabase
       .from("scalp_state")
-      .update({ enabled: true, halted: false, halt_reason: null, updated_at: new Date().toISOString() })
+      .update({
+        enabled: true,
+        halted: false,
+        halt_reason: null,
+        consecutive_losses: 0,
+        updated_at: new Date().toISOString(),
+      })
       .eq("id", 1)
       .select("*")
       .single();
 
     if (error) throw new Error(`Failed to resume scalper: ${error.message}`);
 
-    const message = "✅ Momentum scalper RESUMED and ready to scan";
+    const message = "✅ Helius sniper RESUMED and ready to scan";
     console.log(`[scalp-resume] ${message}`);
-    await sendTelegramAlert(`${message}\n\nThe scalper will look for the next qualifying entry on the next scan cycle.`);
+    await sendTelegramAlert(`${message}\n\nThe consecutive-loss halt was cleared and new paper entries are enabled.`);
 
     return { success: true, message, state: data };
   } catch (error) {
     const errorMsg = error instanceof Error ? error.message : String(error);
     console.error("[scalp-resume] Error:", errorMsg);
-    await sendTelegramAlert(`❌ Failed to resume scalper: ${errorMsg}`).catch(() => {});
+    await sendTelegramAlert(`❌ Failed to resume Helius sniper: ${errorMsg}`).catch(() => {});
     return { success: false, message: `Resume failed: ${errorMsg}` };
   }
 }
