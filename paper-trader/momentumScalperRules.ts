@@ -31,7 +31,9 @@ export type CandidateEvaluation = {
 };
 
 export type ExitDecision = {
+  netMultiple: number;
   grossReturnPct: number;
+  netReturnPct: number;
   reason: string;
 };
 
@@ -68,36 +70,11 @@ export const SCALP_RULES = {
   minimumSignalScore: envNumber("SCALP_MIN_SIGNAL_SCORE", 45, 0, 100),
   fixedSizeSol: envNumber("SCALP_POSITION_SIZE_SOL", 0.20, 0.001, 10_000),
   maxConcurrentPositions: Math.floor(envNumber("SCALP_MAX_CONCURRENT", 3, 1, 50)),
-  targetProfitPct: envNumber(
-    "SCALP_TARGET_PROFIT_PCT",
-    scalpMode ? 5 : 25,
-    0.1,
-    1_000
-  ),
-  hardStopLossPct: envNumber(
-    "SCALP_HARD_STOP_PCT",
-    scalpMode ? 3.5 : 2.5,
-    0.1,
-    100
-  ),
-  trailingActivationGrossPct: envNumber(
-    "SCALP_TRAIL_ARM_PCT",
-    scalpMode ? 2 : 3,
-    0.1,
-    1_000
-  ),
-  trailingGivebackPct: envNumber(
-    "SCALP_TRAIL_GIVEBACK_PCT",
-    scalpMode ? 1.5 : 2,
-    0.1,
-    100
-  ),
-  maxHoldSeconds: Math.floor(envNumber(
-    "SCALP_MAX_HOLD_SECONDS",
-    scalpMode ? 300 : 480,
-    10,
-    86_400
-  )),
+  targetProfitPct: envNumber("SCALP_TARGET_PROFIT_PCT", scalpMode ? 5 : 25, 0.1, 1_000),
+  hardStopLossPct: envNumber("SCALP_HARD_STOP_PCT", scalpMode ? 3.5 : 2.5, 0.1, 100),
+  trailingActivationGrossPct: envNumber("SCALP_TRAIL_ARM_PCT", scalpMode ? 2 : 3, 0.1, 1_000),
+  trailingGivebackPct: envNumber("SCALP_TRAIL_GIVEBACK_PCT", scalpMode ? 1.5 : 2, 0.1, 100),
+  maxHoldSeconds: Math.floor(envNumber("SCALP_MAX_HOLD_SECONDS", scalpMode ? 300 : 480, 10, 86_400)),
   runnerMaxHoldSeconds: Math.floor(envNumber("SCALP_RUNNER_MAX_HOLD_SECONDS", 1_500, 10, 86_400)),
   maxDailyEntries: Math.floor(envNumber("SCALP_MAX_DAILY_ENTRIES", 20, 1, 10_000)),
   dailyLossLimitPct: envNumber("SCALP_DAILY_LOSS_LIMIT_PCT", 0.08, 0, 1),
@@ -105,10 +82,22 @@ export const SCALP_RULES = {
   cooldownMinutes: Math.floor(envNumber("SCALP_COOLDOWN_MINUTES", 120, 0, 100_000)),
   maxEntryPriceGapPct: envNumber("SCALP_MAX_ENTRY_PRICE_GAP_PCT", 3, 0.1, 100),
   maxLiquidityDropPct: envNumber("SCALP_MAX_LIQUIDITY_DROP_PCT", 20, 0, 100),
+  // Compatibility fields used only by older dashboard/tests. Live realized costs
+  // are calculated by liveCostSimulation.ts, not by these two values.
+  entryFrictionPct: envNumber("SCALP_DASHBOARD_ENTRY_FRICTION_PCT", 0.6, 0, 10),
+  exitFrictionPct: envNumber("SCALP_DASHBOARD_EXIT_FRICTION_PCT", 0.6, 0, 10),
 } as const;
 
 const clamp = (value: number, min: number, max: number) =>
   Math.min(max, Math.max(min, value));
+
+// Kept for dashboard and older callers. This does not drive live exit triggers.
+export function calculateNetMultiple(grossMultiple: number): number {
+  if (!Number.isFinite(grossMultiple) || grossMultiple <= 0) return 0;
+  const entryFriction = SCALP_RULES.entryFrictionPct / 100;
+  const exitFriction = SCALP_RULES.exitFrictionPct / 100;
+  return grossMultiple * ((1 - exitFriction) / (1 + entryFriction));
+}
 
 export function evaluateScalpCandidate(candidate: ScalpCandidate): CandidateEvaluation {
   const reasons: string[] = [];
@@ -191,16 +180,24 @@ export function decideScalpExit(input: {
   const grossReturnPct = (grossMultiple - 1) * 100;
   const peakGrossReturnPct = (peakGrossMultiple - 1) * 100;
   const holdSeconds = Math.max(0, input.nowMs - input.openedAtMs) / 1_000;
+  const netMultiple = calculateNetMultiple(grossMultiple);
+  const netReturnPct = (netMultiple - 1) * 100;
+  const result = (reason: string): ExitDecision => ({
+    netMultiple,
+    grossReturnPct,
+    netReturnPct,
+    reason,
+  });
 
-  if (grossReturnPct <= -SCALP_RULES.hardStopLossPct) return { grossReturnPct, reason: "hard_stop" };
+  if (grossReturnPct <= -SCALP_RULES.hardStopLossPct) return result("hard_stop");
   if (
     peakGrossReturnPct >= SCALP_RULES.trailingActivationGrossPct &&
     grossReturnPct <= peakGrossReturnPct - SCALP_RULES.trailingGivebackPct
-  ) return { grossReturnPct, reason: "trailing_stop" };
-  if (grossReturnPct >= SCALP_RULES.targetProfitPct) return { grossReturnPct, reason: "take_profit" };
+  ) return result("trailing_stop");
+  if (grossReturnPct >= SCALP_RULES.targetProfitPct) return result("take_profit");
 
   const maxHoldSeconds = SNIPER_MODE === "runner" && peakGrossReturnPct >= SCALP_RULES.trailingActivationGrossPct
     ? SCALP_RULES.runnerMaxHoldSeconds
     : SCALP_RULES.maxHoldSeconds;
-  return holdSeconds >= maxHoldSeconds ? { grossReturnPct, reason: "max_hold_time" } : null;
+  return holdSeconds >= maxHoldSeconds ? result("max_hold_time") : null;
 }
