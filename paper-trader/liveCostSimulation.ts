@@ -35,18 +35,35 @@ export function expectedQuoteOutputRaw(quote: JupiterQuoteOnlyResult): bigint {
   return quoted * (10_000n - totalBps) / 10_000n;
 }
 
+// Backward-compatible name used by the standalone Helius sniper. The behavior
+// intentionally follows the new expected-fill model and never uses Jupiter's
+// worst-case otherAmountThreshold as the paper fill mark.
+export function conservativeQuoteOutputRaw(quote: JupiterQuoteOnlyResult): bigint {
+  return expectedQuoteOutputRaw(quote);
+}
+
 export function expectedRoundTripCostSol(positionSizeSol: number): number {
-  const variablePct = (LIVE_COSTS.expectedSlippageBps * 2 + LIVE_COSTS.routeChangePenaltyBps + LIVE_COSTS.partialFillPenaltyBps) / 10_000;
+  const variablePct = (
+    LIVE_COSTS.expectedSlippageBps * 2 +
+    LIVE_COSTS.routeChangePenaltyBps +
+    LIVE_COSTS.partialFillPenaltyBps
+  ) / 10_000;
   return Math.max(0, positionSizeSol * variablePct + legOverheadSol() * 2);
 }
 
 export function expectedRoundTripCostPct(positionSizeSol: number): number {
-  return positionSizeSol > 0 ? expectedRoundTripCostSol(positionSizeSol) / positionSizeSol * 100 : Number.POSITIVE_INFINITY;
+  return positionSizeSol > 0
+    ? expectedRoundTripCostSol(positionSizeSol) / positionSizeSol * 100
+    : Number.POSITIVE_INFINITY;
 }
 
-export function conservativeSolProceeds(quote: JupiterQuoteOnlyResult, entrySizeSol = 0): number {
+export function conservativeSolProceeds(
+  quote: JupiterQuoteOnlyResult,
+  entrySizeSol = 0
+): number {
   const expectedExitGross = Number(expectedQuoteOutputRaw(quote)) / LAMPORTS_PER_SOL;
-  const entryExpectedSlippageSol = entrySizeSol * LIVE_COSTS.expectedSlippageBps / 10_000;
+  const entryExpectedSlippageSol =
+    entrySizeSol * LIVE_COSTS.expectedSlippageBps / 10_000;
   const entryCostSol = entryExpectedSlippageSol + legOverheadSol();
   return Math.max(0, expectedExitGross - legOverheadSol() - entryCostSol);
 }
