@@ -1,5 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { getSupabaseAdmin } from "../lib/supabase";
+import {
+  recordCandidateObservation,
+  startCandidateOutcomeScheduler,
+} from "./candidateTracker";
 
 const supabase = getSupabaseAdmin();
 const VERSION = "champion_research_v1_2026_08_05";
@@ -24,7 +28,7 @@ const CONFIG = {
   minMarketCapUsd: envNumber("CHAMPION_MIN_MARKET_CAP_USD", 250_000, 10_000, 10_000_000_000),
   maxMarketCapUsd: envNumber("CHAMPION_MAX_MARKET_CAP_USD", 20_000_000, 20_000, 100_000_000_000),
   minPoolAgeMinutes: envNumber("CHAMPION_MIN_POOL_AGE_MINUTES", 360, 15, 525_600),
-  targetPct: envNumber("CHAMPION_RESEARCH_TARGET_PCT", 8, 0.5, 100),
+  targetPct: envNumber("CHAMPION_RESEARCH_TARGET_PCT", 10, 0.5, 100),
   stopPct: envNumber("CHAMPION_RESEARCH_STOP_PCT", 4, 0.5, 100),
   minScore: envNumber("CHAMPION_MIN_SCORE", 60, 0, 100),
 } as const;
@@ -47,11 +51,13 @@ type Candidate = {
   marketCapUsd: number;
   poolAgeMinutes: number;
   change5mPct: number;
+  change15mPct: number | null;
   change1hPct: number;
   volume5mUsd: number;
   volume1hUsd: number;
   buys5m: number;
   sells5m: number;
+  uniqueBuyers: number | null;
 };
 
 type StoredCandidate = {
@@ -102,14 +108,20 @@ function parsePool(row: any): Candidate | null {
     marketCapUsd: n(a.market_cap_usd ?? a.fdv_usd, NaN),
     poolAgeMinutes: Number.isFinite(createdMs) ? Math.max(0, Date.now() - createdMs) / 60_000 : NaN,
     change5mPct: n(a.price_change_percentage?.m5, NaN),
+    change15mPct: Number.isFinite(Number(a.price_change_percentage?.m15))
+      ? Number(a.price_change_percentage.m15)
+      : null,
     change1hPct: n(a.price_change_percentage?.h1, NaN),
     volume5mUsd: n(a.volume_usd?.m5, NaN),
     volume1hUsd: n(a.volume_usd?.h1, NaN),
     buys5m: Math.max(0, Math.floor(n(a.transactions?.m5?.buys, 0))),
     sells5m: Math.max(0, Math.floor(n(a.transactions?.m5?.sells, 0))),
+    uniqueBuyers: Number.isFinite(Number(a.transactions?.m5?.buyers))
+      ? Math.max(0, Math.floor(Number(a.transactions.m5.buyers)))
+      : null,
   };
-  const valid = candidate.pairAddress && Object.values(candidate).every(
-    (value) => typeof value !== "number" || Number.isFinite(value)
+  const valid = candidate.pairAddress && Object.entries(candidate).every(
+    ([key, value]) => key === "change15mPct" || key === "uniqueBuyers" || typeof value !== "number" || Number.isFinite(value),
   );
   return valid ? candidate : null;
 }
@@ -178,16 +190,20 @@ async function storeCandidate(candidate: Candidate): Promise<void> {
 
   const candidateScore = score(candidate);
   const decisionReasons = reasons(candidate, candidateScore);
+  const decision = decisionReasons.length ? "rejected" : "accepted";
+  const candidateId = randomUUID();
+  const detectedAt = new Date().toISOString();
+
   const { error } = await supabase.from("champion_candidates").insert({
-    candidate_id: randomUUID(),
+    candidate_id: candidateId,
     strategy_version: VERSION,
     experiment_arm: "champion",
     mint: candidate.mint,
     token_symbol: candidate.symbol,
     pair_address: candidate.pairAddress,
-    detected_at: new Date().toISOString(),
+    detected_at: detectedAt,
     source: "geckoterminal_established_liquid",
-    decision: decisionReasons.length ? "rejected_research" : "accepted_research",
+    decision: decision === "accepted" ? "accepted_research" : "rejected_research",
     decision_reasons: decisionReasons,
     score: candidateScore,
     signal_price_usd: candidate.priceUsd,
@@ -198,6 +214,34 @@ async function storeCandidate(candidate: Candidate): Promise<void> {
     quote_snapshot: {},
   });
   if (error) throw error;
+
+  void recordCandidateObservation({
+    strategy: "champion_established_momentum",
+    strategyVersion: VERSION,
+    mint: candidate.mint,
+    tokenSymbol: candidate.symbol,
+    pairAddress: candidate.pairAddress,
+    decision,
+    rejectReasons: decisionReasons,
+    score: candidateScore,
+    detectionPriceUsd: candidate.priceUsd,
+    liquidityUsd: candidate.liquidityUsd,
+    marketCapUsd: candidate.marketCapUsd,
+    poolAgeMinutes: candidate.poolAgeMinutes,
+    m5ChangePct: candidate.change5mPct,
+    m15ChangePct: candidate.change15mPct,
+    h1ChangePct: candidate.change1hPct,
+    volume5mUsd: candidate.volume5mUsd,
+    buySellRatio: candidate.buys5m / Math.max(1, candidate.sells5m),
+    uniqueBuyers: candidate.uniqueBuyers,
+    extra: {
+      source: "geckoterminal_established_liquid",
+      champion_candidate_id: candidateId,
+      volume_1h_usd: candidate.volume1hUsd,
+      buys_5m: candidate.buys5m,
+      sells_5m: candidate.sells5m,
+    },
+  });
 }
 
 async function runScan(): Promise<void> {
@@ -289,7 +333,12 @@ async function measure(item: StoredCandidate & { horizon: number }): Promise<voi
     became_untradable: !pair || price <= 0 || liquidity <= 0,
     target_hit_before_stop: mfe >= CONFIG.targetPct && mae > -CONFIG.stopPct,
     stop_hit_before_target: mae <= -CONFIG.stopPct && mfe < CONFIG.targetPct,
-    snapshot: { pair, target_pct: CONFIG.targetPct, stop_pct: CONFIG.stopPct },
+    snapshot: {
+      pair,
+      target_pct: CONFIG.targetPct,
+      stop_pct: CONFIG.stopPct,
+      ordering_method: "sampled_not_exact",
+    },
   });
   if (error) throw error;
 }
@@ -300,8 +349,11 @@ async function runOutcomes(): Promise<void> {
   try {
     const due = await dueCandidates();
     for (const item of due) {
-      try { await measure(item); }
-      catch (error) { console.warn(`[champion-research] outcome failed ${item.mint}`, error); }
+      try {
+        await measure(item);
+      } catch (error) {
+        console.warn(`[champion-research] outcome failed ${item.mint}`, error);
+      }
     }
     if (due.length) {
       await supabase.from("champion_strategy_state").update({
@@ -316,8 +368,13 @@ async function runOutcomes(): Promise<void> {
 
 export function startChampionResearchScheduler(): void {
   console.log(`[champion-research] loaded version=${VERSION} paperOnly=true trading=false`);
+  startCandidateOutcomeScheduler();
   void runScan().catch((error) => console.error("[champion-research] initial scan failed", error));
   void runOutcomes().catch((error) => console.error("[champion-research] initial outcomes failed", error));
-  setInterval(() => void runScan().catch((error) => console.error("[champion-research] scan failed", error)), CONFIG.scanMs);
-  setInterval(() => void runOutcomes().catch((error) => console.error("[champion-research] outcomes failed", error)), CONFIG.outcomeMs);
+  setInterval(() => {
+    void runScan().catch((error) => console.error("[champion-research] scan failed", error));
+  }, CONFIG.scanMs);
+  setInterval(() => {
+    void runOutcomes().catch((error) => console.error("[champion-research] outcomes failed", error));
+  }, CONFIG.outcomeMs);
 }
