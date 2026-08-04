@@ -66,6 +66,11 @@ async function main(): Promise<void> {
   console.log(`[helius-sniper-app] Helius endpoints normalized from ${endpoints.source}; custom WS override ignored`);
   await preflightHelius(endpoints.rpc);
 
+  // Research is paper-only and controlled by champion_strategy_state.enabled.
+  // It records accepted and rejected candidates but cannot open positions.
+  const { startChampionResearchScheduler } = await import("../paper-trader/championResearch");
+  startChampionResearchScheduler();
+
   // Import only after endpoint normalization so the worker cannot initialize
   // with a stale Railway HELIUS_WS_URL value.
   const { startHeliusMillisecondSniper } = await import("./heliusMillisecondSniper");
