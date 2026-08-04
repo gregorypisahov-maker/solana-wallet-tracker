@@ -1,7 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { getSupabaseAdmin } from "../lib/supabase";
 import { sendTelegramAlert } from "../lib/telegram";
-import { expectedRoundTripCostPct } from "./liveCostSimulation";
+import { getJupiterQuote, JUPITER_SOL_MINT } from "../lib/jupiterQuote";
+import {
+  conservativeQuoteOutputRaw,
+  conservativeSolProceeds,
+  expectedRoundTripCostPct,
+  legOverheadSol,
+} from "./liveCostSimulation";
 
 const supabase = getSupabaseAdmin();
 export const CHAMPION_PAPER_VERSION = "champion_paper_v1_2026_08_05";
@@ -27,6 +33,9 @@ const CONFIG = {
   minScore: envNumber("CHAMPION_PAPER_MIN_SCORE", 65, 0, 100),
   candidateMaxAgeSeconds: Math.floor(envNumber("CHAMPION_PAPER_CANDIDATE_MAX_AGE_SECONDS", 180, 30, 3600)),
   cooldownMinutes: Math.floor(envNumber("CHAMPION_PAPER_COOLDOWN_MINUTES", 180, 0, 10080)),
+  maxRoundtripCostPct: envNumber("CHAMPION_PAPER_MAX_ROUNDTRIP_COST_PCT", 1.5, 0.1, 20),
+  slippageBps: Math.floor(envNumber("SNIPER_SLIPPAGE_BPS", 200, 10, 200)),
+  minLiquidityUsd: envNumber("CHAMPION_PAPER_MIN_LIQUIDITY_USD", 100_000, 10_000, 100_000_000),
 } as const;
 
 let entryRunning = false;
@@ -35,6 +44,10 @@ let exitRunning = false;
 function n(value: unknown, fallback = 0): number {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function rawSol(sol: number): string {
+  return String(Math.max(1, Math.floor(sol * 1_000_000_000)));
 }
 
 async function fetchJson(url: string): Promise<any> {
@@ -110,7 +123,81 @@ async function nextCandidates(limit: number) {
     .order("detected_at", { ascending: false })
     .limit(Math.max(10, limit * 5));
   if (error) throw error;
-  return data ?? [];
+  return (data ?? []).filter((candidate: any) => {
+    const status = candidate?.quote_snapshot?.champion_paper_status;
+    return status !== "execution_rejected" && status !== "opened";
+  });
+}
+
+async function markCandidate(candidateId: string, patch: Record<string, unknown>): Promise<void> {
+  const { data, error } = await supabase.from("champion_candidates")
+    .select("quote_snapshot")
+    .eq("candidate_id", candidateId)
+    .single();
+  if (error) throw error;
+  const { error: updateError } = await supabase.from("champion_candidates").update({
+    quote_snapshot: { ...(data?.quote_snapshot ?? {}), ...patch },
+  }).eq("candidate_id", candidateId);
+  if (updateError) throw updateError;
+}
+
+async function executableEntryCheck(mint: string): Promise<{
+  ok: boolean;
+  costPct: number | null;
+  roundtripSol: number | null;
+  snapshot: Record<string, unknown>;
+}> {
+  const inputSol = CONFIG.positionSizeSol - legOverheadSol();
+  if (inputSol <= 0) {
+    return { ok: false, costPct: null, roundtripSol: null, snapshot: { status: "size_below_overhead" } };
+  }
+
+  try {
+    const buy = await getJupiterQuote({
+      inputMint: JUPITER_SOL_MINT,
+      outputMint: mint,
+      rawTokenAmount: rawSol(inputSol),
+      slippageBps: CONFIG.slippageBps,
+    });
+    if (!buy.route || buy.outLamports <= 0n) {
+      return { ok: false, costPct: null, roundtripSol: null, snapshot: { status: "no_buy_route" } };
+    }
+    const tokenRaw = conservativeQuoteOutputRaw(buy);
+    if (tokenRaw <= 0n) {
+      return { ok: false, costPct: null, roundtripSol: null, snapshot: { status: "invalid_buy_output" } };
+    }
+    const sell = await getJupiterQuote({
+      inputMint: mint,
+      outputMint: JUPITER_SOL_MINT,
+      rawTokenAmount: tokenRaw.toString(),
+      slippageBps: CONFIG.slippageBps,
+    });
+    if (!sell.route || sell.outLamports <= 0n) {
+      return { ok: false, costPct: null, roundtripSol: null, snapshot: { status: "no_sell_route", buy: buy.raw } };
+    }
+    const roundtripSol = conservativeSolProceeds(sell);
+    const costPct = Math.max(0, (1 - roundtripSol / CONFIG.positionSizeSol) * 100);
+    return {
+      ok: costPct <= CONFIG.maxRoundtripCostPct,
+      costPct,
+      roundtripSol,
+      snapshot: {
+        status: costPct <= CONFIG.maxRoundtripCostPct ? "passed" : "cost_above_limit",
+        max_roundtrip_cost_pct: CONFIG.maxRoundtripCostPct,
+        slippage_tolerance_bps: CONFIG.slippageBps,
+        expected_token_raw: tokenRaw.toString(),
+        buy: buy.raw,
+        sell: sell.raw,
+      },
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      costPct: null,
+      roundtripSol: null,
+      snapshot: { status: "quote_error", error: error instanceof Error ? error.message : String(error) },
+    };
+  }
 }
 
 async function telegram(message: string): Promise<void> {
@@ -124,11 +211,26 @@ async function openOne(candidate: any, currentState: any): Promise<boolean> {
   const pair = await pairFor(candidate.mint, candidate.pair_address);
   const price = n(pair?.priceUsd);
   const liquidity = n(pair?.liquidity?.usd);
-  if (price <= 0 || liquidity < 100_000) return false;
+  if (price <= 0 || liquidity < CONFIG.minLiquidityUsd) return false;
+
+  const execution = await executableEntryCheck(candidate.mint);
+  if (!execution.ok) {
+    await markCandidate(candidate.candidate_id, {
+      champion_paper_status: "execution_rejected",
+      champion_paper_checked_at: new Date().toISOString(),
+      champion_paper_execution: execution.snapshot,
+      champion_paper_roundtrip_cost_pct: execution.costPct,
+    });
+    console.log(
+      `[champion-paper] REJECT ${candidate.token_symbol} execution=${String(execution.snapshot.status)} ` +
+      `cost=${execution.costPct == null ? "n/a" : execution.costPct.toFixed(3)}%`,
+    );
+    return false;
+  }
 
   const positionId = randomUUID();
   const now = new Date().toISOString();
-  const costPct = expectedRoundTripCostPct(CONFIG.positionSizeSol);
+  const modeledCostPct = expectedRoundTripCostPct(CONFIG.positionSizeSol);
   const entrySnapshot = {
     candidate_id: candidate.candidate_id,
     strategy_version: CHAMPION_PAPER_VERSION,
@@ -136,7 +238,10 @@ async function openOne(candidate: any, currentState: any): Promise<boolean> {
     score: n(candidate.score),
     decision_reasons: candidate.decision_reasons,
     features: candidate.features,
-    modeled_round_trip_cost_pct: costPct,
+    modeled_round_trip_cost_pct: modeledCostPct,
+    executable_round_trip_cost_pct: execution.costPct,
+    executable_round_trip_sol: execution.roundtripSol,
+    jupiter_entry_gate: execution.snapshot,
     paper_only: true,
   };
 
@@ -169,6 +274,12 @@ async function openOne(candidate: any, currentState: any): Promise<boolean> {
   }).eq("id", 1);
   if (stateError) throw stateError;
 
+  await markCandidate(candidate.candidate_id, {
+    champion_paper_status: "opened",
+    champion_paper_opened_at: now,
+    champion_paper_roundtrip_cost_pct: execution.costPct,
+  });
+
   await telegram(
     `🏆 <b>CHAMPION PAPER BUY</b>\n\n` +
     `🪙 <b>${candidate.token_symbol ?? "UNKNOWN"}</b>\n` +
@@ -176,6 +287,7 @@ async function openOne(candidate: any, currentState: any): Promise<boolean> {
     `Score: <b>${n(candidate.score).toFixed(0)}/100</b>\n` +
     `Entry: <b>$${price.toFixed(8)}</b>\n` +
     `Liquidity: <b>$${liquidity.toFixed(0)}</b>\n` +
+    `Executable cost: <b>${n(execution.costPct).toFixed(2)}%</b>\n` +
     `Target: <b>+${CONFIG.targetPct}%</b> · Stop: <b>-${CONFIG.hardStopPct}%</b>\n` +
     `Strategy: <b>${CHAMPION_PAPER_VERSION}</b>\n\n` +
     `<code>${candidate.mint}</code>`
@@ -201,7 +313,11 @@ async function pollEntries(): Promise<void> {
       if (await openOne(candidate, current)) {
         slots -= 1;
         dailySlots -= 1;
-        current = { ...current, bankroll_sol: n(current.bankroll_sol) - CONFIG.positionSizeSol, entries_today: n(current.entries_today) + 1 };
+        current = {
+          ...current,
+          bankroll_sol: n(current.bankroll_sol) - CONFIG.positionSizeSol,
+          entries_today: n(current.entries_today) + 1,
+        };
       }
     }
   } finally {
@@ -300,7 +416,10 @@ async function checkPositions(): Promise<void> {
             last_price_usd: price,
             last_checked_at: now,
           }).eq("position_id", position.position_id);
-          await supabase.from("champion_paper_state").update({ last_check_at: now, updated_at: now }).eq("id", 1);
+          await supabase.from("champion_paper_state").update({
+            last_check_at: now,
+            updated_at: now,
+          }).eq("id", 1);
         }
       } catch (error) {
         console.warn(`[champion-paper] position check failed ${position.mint}`, error);
@@ -316,14 +435,24 @@ export function startChampionPaperScheduler(): void {
   if (!(costPct < CONFIG.hardStopPct)) {
     throw new Error(`champion modeled cost ${costPct.toFixed(3)}% must be below stop ${CONFIG.hardStopPct}%`);
   }
+  if (!(CONFIG.maxRoundtripCostPct < CONFIG.hardStopPct)) {
+    throw new Error(
+      `champion executable cost gate ${CONFIG.maxRoundtripCostPct}% must be below stop ${CONFIG.hardStopPct}%`,
+    );
+  }
   console.log(
     `[champion-paper-config] version=${CHAMPION_PAPER_VERSION} size=${CONFIG.positionSizeSol} ` +
     `target=${CONFIG.targetPct}% stop=${CONFIG.hardStopPct}% trail=${CONFIG.trailArmPct}/${CONFIG.trailGivebackPct}% ` +
     `maxHold=${CONFIG.maxHoldSeconds}s concurrent=${CONFIG.maxConcurrent} daily=${CONFIG.maxDailyEntries} ` +
-    `minScore=${CONFIG.minScore} modeledCost=${costPct.toFixed(3)}% paperOnly=true`
+    `minScore=${CONFIG.minScore} modeledCost=${costPct.toFixed(3)}% executableCostMax=${CONFIG.maxRoundtripCostPct}% ` +
+    `paperOnly=true`,
   );
   void pollEntries().catch((error) => console.error("[champion-paper] initial entry poll failed", error));
   void checkPositions().catch((error) => console.error("[champion-paper] initial position check failed", error));
-  setInterval(() => void pollEntries().catch((error) => console.error("[champion-paper] entry poll failed", error)), CONFIG.entryPollMs);
-  setInterval(() => void checkPositions().catch((error) => console.error("[champion-paper] position check failed", error)), CONFIG.positionCheckMs);
+  setInterval(() => {
+    void pollEntries().catch((error) => console.error("[champion-paper] entry poll failed", error));
+  }, CONFIG.entryPollMs);
+  setInterval(() => {
+    void checkPositions().catch((error) => console.error("[champion-paper] position check failed", error));
+  }, CONFIG.positionCheckMs);
 }
