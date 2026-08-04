@@ -267,12 +267,8 @@ async function maintenance(): Promise<void> {
   if (maintenanceDate === today) return;
   maintenanceDate = today;
 
-  const { error: rollupError } = await supabase.rpc("exec_sql", {
-    sql: "select 1",
-  }).maybeSingle();
-  if (rollupError && !/function .* does not exist/i.test(rollupError.message)) {
-    console.warn("[candidate-tracker] optional maintenance RPC unavailable", rollupError.message);
-  }
+  const { error: rollupError } = await supabase.rpc("refresh_candidate_observation_daily");
+  if (rollupError) console.warn("[candidate-tracker] daily rollup failed", rollupError);
 
   const cutoff = new Date(Date.now() - CONFIG.retentionDays * 86_400_000).toISOString();
   const { error: deleteError } = await supabase
