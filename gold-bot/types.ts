@@ -25,6 +25,12 @@ export type GoldInstrument = {
   maximumOrderUnits: number | null;
 };
 
+export type GoldMarketSnapshot = {
+  candles: GoldCandle[];
+  quote: GoldQuote;
+  instrument: GoldInstrument;
+};
+
 export type GoldSignal = {
   side: GoldSide;
   candleTime: string;
