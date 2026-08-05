@@ -1,16 +1,19 @@
-# XAUUSD paper bot
+# XAU/USD paper bot
 
 This service is a separate, paper-only gold strategy for Railway. It does not submit broker orders and does not modify the active Solana service.
 
 ## Data source
 
-The bot uses the OANDA v20 REST API for:
+The bot uses the Twelve Data REST API for `XAU/USD` 15-minute OHLC data.
 
-- the account-specific tradable instrument list;
-- completed midpoint candles;
-- current account-specific bid and ask prices.
+One `/time_series` request supplies both:
 
-The default API instrument is `XAU_USD`. Availability and exact instrument details are validated against the configured OANDA account at startup.
+- completed candles for the strategy; and
+- the latest available midpoint used for paper position management.
+
+Twelve Data does not provide bid/ask values for this feed. The bot therefore applies the configured `GOLD_PAPER_SPREAD_USD` around the latest midpoint. Longs enter at the synthetic ask and exit at the synthetic bid; shorts do the opposite. This spread is a paper-accounting assumption, not a claim that a future broker will offer the same execution.
+
+The default two-minute polling interval uses about 720 API requests per 24 hours, leaving headroom under the Basic plan's 800-request daily allowance. Railway restarts and manual testing also consume requests, so do not reduce the interval on the free plan.
 
 ## Strategy v1
 
@@ -34,32 +37,33 @@ Defaults:
 - Synthetic starting balance: `$10,000`.
 - Risk per trade: `0.25%` of current paper balance.
 - Daily realized loss lock: `1%` from the UTC day starting balance.
-- Maximum position: `5` OANDA units.
+- Maximum paper position: `5` gold units.
+- Synthetic paper spread: `$0.50` total.
 - Entry rejected when spread is more than `0.12 × ATR`.
-- Stale or non-tradeable quotes are rejected.
-- Existing positions are priced out at bid for longs and ask for shorts.
+- Stale market data is rejected.
 - A database partial unique index enforces one open position.
 - Closing a position and updating paper balance are atomic in Supabase.
 - `GOLD_LIVE_ENABLED=true` causes startup to fail intentionally.
 
 ## Required setup
 
-1. Create an OANDA practice account that exposes gold through its v20 REST API.
-2. Apply `supabase/migrations/20260805220000_add_xauusd_paper_bot.sql`.
-3. Create a new Railway service from this repository and use the start command:
+1. Create a Twelve Data account and obtain an API key.
+2. Confirm the key can retrieve `XAU/USD` with `interval=15min`.
+3. Apply `supabase/migrations/20260805220000_add_xauusd_paper_bot.sql`.
+4. Create a new Railway service from this repository and use the start command:
 
    `npx tsx gold-bot/entrypoint.ts`
 
-4. Copy the shared Supabase and Telegram variables from the existing Railway service.
-5. Add:
+5. Copy the shared Supabase and Telegram variables from the existing Railway service.
+6. Add:
 
-   - `OANDA_API_TOKEN`
-   - `OANDA_ACCOUNT_ID`
-   - `OANDA_ENVIRONMENT=practice`
-   - `OANDA_INSTRUMENT=XAU_USD`
+   - `TWELVE_DATA_API_KEY`
+   - `TWELVE_DATA_SYMBOL=XAU/USD`
    - `GOLD_LIVE_ENABLED=false`
 
 The remaining settings and conservative defaults are documented in `.env.example`.
+
+Never paste the Twelve Data API key into chat, GitHub, screenshots, or client-side dashboard code. Store it directly in Railway Variables.
 
 ## Validation
 
@@ -67,17 +71,20 @@ Run:
 
 - `node --import tsx --test gold-bot/*.test.ts`
 - `npx tsc -p gold-bot/tsconfig.json --pretty false`
+- `npm run build`
 
-The branch also contains `.github/workflows/validate-gold-paper.yml`.
+The repository also contains `.github/workflows/validate-gold-paper.yml`.
 
 ## Paper-validation gate before any live executor
 
 Do not add live order submission until the paper bot has at least 200 closed trades and has been reviewed for:
 
-- net result after the actual recorded spread;
+- net result after the configured paper spread;
 - maximum drawdown;
 - profit factor;
 - average winner and loser;
 - performance by hour and market regime;
-- API outages, stale prices, Railway restarts, and database recovery;
-- whether results remain acceptable on unseen data and a forward demo period.
+- API outages, rate limits, stale prices, Railway restarts, and database recovery;
+- whether results remain acceptable on unseen data and a forward-demo period.
+
+A future live executor must use the real broker's contract size, bid/ask prices, fees, slippage, account rules, and stop-distance requirements. Twelve Data is market data only and cannot execute trades.

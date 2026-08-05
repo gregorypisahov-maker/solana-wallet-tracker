@@ -1,4 +1,4 @@
-import { OandaMarketDataClient } from "./oandaClient";
+import { TwelveDataMarketDataClient } from "./twelveDataClient";
 import { GoldPaperStore } from "./store";
 import {
   calculatePaperUnits,
@@ -31,14 +31,11 @@ function integerEnv(name: string, fallback: number, min: number, max: number): n
 }
 
 const config = {
-  token: requiredEnv("OANDA_API_TOKEN"),
-  accountId: requiredEnv("OANDA_ACCOUNT_ID"),
-  environment: (process.env.OANDA_ENVIRONMENT?.trim() === "live" ? "live" : "practice") as
-    | "practice"
-    | "live",
-  instrument: process.env.OANDA_INSTRUMENT?.trim() || "XAU_USD",
+  apiKey: requiredEnv("TWELVE_DATA_API_KEY"),
+  instrument: process.env.TWELVE_DATA_SYMBOL?.trim() || "XAU/USD",
   granularity: process.env.GOLD_GRANULARITY?.trim() || "M15",
-  pollMs: integerEnv("GOLD_POLL_MS", 15_000, 5_000, 300_000),
+  pollMs: integerEnv("GOLD_POLL_MS", 120_000, 60_000, 900_000),
+  syntheticSpreadUsd: numberEnv("GOLD_PAPER_SPREAD_USD", 0.5, 0.01, 20),
   startingBalanceUsd: numberEnv("GOLD_STARTING_BALANCE_USD", 10_000, 100, 10_000_000),
   riskFraction: numberEnv("GOLD_RISK_PER_TRADE", 0.0025, 0.0001, 0.005),
   maxDailyLossFraction: numberEnv("GOLD_MAX_DAILY_LOSS", 0.01, 0.001, 0.03),
@@ -47,7 +44,7 @@ const config = {
   maxSpreadAtrFraction: numberEnv("GOLD_MAX_SPREAD_ATR", 0.12, 0.01, 0.5),
   tradingStartUtc: integerEnv("GOLD_TRADING_START_UTC", 6, 0, 23),
   tradingEndUtc: integerEnv("GOLD_TRADING_END_UTC", 20, 1, 24),
-  quoteMaxAgeSeconds: integerEnv("GOLD_QUOTE_MAX_AGE_SECONDS", 60, 5, 600),
+  marketMaxAgeSeconds: integerEnv("GOLD_MARKET_MAX_AGE_SECONDS", 1_200, 60, 86_400),
 };
 
 if (process.env.GOLD_LIVE_ENABLED?.toLowerCase() === "true") {
@@ -61,11 +58,10 @@ if (config.granularity !== "M15") {
   throw new Error("Version 1 is strategy-locked to GOLD_GRANULARITY=M15");
 }
 
-const client = new OandaMarketDataClient({
-  token: config.token,
-  accountId: config.accountId,
-  instrument: config.instrument,
-  environment: config.environment,
+const client = new TwelveDataMarketDataClient({
+  apiKey: config.apiKey,
+  symbol: config.instrument,
+  syntheticSpreadUsd: config.syntheticSpreadUsd,
 });
 const store = new GoldPaperStore(BOT_ID);
 
@@ -99,7 +95,8 @@ function insideTradingWindow(date: Date): boolean {
 function quoteIsFresh(quote: GoldQuote): boolean {
   const quoteTime = new Date(quote.time).getTime();
   if (!Number.isFinite(quoteTime)) return false;
-  return Date.now() - quoteTime <= config.quoteMaxAgeSeconds * 1_000;
+  const ageMs = Date.now() - quoteTime;
+  return ageMs >= 0 && ageMs <= config.marketMaxAgeSeconds * 1_000;
 }
 
 async function telegram(text: string): Promise<void> {
@@ -212,9 +209,11 @@ async function tick(): Promise<void> {
   try {
     await applyDailyRiskReset();
 
-    const quote = await client.getQuote();
+    const snapshot = await client.getSnapshot(config.granularity, 300);
+    instrumentDetails = snapshot.instrument;
+    const quote = snapshot.quote;
     if (quote.status.toLowerCase() !== "tradeable" || !quoteIsFresh(quote)) {
-      console.log(`[gold-paper] quote unavailable status=${quote.status} time=${quote.time}`);
+      console.log(`[gold-paper] market data unavailable status=${quote.status} time=${quote.time}`);
       return;
     }
 
@@ -229,8 +228,7 @@ async function tick(): Promise<void> {
     if (await enforceDailyLossLock()) return;
     if (!insideTradingWindow(new Date())) return;
 
-    const candles = await client.getCandles(config.granularity, 300);
-    const completed = candles.filter((candle) => candle.complete);
+    const completed = snapshot.candles.filter((candle) => candle.complete);
     const latest = completed[completed.length - 1];
     if (!latest) return;
 
@@ -254,14 +252,14 @@ async function tick(): Promise<void> {
     }
 
     const balance = asNumber((await store.getState()).balance_usd);
-    const brokerMax = instrumentDetails.maximumOrderUnits ?? config.maxUnits;
+    const providerMax = instrumentDetails.maximumOrderUnits ?? config.maxUnits;
     const units = calculatePaperUnits({
       balanceUsd: balance,
       riskFraction: config.riskFraction,
       stopDistance: signal.stopDistance,
       unitPrecision: instrumentDetails.tradeUnitsPrecision,
       minimumUnits: instrumentDetails.minimumTradeSize,
-      maximumUnits: Math.min(config.maxUnits, brokerMax),
+      maximumUnits: Math.min(config.maxUnits, providerMax),
     });
     if (units <= 0) {
       await store.logEvent("entry_rejected", {
@@ -269,7 +267,7 @@ async function tick(): Promise<void> {
         balanceUsd: balance,
         stopDistance: signal.stopDistance,
         minimumTradeSize: instrumentDetails.minimumTradeSize,
-        maximumUnits: Math.min(config.maxUnits, brokerMax),
+        maximumUnits: Math.min(config.maxUnits, providerMax),
       });
       return;
     }
@@ -324,21 +322,24 @@ async function tick(): Promise<void> {
 }
 
 async function start(): Promise<void> {
-  instrumentDetails = await client.getInstrument();
+  instrumentDetails = await client.getInstrument(config.granularity);
   const state = await store.ensureState(config.startingBalanceUsd);
 
   console.log(
     `[gold-paper] started ${instrumentDetails.displayName} (${instrumentDetails.name}) ` +
-    `environment=${config.environment} balance=$${asNumber(state.balance_usd).toFixed(2)} ` +
+    `provider=twelve_data balance=$${asNumber(state.balance_usd).toFixed(2)} ` +
     `strategy=${GOLD_STRATEGY_VERSION}`,
   );
   await store.logEvent("service_started", {
-    environment: config.environment,
+    provider: "twelve_data",
     instrument: instrumentDetails,
     strategyVersion: GOLD_STRATEGY_VERSION,
     paperOnly: true,
+    priceModel: "latest_midpoint_plus_configured_synthetic_spread",
     config: {
       granularity: config.granularity,
+      pollMs: config.pollMs,
+      syntheticSpreadUsd: config.syntheticSpreadUsd,
       riskFraction: config.riskFraction,
       maxDailyLossFraction: config.maxDailyLossFraction,
       rewardRisk: config.rewardRisk,
@@ -349,7 +350,7 @@ async function start(): Promise<void> {
   });
   await telegram(
     `✅ GOLD PAPER BOT STARTED\n${instrumentDetails.displayName}\n` +
-    `Balance: $${asNumber(state.balance_usd).toFixed(2)}\n` +
+    `Data: Twelve Data\nBalance: $${asNumber(state.balance_usd).toFixed(2)}\n` +
     `Strategy: ${GOLD_STRATEGY_VERSION}\nLive execution: DISABLED`,
   );
 
