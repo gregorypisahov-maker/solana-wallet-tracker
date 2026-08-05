@@ -1,6 +1,6 @@
 import type { GoldCandle, GoldSignal } from "./types";
 
-export const GOLD_STRATEGY_VERSION = "xauusd_m15_pullback_v1_2026_08_05";
+export const GOLD_STRATEGY_VERSION = "xauusd_m15_pullback_v2_2026_08_05";
 
 export type GoldStrategyConfig = {
   fastEmaPeriod: number;
@@ -8,6 +8,7 @@ export type GoldStrategyConfig = {
   atrPeriod: number;
   atrStopMultiple: number;
   minimumTrendAtr: number;
+  pullbackToleranceAtr: number;
 };
 
 export const DEFAULT_GOLD_STRATEGY: GoldStrategyConfig = {
@@ -15,7 +16,8 @@ export const DEFAULT_GOLD_STRATEGY: GoldStrategyConfig = {
   slowEmaPeriod: 50,
   atrPeriod: 14,
   atrStopMultiple: 1.5,
-  minimumTrendAtr: 0.15,
+  minimumTrendAtr: 0.10,
+  pullbackToleranceAtr: 0.15,
 };
 
 export function emaSeries(values: number[], period: number): number[] {
@@ -109,6 +111,7 @@ export function evaluateGoldSignal(
   const latest = candles[latestIndex];
   const previous = candles[previousIndex];
   const latestAtr = atr[latestIndex];
+  const previousAtr = atr[previousIndex];
 
   if (!Number.isFinite(latestAtr) || latestAtr <= 0) return null;
 
@@ -120,14 +123,25 @@ export function evaluateGoldSignal(
 
   const bullishTrend = fastNow > slowNow && fastNow > fastPrevious;
   const bearishTrend = fastNow < slowNow && fastNow < fastPrevious;
+  const latestTolerance = latestAtr * config.pullbackToleranceAtr;
+  const previousTolerance = previousAtr * config.pullbackToleranceAtr;
+
+  // Gold frequently turns just before an exact EMA print. Accept a near-touch within
+  // a small ATR-normalized tolerance, and allow the reclaim candle itself to be the touch.
+  const bullishPullbackTouched =
+    previous.low <= fastPrevious + previousTolerance ||
+    latest.low <= fastNow + latestTolerance;
+  const bearishPullbackTouched =
+    previous.high >= fastPrevious - previousTolerance ||
+    latest.high >= fastNow - latestTolerance;
 
   const bullishPullbackReclaim =
-    previous.low <= fastPrevious &&
+    bullishPullbackTouched &&
     latest.close > fastNow &&
     latest.close > latest.open;
 
   const bearishPullbackReject =
-    previous.high >= fastPrevious &&
+    bearishPullbackTouched &&
     latest.close < fastNow &&
     latest.close < latest.open;
 
@@ -138,7 +152,7 @@ export function evaluateGoldSignal(
       referencePrice: latest.close,
       atr: latestAtr,
       stopDistance: latestAtr * config.atrStopMultiple,
-      reason: "M15 EMA20/EMA50 uptrend with EMA20 pullback reclaim",
+      reason: "M15 EMA20/EMA50 uptrend with ATR-tolerant EMA20 pullback reclaim",
     };
   }
 
@@ -149,7 +163,7 @@ export function evaluateGoldSignal(
       referencePrice: latest.close,
       atr: latestAtr,
       stopDistance: latestAtr * config.atrStopMultiple,
-      reason: "M15 EMA20/EMA50 downtrend with EMA20 pullback rejection",
+      reason: "M15 EMA20/EMA50 downtrend with ATR-tolerant EMA20 pullback rejection",
     };
   }
 
