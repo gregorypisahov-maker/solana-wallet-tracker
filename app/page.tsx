@@ -1,6 +1,7 @@
 "use client";
 
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import GoldDashboardPanel from "./GoldDashboardPanel";
 
 type DashboardData = {
   generatedAt: string;
@@ -186,6 +187,8 @@ export default function Dashboard() {
             })}
           </div>
         </section>
+
+        <GoldDashboardPanel />
       </div>
     </main>
   );
