@@ -7,8 +7,6 @@
     "build": "node scripts/cleanNextBuild.mjs && next build",
     "start": "next start",
     "single-bot": "tsx single-bot/heliusSniperApp.ts",
-    "gold-paper": "tsx gold-bot/entrypoint.ts",
-    "gold-test": "node --import tsx --test gold-bot/*.test.ts",
     "worker": "node scripts/retired-service.mjs worker",
     "paper-trader": "node scripts/retired-service.mjs paper-trader",
     "worker:dev": "node scripts/retired-service.mjs worker-dev",
@@ -21,7 +19,7 @@
     "deployer:replay": "tsx scripts/replay-deployer-blacklist.ts",
     "helius-intelligence": "node scripts/retired-service.mjs helius-intelligence",
     "helius-flow-paper": "node scripts/retired-service.mjs helius-flow-paper",
-    "test": "node --import tsx --test lib/*.test.ts worker/*.test.ts paper-trader/*.test.ts gold-bot/*.test.ts",
+    "test": "node --import tsx --test lib/*.test.ts worker/*.test.ts paper-trader/*.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
