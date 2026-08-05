@@ -50,6 +50,10 @@ function rawSol(sol: number): string {
   return String(Math.max(1, Math.floor(sol * 1_000_000_000)));
 }
 
+function gmgnUrl(mint: string): string {
+  return `https://gmgn.ai/sol/token/${encodeURIComponent(mint)}`;
+}
+
 async function fetchJson(url: string): Promise<any> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 12_000);
@@ -290,6 +294,7 @@ async function openOne(candidate: any, currentState: any): Promise<boolean> {
     `Executable cost: <b>${n(execution.costPct).toFixed(2)}%</b>\n` +
     `Target: <b>+${CONFIG.targetPct}%</b> · Stop: <b>-${CONFIG.hardStopPct}%</b>\n` +
     `Strategy: <b>${CHAMPION_PAPER_VERSION}</b>\n\n` +
+    `🔎 <a href="${gmgnUrl(candidate.mint)}">View on GMGN</a>\n` +
     `<code>${candidate.mint}</code>`
   );
   console.log(`[champion-paper] OPEN ${candidate.token_symbol} score=${n(candidate.score)} size=${CONFIG.positionSizeSol}`);
@@ -386,7 +391,9 @@ async function closePosition(position: any, price: number, peak: number, reason:
     `Gross: <b>${grossPct.toFixed(2)}%</b>\n` +
     `Net: <b>${netPct.toFixed(2)}%</b>\n` +
     `Paper PnL: <b>${pnl >= 0 ? "+" : ""}${pnl.toFixed(6)} SOL</b>\n` +
-    `Strategy: <b>${CHAMPION_PAPER_VERSION}</b>`
+    `Strategy: <b>${CHAMPION_PAPER_VERSION}</b>\n\n` +
+    `🔎 <a href="${gmgnUrl(position.mint)}">View on GMGN</a>\n` +
+    `<code>${position.mint}</code>`
   );
   console.log(`[champion-paper] CLOSE ${position.token_symbol} ${reason} net=${netPct.toFixed(2)}%`);
 }
