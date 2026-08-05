@@ -7,16 +7,12 @@ on:
     paths:
       - "gold-bot/**"
       - "lib/supabase.ts"
-      - "package.json"
-      - "package-lock.json"
       - ".github/workflows/validate-gold-paper.yml"
   pull_request:
     paths:
       - "gold-bot/**"
       - "lib/supabase.ts"
       - "supabase/migrations/*gold*"
-      - "package.json"
-      - "package-lock.json"
       - ".github/workflows/validate-gold-paper.yml"
 
 permissions:
@@ -33,5 +29,5 @@ jobs:
           node-version: 20
           cache: npm
       - run: npm ci
-      - run: npm run gold-test
+      - run: node --import tsx --test gold-bot/*.test.ts
       - run: npx tsc -p gold-bot/tsconfig.json --pretty false
