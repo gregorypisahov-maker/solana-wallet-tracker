@@ -6,11 +6,18 @@ on:
       - feature/xauusd-paper-bot
     paths:
       - "gold-bot/**"
+      - "app/GoldDashboardPanel.tsx"
+      - "app/page.tsx"
+      - "app/api/gold-dashboard/**"
       - "lib/supabase.ts"
+      - "supabase/migrations/*gold*"
       - ".github/workflows/validate-gold-paper.yml"
   pull_request:
     paths:
       - "gold-bot/**"
+      - "app/GoldDashboardPanel.tsx"
+      - "app/page.tsx"
+      - "app/api/gold-dashboard/**"
       - "lib/supabase.ts"
       - "supabase/migrations/*gold*"
       - ".github/workflows/validate-gold-paper.yml"
@@ -21,7 +28,7 @@ permissions:
 jobs:
   validate:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -31,3 +38,4 @@ jobs:
       - run: npm ci
       - run: node --import tsx --test gold-bot/*.test.ts
       - run: npx tsc -p gold-bot/tsconfig.json --pretty false
+      - run: npm run build
