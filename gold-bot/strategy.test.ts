@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { atrSeries, calculatePaperUnits, emaSeries, evaluateGoldSignal } from "./strategy";
+import {
+  atrSeries,
+  calculatePaperUnits,
+  emaSeries,
+  evaluateGoldSignal,
+  type GoldStrategyConfig,
+} from "./strategy";
 import type { GoldCandle } from "./types";
 
 test("EMA follows a constant series", () => {
@@ -41,4 +47,64 @@ test("strategy refuses insufficient history", () => {
     complete: true,
   }));
   assert.equal(evaluateGoldSignal(candles), null);
+});
+
+const compactConfig: GoldStrategyConfig = {
+  fastEmaPeriod: 3,
+  slowEmaPeriod: 6,
+  atrPeriod: 3,
+  atrStopMultiple: 1.5,
+  minimumTrendAtr: 0.1,
+  pullbackToleranceAtr: 0.15,
+};
+
+test("strategy accepts a bullish pullback that narrowly misses the exact EMA", () => {
+  const candles: GoldCandle[] = Array.from({ length: 15 }, (_, index) => {
+    const close = 100 + index * 0.5;
+    return {
+      time: String(index),
+      open: close - 0.15,
+      high: close + 0.25,
+      low: close - 0.25,
+      close,
+      complete: true,
+    };
+  });
+
+  candles.push({
+    time: "15",
+    open: 106.95,
+    high: 107.05,
+    low: 106.72,
+    close: 106.8,
+    complete: true,
+  });
+  candles.push({
+    time: "16",
+    open: 106.85,
+    high: 107.3,
+    low: 106.88,
+    close: 107.2,
+    complete: true,
+  });
+
+  const signal = evaluateGoldSignal(candles, compactConfig);
+  assert.equal(signal?.side, "long");
+  assert.match(signal?.reason ?? "", /ATR-tolerant/);
+});
+
+test("strategy still rejects a bullish candle with no EMA pullback", () => {
+  const candles: GoldCandle[] = Array.from({ length: 17 }, (_, index) => {
+    const close = 100 + index * 0.5;
+    return {
+      time: String(index),
+      open: close - 0.1,
+      high: close + 0.2,
+      low: close + 0.1,
+      close,
+      complete: true,
+    };
+  });
+
+  assert.equal(evaluateGoldSignal(candles, compactConfig), null);
 });
