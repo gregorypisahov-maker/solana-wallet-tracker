@@ -1,0 +1,37 @@
+name: Validate Gold Paper Bot
+
+on:
+  push:
+    branches:
+      - feature/xauusd-paper-bot
+    paths:
+      - "gold-bot/**"
+      - "lib/supabase.ts"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/validate-gold-paper.yml"
+  pull_request:
+    paths:
+      - "gold-bot/**"
+      - "lib/supabase.ts"
+      - "supabase/migrations/*gold*"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/validate-gold-paper.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run gold-test
+      - run: npx tsc -p gold-bot/tsconfig.json --pretty false
