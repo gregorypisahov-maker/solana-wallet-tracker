@@ -48,7 +48,7 @@ Defaults:
 2. Apply `supabase/migrations/20260805220000_add_xauusd_paper_bot.sql`.
 3. Create a new Railway service from this repository and use the start command:
 
-   `npm run gold-paper`
+   `npx tsx gold-bot/entrypoint.ts`
 
 4. Copy the shared Supabase and Telegram variables from the existing Railway service.
 5. Add:
@@ -65,7 +65,7 @@ The remaining settings and conservative defaults are documented in `.env.example
 
 Run:
 
-- `npm run gold-test`
+- `node --import tsx --test gold-bot/*.test.ts`
 - `npx tsc -p gold-bot/tsconfig.json --pretty false`
 
 The branch also contains `.github/workflows/validate-gold-paper.yml`.
