@@ -1,0 +1,33 @@
+name: Jijo copy trader checks
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "copy-trader/**"
+      - "single-bot/heliusSniperApp.ts"
+      - "single-bot/sniperPaperApp.ts"
+      - "supabase/migrations/20260806125000_add_jijo_copy_trader.sql"
+      - ".github/workflows/jijo-copy-check.yml"
+  pull_request:
+    paths:
+      - "copy-trader/**"
+      - "single-bot/heliusSniperApp.ts"
+      - "single-bot/sniperPaperApp.ts"
+      - "supabase/migrations/20260806125000_add_jijo_copy_trader.sql"
+      - ".github/workflows/jijo-copy-check.yml"
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
