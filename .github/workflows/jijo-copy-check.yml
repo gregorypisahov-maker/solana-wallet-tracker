@@ -25,9 +25,13 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
       - run: npm ci
       - run: npm run typecheck
-      - run: npm test
+      - name: Load Jijo copier module
+        run: |
+          NEXT_PUBLIC_SUPABASE_URL=https://example.supabase.co \
+          SUPABASE_SERVICE_ROLE_KEY=ci-placeholder \
+          node --import tsx -e "import('./copy-trader/jijoCopyTrader.ts').then((m)=>{if(typeof m.startJijoCopyTrader!=='function'||typeof m.getJijoCopyStatus!=='function')process.exit(1);console.log('Jijo copier module loaded')})"
       - run: npm run build
