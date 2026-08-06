@@ -1,10 +1,10 @@
-// Champion-only service entrypoint.
-// The legacy momentum scalper and Helius launch sniper are intentionally disabled.
+// Champion service entrypoint plus isolated Jijo copy-trader watcher.
+// The legacy momentum scalper and Helius launch sniper remain intentionally disabled.
 process.env.ENABLE_MOMENTUM_SCALPER = "false";
 process.env.ENABLE_HELIUS_MILLISECOND_SNIPER = "false";
 
 function clean(value: string | undefined): string {
-  return (value ?? "").trim().replace(/^[\"']|[\"']$/g, "").trim();
+  return (value ?? "").trim().replace(/^["']|["']$/g, "").trim();
 }
 
 function configureHeliusEndpoints(): { rpc: string; ws: string; source: string } {
@@ -15,6 +15,7 @@ function configureHeliusEndpoints(): { rpc: string; ws: string; source: string }
     const rpc = `https://mainnet.helius-rpc.com/?api-key=${encodeURIComponent(apiKey)}`;
     const ws = `wss://mainnet.helius-rpc.com/?api-key=${encodeURIComponent(apiKey)}`;
     process.env.HELIUS_RPC_URL = rpc;
+    process.env.SOLANA_RPC_URL ||= rpc;
     process.env.HELIUS_WS_URL = ws;
     return { rpc, ws, source: "HELIUS_API_KEY" };
   }
@@ -28,6 +29,7 @@ function configureHeliusEndpoints(): { rpc: string; ws: string; source: string }
   const wsUrl = new URL(configuredRpc);
   wsUrl.protocol = rpcUrl.protocol === "https:" ? "wss:" : "ws:";
   process.env.HELIUS_RPC_URL = rpcUrl.toString();
+  process.env.SOLANA_RPC_URL ||= rpcUrl.toString();
   process.env.HELIUS_WS_URL = wsUrl.toString();
   return { rpc: rpcUrl.toString(), ws: wsUrl.toString(), source: "HELIUS_RPC_URL" };
 }
@@ -44,11 +46,18 @@ async function preflightHelius(rpc: string): Promise<void> {
     });
     const body = await response.text();
     if (!response.ok) {
-      throw new Error(`Helius authentication failed: HTTP ${response.status} ${body.slice(0, 200)}`);
+      throw new Error(
+        `Helius authentication failed: HTTP ${response.status} ${body.slice(0, 200)}`
+      );
     }
-    const parsed = JSON.parse(body) as { result?: unknown; error?: { message?: string } };
+    const parsed = JSON.parse(body) as {
+      result?: unknown;
+      error?: { message?: string };
+    };
     if (parsed.error) {
-      throw new Error(`Helius RPC rejected preflight: ${parsed.error.message ?? "unknown error"}`);
+      throw new Error(
+        `Helius RPC rejected preflight: ${parsed.error.message ?? "unknown error"}`
+      );
     }
     console.log("[champion-app] Helius authentication preflight passed");
   } finally {
@@ -58,20 +67,35 @@ async function preflightHelius(rpc: string): Promise<void> {
 
 async function main(): Promise<void> {
   const endpoints = configureHeliusEndpoints();
-  console.log(`[champion-app] Helius endpoints normalized from ${endpoints.source}`);
+  console.log(
+    `[champion-app] Helius endpoints normalized from ${endpoints.source}`
+  );
   await preflightHelius(endpoints.rpc);
 
-  // Refuse startup while the two-week freeze is active if any strategy
-  // environment value or frozen version has changed.
-  const { enforceChampionStrategyFreeze } = await import("../paper-trader/championStrategyLock");
+  // Refuse startup while the two-week freeze is active if any Champion
+  // strategy environment value or frozen version has changed.
+  const { enforceChampionStrategyFreeze } = await import(
+    "../paper-trader/championStrategyLock"
+  );
   await enforceChampionStrategyFreeze();
 
-  const { startChampionResearchScheduler } = await import("../paper-trader/championResearch");
-  const { startChampionPaperScheduler } = await import("../paper-trader/championPaper");
+  const { startChampionResearchScheduler } = await import(
+    "../paper-trader/championResearch"
+  );
+  const { startChampionPaperScheduler } = await import(
+    "../paper-trader/championPaper"
+  );
   startChampionResearchScheduler();
   startChampionPaperScheduler();
 
-  // Dashboard import starts the Express server. No sniper scheduler is imported or started.
+  // The copier is isolated from Champion. It always watches signer-verified
+  // Jijo transactions, but real execution still requires all runtime and DB gates.
+  const { startJijoCopyTrader } = await import(
+    "../copy-trader/jijoCopyTrader"
+  );
+  startJijoCopyTrader();
+
+  // Dashboard import starts the Express server.
   await import("./sniperPaperApp");
 }
 
