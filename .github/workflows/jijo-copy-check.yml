@@ -21,6 +21,9 @@ jobs:
   verify:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      NEXT_PUBLIC_SUPABASE_URL: https://example.supabase.co
+      SUPABASE_SERVICE_ROLE_KEY: ci-placeholder
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -30,8 +33,5 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - name: Load Jijo copier module
-        run: |
-          NEXT_PUBLIC_SUPABASE_URL=https://example.supabase.co \
-          SUPABASE_SERVICE_ROLE_KEY=ci-placeholder \
-          node --import tsx -e "import('./copy-trader/jijoCopyTrader.ts').then((m)=>{if(typeof m.startJijoCopyTrader!=='function'||typeof m.getJijoCopyStatus!=='function')process.exit(1);console.log('Jijo copier module loaded')})"
+        run: node --import tsx -e "import('./copy-trader/jijoCopyTrader.ts').then((m)=>{if(typeof m.startJijoCopyTrader!=='function'||typeof m.getJijoCopyStatus!=='function')process.exit(1);console.log('Jijo copier module loaded')})"
       - run: npm run build
