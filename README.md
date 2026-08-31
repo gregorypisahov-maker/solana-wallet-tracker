@@ -1,106 +1,102 @@
 # Solana Smart Wallet Tracker
 
-Paper-trading-only Solana wallet monitor with Telegram alerts and a protected, view-only live dashboard. It never signs transactions, holds a private key, or executes real trades. Wallet activity arrives through one standard Helius WebSocket connection, with slow RPC reconciliation as a safety net.
+A Solana intelligence and paper-trading system built around **Champion research** and the **Jijo signer-verified wallet copier**. The current production bot is `single-bot/heliusSniperApp.ts` and persists state in Supabase.
 
-## What runs where
+## Current architecture
 
-- **Web service (Vercel or Railway):** `npm run build` then `npm start`
-- **Monitor service (Railway):** `npm run worker`
-- **Legacy monitor command:** `npm run paper-trader` (kept as an alias so existing Railway services continue to start the same TypeScript monitor)
-- **Telegram command service (Railway):** `npm run telegram-bot`
+### Champion research
+- Scans established Solana pools from GeckoTerminal.
+- Filters for liquidity, market-cap range, pool age, momentum, volume and buy/sell flow.
+- Scores candidates from 0–100.
+- Stores every accepted/rejected candidate in `champion_candidates`.
+- Measures outcomes at 60s, 180s, 300s, 900s and 1800s so the strategy can be evaluated instead of guessed.
 
-Run exactly one Telegram command service. The monitor deliberately does not start the long-polling Telegram listener, preventing duplicate `getUpdates` consumers and unreliable `/resume` commands. The TypeScript paper trader is integrated into the monitor; the old standalone JavaScript trader is not a deployment service.
+### Champion paper trader
+- Uses the research candidates rather than blindly trading every discovery.
+- Default paper position size: 0.2 SOL.
+- Maximum 3 concurrent positions and 15 daily entries.
+- Default target: +10%; hard stop: -4%; trailing logic arms after +6%.
+- Performs a Jupiter buy/sell quote check before opening a paper trade and rejects candidates whose conservative round-trip cost is above the configured limit.
+- Persists positions, trades, bankroll and strategy state in Supabase.
+- Sends operational alerts to Telegram.
 
-## Required environment variables
+### Jijo wallet copier
+- Watches the configured target wallet and requires the target wallet to be a transaction signer before accepting an event as a trade.
+- Detects buy/sell direction from SOL and token balance changes.
+- Supports `observe` and gated `live` execution modes.
+- Live execution requires all runtime arming flags plus database state gates; do not enable it until paper/observation results have been independently reviewed.
+- Has copy ratio, maximum position, maximum open positions, daily entry/loss limits, slippage, reserve and source-age controls.
+- Records detected events, copied positions and execution results in Supabase.
 
-Copy `.env.example` and set these server-side only:
+### Dashboard
+The Express dashboard exposes service health, Champion paper performance, open positions, recent trades, research candidates and Jijo copier status. It is intended for private/controlled deployment.
 
-- `NEXT_PUBLIC_SUPABASE_URL`
-- `SUPABASE_SERVICE_ROLE_KEY`
-- `HELIUS_RPC_URL`
-- `TELEGRAM_BOT_TOKEN`
-- `TELEGRAM_CHAT_ID`
-- `VIEWER_SHARE_TOKEN` — at least 32 cryptographically random characters
-- `DASHBOARD_ADMIN_PASSWORD` — required only by wallet mutation APIs
+## Production entrypoint
 
-Generate safe secrets:
-
-```bash
-openssl rand -hex 32
-```
-
-Never expose `SUPABASE_SERVICE_ROLE_KEY`, the Telegram token, viewer token, or admin password in browser code or a public environment file.
-
-## Database upgrade
-
-Before deploying, paste the complete contents of `supabase/finish-job-migration.sql` into the Supabase SQL editor and run it once. The migration is idempotent and preserves existing rows.
-
-Then apply the timestamped files in `supabase/migrations/` in order. They add the server-only Helius usage samples used by `/heliusstats` and remove only verified duplicate indexes.
-
-Then backfill historical grouping and alert participants once:
+Use the explicit production command for the current combined bot:
 
 ```bash
-npx tsx scripts/backfillPositionsIds.ts
-npx tsx scripts/backfillAlertParticipants.ts
+npm run production-bot
 ```
 
-The first script warns if historical rows cannot be grouped safely. Review warnings rather than guessing.
+`npm run single-bot` is kept as an equivalent alias.
 
-## Local verification
+The combined service starts Helius preflight, Champion research, Champion paper trading, the Jijo watcher and the dashboard. Legacy service commands remain in `package.json` only for compatibility and are intentionally disabled by `scripts/retired-service.mjs`.
+
+## Environment
+
+Keep all secrets server-side. At minimum, the active Solana/Jijo service needs the Supabase service-role credentials, Helius credentials and Telegram credentials used by the imported modules. Live execution additionally requires the explicit live-trading environment gates and whatever wallet/executor secrets are required by `lib/liveWallet`.
+
+**Never commit:** private keys, seed phrases, API tokens, Supabase service-role keys, Telegram bot tokens or live-execution secrets.
+
+## Verification
+
+Run the full local verification suite before deploying:
 
 ```bash
 npm ci
-npm run typecheck
-npm run build
-npm run dev
+npm run verify
 ```
 
-Open the private dashboard once with:
+`npm run verify` performs:
 
-```text
-http://localhost:3000/?token=YOUR_VIEWER_SHARE_TOKEN
+1. TypeScript typecheck
+2. Automated tests
+3. Next.js production build
+
+For the production bot itself:
+
+```bash
+npm run production-bot
 ```
 
-The token is exchanged for an HTTP-only cookie and removed from the URL. A friend can receive the same view-only link. Rotate `VIEWER_SHARE_TOKEN` to revoke every existing viewer session.
+## Safety model
 
-## Deployment order
+The repository contains both paper-trading and live-capable infrastructure. Treat these as different risk levels.
 
-1. Run the Supabase migration and both backfills.
-2. Add the required environment variables to the web, monitor, and Telegram services as applicable.
-3. Deploy the web service.
-4. Deploy one monitor service with `npm run worker`.
-5. Deploy one Telegram service with `npm run telegram-bot`.
-6. Confirm Railway shows one worker startup message and one Telegram listener startup message.
-7. Test `/paperstats` and `/resume` from the authorized Telegram chat.
-8. Open the viewer URL and confirm the `Updated` time advances every 10 seconds.
+**Default recommendation:** keep Champion paper-only and Jijo in `observe` mode until the recorded results demonstrate a durable edge after realistic execution costs.
 
-## Security and behavior
+The Jijo runtime has multiple independent live gates. A process restart must not be treated as permission to trade. Live execution should be enabled only deliberately and with small capital first.
 
-- Dashboard reads use the server-side Supabase client; no service-role key reaches the browser.
-- The dashboard contains no add/delete wallet controls.
-- Existing wallet write endpoints require HTTP Basic auth with `DASHBOARD_ADMIN_PASSWORD`.
-- Viewer and API reads require the replaceable share token cookie.
-- A wallet with no cursor starts at its latest confirmed signature. Normal startup never replays historical swaps.
-- Every inspected signature checkpoints its cursor immediately, so a Railway restart cannot restart a large backfill.
-- The worker automatically creates one Helius Enhanced Webhook filtered to successful `SWAP` events for the active wallets. Its public receiver is the `helius-webhook` Supabase Edge Function, so it is not blocked by dashboard deployment protection. Helius charges one credit per delivered event, and the parsed balance changes avoid a `getTransaction` lookup for every non-trade wallet action. A standard WebSocket remains the automatic fallback if the webhook cannot activate.
-- The Free-plan webhook budget monitors six wallets at a time: the four strongest trust scores stay in the core, and two exploration slots rotate through the remaining active wallets every six hours. All active wallets still receive signatures-only reconciliation, preserving broad paper learning while leaving room for traffic spikes under the monthly credit cap.
-- After one complete 15-minute telemetry bucket, a one-way budget guard checks the recent projected burn every 15 minutes. If the projection exceeds 700,000 credits/month, it automatically reduces live webhook coverage (never below three wallets) and keeps at least one rotating exploration slot. It does not expand coverage automatically during the same worker run.
-- A 15-minute signatures-only reconciliation keeps cursors current without refetching webhook-era transactions. Fallback RPC calls are globally paced with exponential 429 backoff, and duplicate signatures are suppressed in memory and Postgres.
-- Operational usage samples are server-only and power `/heliusstats`; the estimate includes filtered webhook events, fallback RPC calls, and streamed bytes, but the Helius dashboard remains the billing source of truth.
-- Both sides of a rapid buy/sell pair are marked as scalps, preventing an earlier scalp buy from creating a false signal.
-- Monitor and position loops do not overlap with themselves.
-- Supabase failures throw instead of silently pretending state was saved.
-- Partial sells contribute to one logical position; the consecutive-loss counter changes only when that full position closes.
-- The default alert gate is `MIN_SCORE_FOR_ALERT=8`, matching the paper trader’s validated entry filter. Override it explicitly only after reviewing paper results.
+## Supabase
 
-## Telegram commands
+The main backend project stores strategy state, candidate observations, paper positions/trades and Jijo copy events/positions. Database migrations live under `supabase/`.
 
-- `/paperstats`
-- `/walletstats`
-- `/exitstats`
-- `/scorestats`
-- `/heliusstats`
-- `/readiness`
-- `/resume`
+If the Supabase project cannot be reached from the current network, do not fabricate database status. Check the Supabase dashboard/connection and retry the query before changing production state.
 
-Only messages from `TELEGRAM_CHAT_ID` are accepted.
+## Useful commands
+
+```bash
+npm run production-bot   # current combined Solana service
+npm run typecheck        # TypeScript only
+npm test                 # automated tests
+npm run verify           # typecheck + tests + production build
+npm run build            # Next.js build
+npm run dev              # Next.js development server
+```
+
+## Project goal
+
+The objective is not to accumulate more trading features. The objective is to turn the existing data pipeline into a measurable system:
+
+**detect → score → paper trade/observe → measure execution reality → prove expectancy → only then consider live capital or a paid product.**
