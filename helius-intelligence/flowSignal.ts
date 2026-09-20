@@ -8,6 +8,19 @@ export type HolderSample = {
   recent_sol_delta: number | null;
 };
 
+export type FundingClusterMetrics = {
+  resolved_funding_count: number;
+  unresolved_funding_count: number;
+  funding_resolution_ratio: number | null;
+  resolved_independent_count: number;
+  resolved_independent_ratio: number | null;
+  holder_cluster_count: number;
+  largest_holder_cluster_size: number;
+  largest_holder_cluster_ratio: number | null;
+  direct_holder_funding_links: number;
+  shared_external_funder_links: number;
+};
+
 export type FlowSignalResult = {
   signal_version: "helius_flow_signal_v1";
   trade_eligible: boolean;
@@ -31,6 +44,81 @@ function parsedTokenOwner(account: any): string | null {
 
 function clamp(value: number, min = 0, max = 1) {
   return Math.min(max, Math.max(min, value));
+}
+
+export function computeFundingClusterMetrics(samples: HolderSample[]): FundingClusterMetrics {
+  const owners = samples.map((x) => x.owner).filter((x): x is string => Boolean(x));
+  const ownerSet = new Set(owners);
+  const resolved = samples.filter((x) => x.owner && x.funding_source);
+  const unresolved = samples.filter((x) => x.owner && !x.funding_source);
+
+  const parent = new Map<string, string>();
+  const find = (x: string): string => {
+    const current = parent.get(x) ?? x;
+    if (current === x) {
+      parent.set(x, x);
+      return x;
+    }
+    const root = find(current);
+    parent.set(x, root);
+    return root;
+  };
+  const union = (a: string, b: string) => {
+    const ra = find(a);
+    const rb = find(b);
+    if (ra !== rb) parent.set(rb, ra);
+  };
+
+  for (const owner of ownerSet) parent.set(owner, owner);
+
+  let directHolderFundingLinks = 0;
+  const byExternalFunder = new Map<string, string[]>();
+  for (const row of resolved) {
+    const owner = row.owner!;
+    const funder = row.funding_source!;
+    if (ownerSet.has(funder)) {
+      directHolderFundingLinks += 1;
+      union(owner, funder);
+    } else {
+      const list = byExternalFunder.get(funder) ?? [];
+      list.push(owner);
+      byExternalFunder.set(funder, list);
+    }
+  }
+
+  let sharedExternalFunderLinks = 0;
+  for (const linkedOwners of byExternalFunder.values()) {
+    if (linkedOwners.length < 2) continue;
+    for (let i = 1; i < linkedOwners.length; i += 1) {
+      union(linkedOwners[0], linkedOwners[i]);
+      sharedExternalFunderLinks += 1;
+    }
+  }
+
+  const clusterSizes = new Map<string, number>();
+  for (const owner of ownerSet) {
+    const root = find(owner);
+    clusterSizes.set(root, (clusterSizes.get(root) ?? 0) + 1);
+  }
+  const largestHolderClusterSize = Math.max(0, ...clusterSizes.values());
+
+  const resolvedOwners = new Set(resolved.map((x) => x.owner!));
+  const resolvedRoots = new Set([...resolvedOwners].map(find));
+  const clusteredResolvedOwners = [...resolvedOwners].filter((owner) => (clusterSizes.get(find(owner)) ?? 0) > 1).length;
+  const resolvedIndependentCount = Math.max(0, resolvedOwners.size - clusteredResolvedOwners);
+
+  return {
+    resolved_funding_count: resolved.length,
+    unresolved_funding_count: unresolved.length,
+    funding_resolution_ratio: owners.length ? resolved.length / owners.length : null,
+    resolved_independent_count: resolvedIndependentCount,
+    resolved_independent_ratio: resolvedOwners.size ? resolvedIndependentCount / resolvedOwners.size : null,
+    holder_cluster_count: clusterSizes.size,
+    largest_holder_cluster_size: largestHolderClusterSize,
+    largest_holder_cluster_ratio: owners.length ? largestHolderClusterSize / owners.length : null,
+    direct_holder_funding_links: directHolderFundingLinks,
+    shared_external_funder_links: sharedExternalFunderLinks,
+  };
 }
 
 async function resolveOwners(rpc: RpcCall, mint: string, largestValues: any[], maxOwners: number): Promise<HolderSample[]> {
@@ -98,13 +186,7 @@ export async function computeFlowSignal(input: {
     }
   }
 
-  const ownerSet = new Set(sampled.map((x) => x.owner));
-  const funded = sampled.filter((x) => x.funding_source);
-  const fundingCounts = new Map<string, number>();
-  for (const row of funded) fundingCounts.set(row.funding_source!, (fundingCounts.get(row.funding_source!) || 0) + 1);
-  const largestFundingCluster = Math.max(0, ...fundingCounts.values());
-  const sharedFunderClusterRatio = funded.length ? largestFundingCluster / funded.length : null;
-  const independentBuyerRatio = sampled.length ? ownerSet.size / sampled.length : null;
+  const cluster = computeFundingClusterMetrics(samples);
 
   const authorityAddresses = new Set<string>();
   for (const authority of input.authorities || []) {
@@ -133,15 +215,16 @@ export async function computeFlowSignal(input: {
 
   const missing: string[] = [];
   if (sampled.length < 6) missing.push("minimum_six_resolved_holder_owners");
-  if (funded.length < 4) missing.push("minimum_four_funding_paths");
+  if (cluster.resolved_funding_count < 4) missing.push("minimum_four_funding_paths");
+  if ((cluster.funding_resolution_ratio ?? 0) < 0.5) missing.push("insufficient_funding_resolution");
   if (!input.previousSnapshot) missing.push("second_time_series_snapshot");
   if (netTopHolderFlowRatio === null) missing.push("net_holder_flow_window");
   if (earlyWalletSellPressure === null) missing.push("early_wallet_sell_pressure_window");
   if (netSolFlowSample === null) missing.push("recent_sol_flow_sample");
 
   let score = 50;
-  if (independentBuyerRatio !== null) score += (independentBuyerRatio - 0.7) * 30;
-  if (sharedFunderClusterRatio !== null) score += (0.35 - sharedFunderClusterRatio) * 35;
+  if (cluster.resolved_independent_ratio !== null) score += (cluster.resolved_independent_ratio - 0.7) * 30;
+  if (cluster.largest_holder_cluster_ratio !== null) score += (0.35 - cluster.largest_holder_cluster_ratio) * 35;
   if (netTopHolderFlowRatio !== null) score += clamp(netTopHolderFlowRatio, -0.5, 0.5) * 30;
   if (earlyWalletSellPressure !== null) score -= clamp(earlyWalletSellPressure, 0, 1) * 35;
   score -= creatorLinkedOwners * 15;
@@ -149,16 +232,17 @@ export async function computeFlowSignal(input: {
   score = Math.round(Math.min(100, Math.max(0, score)));
 
   const reasons: string[] = [];
-  if ((independentBuyerRatio ?? 0) >= 0.8) reasons.push("buyers_appear_independent");
-  if (sharedFunderClusterRatio !== null && sharedFunderClusterRatio <= 0.35) reasons.push("no_dominant_shared_funder_cluster");
+  if ((cluster.resolved_independent_ratio ?? 0) >= 0.8 && (cluster.funding_resolution_ratio ?? 0) >= 0.5) reasons.push("resolved_buyers_appear_independent");
+  if ((cluster.largest_holder_cluster_ratio ?? 1) <= 0.35) reasons.push("no_dominant_holder_funding_cluster");
   if ((netTopHolderFlowRatio ?? -1) > 0.03) reasons.push("positive_holder_flow_window");
   if ((earlyWalletSellPressure ?? 1) < 0.12) reasons.push("low_early_wallet_sell_pressure");
   if (creatorLinkedOwners === 0 && creatorLinkedFunding === 0) reasons.push("no_creator_linked_sample_flow");
 
   const tradeEligible = missing.length === 0
     && score >= 72
-    && (independentBuyerRatio ?? 0) >= 0.75
-    && (sharedFunderClusterRatio ?? 1) <= 0.4
+    && (cluster.resolved_independent_ratio ?? 0) >= 0.75
+    && (cluster.funding_resolution_ratio ?? 0) >= 0.5
+    && (cluster.largest_holder_cluster_ratio ?? 1) <= 0.4
     && creatorLinkedOwners === 0
     && creatorLinkedFunding === 0
     && (netTopHolderFlowRatio ?? -1) > 0
@@ -173,19 +257,18 @@ export async function computeFlowSignal(input: {
     missing_evidence: missing,
     features: {
       resolved_holder_owners: sampled.length,
-      independent_buyer_count: ownerSet.size,
-      independent_buyer_ratio: independentBuyerRatio,
-      funding_paths_observed: funded.length,
-      largest_shared_funder_cluster: largestFundingCluster,
-      shared_funder_cluster_ratio: sharedFunderClusterRatio,
+      ...cluster,
       creator_linked_owner_count: creatorLinkedOwners,
       creator_linked_funding_count: creatorLinkedFunding,
       net_top_holder_flow_ratio: netTopHolderFlowRatio,
       recent_net_sol_delta_sample: netSolFlowSample,
       early_wallet_sell_pressure: earlyWalletSellPressure,
       time_series_ready: Boolean(input.previousSnapshot),
+      launch_bundle_status: "not_analyzed",
+      launch_bundle_trade_eligible: false,
       limitations: [
-        "holder-flow is a sampled top-holder proxy, not full market-wide order flow",
+        "holder-flow is a sampled top-holder proxy, not a launch bundle map",
+        "unresolved funding is treated as unknown and never counted as independent",
         "funding paths are inferred from a bounded recent transaction sample",
         "pool-vault classification remains conservative and no raw concentration veto is used",
       ],
