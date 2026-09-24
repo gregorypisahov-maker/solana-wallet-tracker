@@ -24,11 +24,6 @@ function privateHeaders(response: NextResponse): NextResponse {
 export async function middleware(request: NextRequest) {
   const host = request.headers.get("host")?.toLowerCase() ?? "";
 
-  if (host.endsWith(".vercel.app")) {
-    const canonicalUrl = new URL(request.nextUrl.pathname + request.nextUrl.search, `https://${CANONICAL_HOST}`);
-    return NextResponse.redirect(canonicalUrl, 308);
-  }
-
   const pathname = request.nextUrl.pathname;
   if (pathname === "/login" || pathname === "/api/auth/login") {
     return privateHeaders(NextResponse.next());
