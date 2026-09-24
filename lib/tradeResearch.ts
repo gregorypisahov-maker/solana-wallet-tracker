@@ -62,7 +62,7 @@ async function fetchAddressTransactions(url:string,wallet:string,maxSignatures:n
         paginationToken,
         commitment:"confirmed",
         encoding:"jsonParsed",
-        maxSupportedTransactionVersion:0,
+        maxSupportedTransactionVersion:1,
         filters:{status:"succeeded",tokenAccounts:"balanceChanged"}
       }]
     }),cache:"no-store"});
