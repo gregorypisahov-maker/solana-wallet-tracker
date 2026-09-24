@@ -57,7 +57,7 @@ export async function scanResearchEvents(wallet=getResearchWallet(),maxSignature
   const events:ResearchEvent[]=[];
   for(let i=0;i<signatures.length;i+=50){
     const batch=signatures.slice(i,i+50);
-    const txs=await connection.getParsedTransactions(batch,{maxSupportedTransactionVersion:1,commitment:"confirmed"});
+    const txs=await connection.getParsedTransactions(batch,{maxSupportedTransactionVersion:0,commitment:"confirmed"});
     for(let j=0;j<txs.length;j++){const tx=txs[j];if(!tx)continue;const event=parseEvent(tx,wallet,batch[j]);if(event)events.push(event);}
   }
   return {signaturesScanned:signatures.length,events,nextBeforeSignature:before??null};
