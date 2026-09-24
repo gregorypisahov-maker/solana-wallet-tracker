@@ -3,128 +3,45 @@ import { hasViewerAccess, unauthorized } from "@/lib/dashboardAuth";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { getResearchWallet, reconstructTrades, scanResearchEvents } from "@/lib/tradeResearch";
 
-export const dynamic = "force-dynamic";
-export const maxDuration = 60;
+export const dynamic="force-dynamic"; export const revalidate=0; export const fetchCache="force-no-store"; export const maxDuration=60;
 
-export async function GET(request: NextRequest) {
-  if (!hasViewerAccess(request)) return unauthorized();
-  const wallet = getResearchWallet();
-  const supabase = getSupabaseAdmin({ noStore: true });
+type ResearchTradeLike={pnlSol:number;roiPct:number|null;holdSeconds:number;entryMarketCapUsd:number|null};
 
-  const { data: trades, error } = await supabase
-    .from("trade_research_trades")
-    .select("*")
-    .eq("wallet_address", wallet)
-    .order("exit_time", { ascending: false })
-    .limit(1000);
+function rowsToEvents(rows:any[]){
+  return rows.map(row=>({signature:row.signature,tokenMint:row.token_mint,side:row.side as "buy"|"sell",solAmount:Number(row.sol_amount??0),tokenAmount:Number(row.token_amount??0),txTime:new Date(row.tx_time)}));
+}
+function avg(items:ResearchTradeLike[],key:keyof ResearchTradeLike){return items.length?items.reduce((s,x)=>s+Number(x[key]??0),0)/items.length:0;}
 
-  if (error) {
-    return NextResponse.json({ error: error.message }, { status: 500 });
-  }
-
-  const rows = trades ?? [];
-  const wins = rows.filter((x) => Number(x.pnl_sol) > 0);
-  const losses = rows.filter((x) => Number(x.pnl_sol) < 0);
-  const avg = (items: any[], key: string) =>
-    items.length ? items.reduce((s, x) => s + Number(x[key] ?? 0), 0) / items.length : 0;
-
-  const byMc = (max: number | null, min = 0) => {
-    const items = rows.filter((x) => {
-      const mc = Number(x.entry_market_cap_usd);
-      return Number.isFinite(mc) && mc >= min && (max == null || mc < max);
-    });
-    return {
-      min,
-      max,
-      trades: items.length,
-      wins: items.filter((x) => Number(x.pnl_sol) > 0).length,
-      winRate: items.length ? items.filter((x) => Number(x.pnl_sol) > 0).length / items.length : 0,
-      avgRoi: avg(items, "roi_pct"),
-      pnlSol: items.reduce((s, x) => s + Number(x.pnl_sol ?? 0), 0),
-    };
-  };
-
-  return NextResponse.json({
-    wallet,
-    count: rows.length,
-    stats: {
-      wins: wins.length,
-      losses: losses.length,
-      winRate: rows.length ? wins.length / rows.length : 0,
-      pnlSol: rows.reduce((s, x) => s + Number(x.pnl_sol ?? 0), 0),
-      avgWinRoi: avg(wins, "roi_pct"),
-      avgLossRoi: avg(losses, "roi_pct"),
-      avgHoldMinutes: avg(rows, "hold_seconds") / 60,
-    },
-    mcBuckets: [
-      byMc(50_000),
-      byMc(100_000, 50_000),
-      byMc(250_000, 100_000),
-      byMc(500_000, 250_000),
-      byMc(1_000_000, 500_000),
-      byMc(null, 1_000_000),
-    ],
-    trades: rows,
-  }, { headers: { "Cache-Control": "no-store" } });
+async function loadEvents(supabase:any,wallet:string){
+  const {data,error}=await supabase.from("wallet_transactions").select("wallet_address,signature,token_mint,token_symbol,side,sol_amount,token_amount,tx_time,is_scalp").eq("wallet_address",wallet).order("tx_time",{ascending:true}).limit(10000);
+  if(error)throw error; return data??[];
 }
 
-export async function POST(request: NextRequest) {
-  if (!hasViewerAccess(request)) return unauthorized();
-  const wallet = getResearchWallet();
-  let maxSignatures = Number(process.env.TRADE_RESEARCH_BATCH_SIZE ?? 500);
+export async function GET(request:NextRequest){
+  if(!hasViewerAccess(request))return unauthorized();
+  const wallet=getResearchWallet(),supabase=getSupabaseAdmin({noStore:true});
+  try{
+    const rows=await loadEvents(supabase,wallet),events=rowsToEvents(rows),trades=reconstructTrades(wallet,events).filter(t=>t.outcome!=="flat");
+    const wins=trades.filter(t=>t.pnlSol>0),losses=trades.filter(t=>t.pnlSol<0);
+    const byMc=(max:number|null,min=0)=>{const items=trades.filter(x=>{const mc=Number(x.entryMarketCapUsd);return Number.isFinite(mc)&&mc>=min&&(max==null||mc<max);});return {min,max,trades:items.length,wins:items.filter(x=>x.pnlSol>0).length,winRate:items.length?items.filter(x=>x.pnlSol>0).length/items.length:0,avgRoi:avg(items,"roiPct"),pnlSol:items.reduce((s,x)=>s+x.pnlSol,0)};};
+    return NextResponse.json({wallet,count:trades.length,rawEvents:events.length,stats:{wins:wins.length,losses:losses.length,winRate:trades.length?wins.length/trades.length:0,pnlSol:trades.reduce((s,x)=>s+x.pnlSol,0),avgWinRoi:avg(wins,"roiPct"),avgLossRoi:avg(losses,"roiPct"),avgHoldMinutes:avg(trades,"holdSeconds")/60},mcBuckets:[byMc(50000),byMc(100000,50000),byMc(250000,100000),byMc(500000,250000),byMc(1000000,500000),byMc(null,1000000)],trades:trades.slice(0,100).map(t=>({...t,entryTime:t.entryTime.toISOString(),exitTime:t.exitTime.toISOString()}))},{headers:{"Cache-Control":"no-store"}});
+  }catch(error){console.error("[trade-research] GET failed",error);return NextResponse.json({error:"Existing wallet transaction data is temporarily unavailable"},{status:500});}
+}
 
-  try {
-    const body = await request.json();
-    if (Number.isFinite(Number(body?.maxSignatures))) {
-      maxSignatures = Math.min(1000, Math.max(50, Number(body.maxSignatures)));
+export async function POST(request:NextRequest){
+  if(!hasViewerAccess(request))return unauthorized();
+  const wallet=getResearchWallet(),supabase=getSupabaseAdmin({noStore:true});
+  let maxSignatures=Number(process.env.TRADE_RESEARCH_BATCH_SIZE??500);
+  try{const body=await request.json();if(Number.isFinite(Number(body?.maxSignatures)))maxSignatures=Math.min(1000,Math.max(50,Number(body.maxSignatures)));}catch{}
+  try{
+    const {data:oldest}=await supabase.from("wallet_transactions").select("signature,tx_time").eq("wallet_address",wallet).order("tx_time",{ascending:true}).limit(1).maybeSingle();
+    const scan=await scanResearchEvents(wallet,maxSignatures,oldest?.signature??null);
+    if(scan.events.length){
+      const payload=scan.events.map(e=>({wallet_address:wallet,signature:e.signature,token_mint:e.tokenMint,side:e.side,sol_amount:e.solAmount,token_amount:e.tokenAmount,tx_time:e.txTime.toISOString(),is_scalp:false}));
+      const {error}=await supabase.from("wallet_transactions").upsert(payload,{onConflict:"wallet_address,signature,token_mint,side"});
+      if(error)throw error;
     }
-  } catch {}
-
-  const supabase = getSupabaseAdmin({ noStore: true });
-  const scan = await scanResearchEvents(wallet, maxSignatures);
-  const trades = reconstructTrades(wallet, scan.events);
-
-  if (trades.length) {
-    const payload = trades.map((t) => ({
-      wallet_address: t.walletAddress,
-      token_mint: t.tokenMint,
-      entry_time: t.entryTime.toISOString(),
-      exit_time: t.exitTime.toISOString(),
-      hold_seconds: t.holdSeconds,
-      entry_sol: t.entrySol,
-      exit_sol: t.exitSol,
-      pnl_sol: t.pnlSol,
-      roi_pct: t.roiPct,
-      initial_position_usd: t.initialPositionUsd,
-      entry_market_cap_usd: t.entryMarketCapUsd,
-      exit_market_cap_usd: t.exitMarketCapUsd,
-      max_drawdown_pct: t.maxDrawdownPct,
-      max_runup_pct: t.maxRunupPct,
-      outcome: t.outcome,
-      source: "solana_rpc",
-      metadata: t.metadata,
-    }));
-    const { error } = await supabase
-      .from("trade_research_trades")
-      .upsert(payload, { onConflict: "wallet_address,token_mint,entry_time,exit_time" });
-    if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-  }
-
-  await supabase.from("trade_research_scans").insert({
-    wallet_address: wallet,
-    finished_at: new Date().toISOString(),
-    signatures_scanned: scan.signaturesScanned,
-    trades_detected: scan.events.length,
-    positions_closed: trades.length,
-    status: "completed",
-  });
-
-  return NextResponse.json({
-    ok: true,
-    wallet,
-    signaturesScanned: scan.signaturesScanned,
-    events: scan.events.length,
-    closedTrades: trades.length,
-    note: "This first pass records exact on-chain entries/exits. Historical market-cap and social enrichment are the next enrichment stage.",
-  });
+    const rows=await loadEvents(supabase,wallet),events=rowsToEvents(rows),trades=reconstructTrades(wallet,events).filter(t=>t.outcome!=="flat");
+    return NextResponse.json({ok:true,wallet,signaturesScanned:scan.signaturesScanned,eventsAdded:scan.events.length,storedEvents:events.length,closedTrades:trades.length,hasMoreHistory:scan.signaturesScanned>=maxSignatures,trades:trades.slice(0,100).map(t=>({...t,entryTime:t.entryTime.toISOString(),exitTime:t.exitTime.toISOString()})),note:"Trade Research reuses the existing wallet_transactions system. No new Supabase tables are required."});
+  }catch(error){console.error("[trade-research] POST failed",error);return NextResponse.json({error:error instanceof Error?error.message:"Trade Research scan failed"},{status:500});}
 }
