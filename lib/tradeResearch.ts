@@ -70,7 +70,7 @@ async function fetchV1Transactions(url:string,signatures:string[]){
   return results;
 }
 
-export async function scanResearchEvents(wallet=getResearchWallet(),maxSignatures=Number(process.env.TRADE_RESEARCH_MAX_SIGNATURES??5000),beforeSignature?:string|null){
+export async function scanResearchEvents(wallet=getResearchWallet(),maxSignatures=Math.min(Number(process.env.TRADE_RESEARCH_MAX_SIGNATURES??100),100),beforeSignature?:string|null){
   const connection=getConnection(); const publicKey=new PublicKey(wallet); const signatures:string[]=[];
   let before=beforeSignature||undefined;
   while(signatures.length<maxSignatures){
@@ -81,8 +81,8 @@ export async function scanResearchEvents(wallet=getResearchWallet(),maxSignature
     if(page.length<1000||!before)break;
   }
   const events:ResearchEvent[]=[];
-  for(let i=0;i<signatures.length;i+=50){
-    const batch=signatures.slice(i,i+50);
+  for(let i=0;i<signatures.length;i+=10){
+    const batch=signatures.slice(i,i+10);
     let txs:any[];
     try {
       txs=await connection.getParsedTransactions(batch,{maxSupportedTransactionVersion:0,commitment:"confirmed"}) as any[];
