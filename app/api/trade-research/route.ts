@@ -45,7 +45,7 @@ export async function GET(request:NextRequest){
   if(!hasViewerAccess(request))return unauthorized();
   try{
     const url=new URL(request.url);
-    const max=Math.min(100,Math.max(10,Number(url.searchParams.get("signatures")||100)));
+    const max=Math.min(1000,Math.max(10,Number(url.searchParams.get("signatures")||1000)));
     return NextResponse.json(await analyze(getResearchWallet(),max),{headers:{"Cache-Control":"no-store"}});
   }catch(error){console.error("[trade-research] direct analysis failed",error);return NextResponse.json({error:error instanceof Error?error.message:"Wallet analysis failed"},{status:500});}
 }
@@ -54,7 +54,7 @@ export async function POST(request:NextRequest){
   if(!hasViewerAccess(request))return unauthorized();
   try{
     const body=await request.json().catch(()=>({}));
-    const max=Math.min(100,Math.max(10,Number(body?.maxSignatures||100)));
+    const max=Math.min(1000,Math.max(10,Number(body?.maxSignatures||1000)));
     return NextResponse.json(await analyze(getResearchWallet(),max),{headers:{"Cache-Control":"no-store"}});
   }catch(error){console.error("[trade-research] direct analysis failed",error);return NextResponse.json({error:error instanceof Error?error.message:"Wallet analysis failed"},{status:500});}
 }
