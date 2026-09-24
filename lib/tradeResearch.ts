@@ -81,7 +81,7 @@ export async function scanResearchEvents(wallet=getResearchWallet(),maxSignature
     if(page.length<1000||!before)break;
   }
   const events:ResearchEvent[]=[];
-  for(let i=0;i<signatures.length;i+=10){
+  for(let i=0;i<signatures.length;i+=50){
     const batch=signatures.slice(i,i+50);
     let txs:any[];
     try {
