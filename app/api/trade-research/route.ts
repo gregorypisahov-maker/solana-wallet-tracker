@@ -105,6 +105,7 @@ export async function POST(request:NextRequest){
   try{
     const body=await request.json().catch(()=>({}));
     const max=Math.min(1000,Math.max(10,Number(body?.maxSignatures||1000)));
+    if(body?.action==="big-winners") return NextResponse.json(await analyzeBigWinners(getResearchWallet(),max),{headers:{"Cache-Control":"no-store"}});
     return NextResponse.json(await analyze(getResearchWallet(),max),{headers:{"Cache-Control":"no-store"}});
   }catch(error){console.error("[trade-research] direct analysis failed",error);return NextResponse.json({error:error instanceof Error?error.message:"Wallet analysis failed"},{status:500});}
 }
