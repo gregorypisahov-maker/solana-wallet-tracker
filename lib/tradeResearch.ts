@@ -83,14 +83,7 @@ export async function scanResearchEvents(wallet=getResearchWallet(),maxSignature
   const events:ResearchEvent[]=[];
   for(let i=0;i<signatures.length;i+=10){
     const batch=signatures.slice(i,i+10);
-    let txs:any[];
-    try {
-      txs=await connection.getParsedTransactions(batch,{maxSupportedTransactionVersion:0,commitment:"confirmed"}) as any[];
-    } catch {
-      // Some wallets contain Solana v1 transactions. The installed web3.js type/schema
-      // only accepts v0 here, so fall back to the raw JSON-RPC API, which supports v1.
-      txs=await fetchV1Transactions(connection.rpcEndpoint,batch);
-    }
+    const txs=await fetchV1Transactions(connection.rpcEndpoint,batch);
     for(let j=0;j<txs.length;j++){const tx=txs[j];if(!tx)continue;const event=parseEvent(tx,wallet,batch[j]);if(event)events.push(event);}
   }
   return {signaturesScanned:signatures.length,events,nextBeforeSignature:before??null};
