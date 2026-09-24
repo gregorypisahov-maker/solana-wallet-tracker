@@ -46,47 +46,52 @@ function parseEvent(tx:any,wallet:string,signature:string):ResearchEvent|null{
 
 async function sleep(ms:number){return new Promise(resolve=>setTimeout(resolve,ms));}
 
-async function fetchV1Transactions(url:string,signatures:string[]){
+async function fetchAddressTransactions(url:string,wallet:string,maxSignatures:number){
   const results:any[]=[];
-  for(let i=0;i<signatures.length;i+=5){
-    const group=signatures.slice(i,i+5);
-    const groupResults=await Promise.all(group.map(async signature=>{
-      for(let attempt=0;attempt<5;attempt++){
-        const response=await fetch(url,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({jsonrpc:"2.0",id:signature,method:"getTransaction",params:[signature,{encoding:"jsonParsed",commitment:"confirmed",maxSupportedTransactionVersion:1}]}),cache:"no-store"});
-        if(response.status===429){await sleep(750*(attempt+1));continue;}
-        if(!response.ok) throw new Error(`Solana RPC HTTP ${response.status}`);
-        const body=await response.json();
-        if(body.error){
-          if(body.error.code===429||/compute units per second|too many requests/i.test(body.error.message||"")){await sleep(750*(attempt+1));continue;}
-          throw new Error(body.error.message||"Solana RPC transaction error");
-        }
-        return body.result;
-      }
-      throw new Error("Solana RPC rate limit persisted after retries");
-    }));
-    results.push(...groupResults);
-    if(i+5<signatures.length) await sleep(500);
+  let paginationToken:string|undefined;
+  while(results.length<maxSignatures){
+    const limit=Math.min(100,maxSignatures-results.length);
+    const response=await fetch(url,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({
+      jsonrpc:"2.0",
+      id:`trade-research-${results.length}`,
+      method:"getTransactionsForAddress",
+      params:[wallet,{
+        transactionDetails:"full",
+        sortOrder:"desc",
+        limit,
+        paginationToken,
+        commitment:"confirmed",
+        encoding:"jsonParsed",
+        maxSupportedTransactionVersion:0,
+        filters:{status:"succeeded",tokenAccounts:"balanceChanged"}
+      }]
+    }),cache:"no-store"});
+    if(response.status===429){await sleep(1000);continue;}
+    if(!response.ok)throw new Error(`Solana RPC HTTP ${response.status}`);
+    const body=await response.json();
+    if(body.error)throw new Error(body.error.message||"Solana RPC transaction history error");
+    const page=Array.isArray(body.result?.data)?body.result.data:(Array.isArray(body.result?.transactions)?body.result.transactions:[]);
+    if(!page.length)break;
+    results.push(...page);
+    paginationToken=body.result?.paginationToken||undefined;
+    if(!paginationToken)break;
   }
-  return results;
+  return results.slice(0,maxSignatures);
 }
 
-export async function scanResearchEvents(wallet=getResearchWallet(),maxSignatures=Math.min(Number(process.env.TRADE_RESEARCH_MAX_SIGNATURES??100),100),beforeSignature?:string|null){
-  const connection=getConnection(); const publicKey=new PublicKey(wallet); const signatures:string[]=[];
-  let before=beforeSignature||undefined;
-  while(signatures.length<maxSignatures){
-    const page=await connection.getSignaturesForAddress(publicKey,{limit:Math.min(1000,maxSignatures-signatures.length),before},"confirmed");
-    if(!page.length)break;
-    signatures.push(...page.filter(x=>!x.err).map(x=>x.signature));
-    before=page[page.length-1]?.signature;
-    if(page.length<1000||!before)break;
-  }
+export async function scanResearchEvents(wallet=getResearchWallet(),maxSignatures=Math.min(Number(process.env.TRADE_RESEARCH_MAX_SIGNATURES??1000),1000)){
+  const connection=getConnection();
+  const url=connection.rpcEndpoint;
+  const items=await fetchAddressTransactions(url,wallet,maxSignatures);
   const events:ResearchEvent[]=[];
-  for(let i=0;i<signatures.length;i+=10){
-    const batch=signatures.slice(i,i+10);
-    const txs=await fetchV1Transactions(connection.rpcEndpoint,batch);
-    for(let j=0;j<txs.length;j++){const tx=txs[j];if(!tx)continue;const event=parseEvent(tx,wallet,batch[j]);if(event)events.push(event);}
+  for(const item of items){
+    const tx=item?.transaction?{transaction:item.transaction,meta:item.meta,blockTime:item.blockTime}:item;
+    const signature=item?.transaction?.signatures?.[0]||item?.signature;
+    if(!signature)continue;
+    const event=parseEvent(tx,wallet,signature);
+    if(event)events.push(event);
   }
-  return {signaturesScanned:signatures.length,events,nextBeforeSignature:before??null};
+  return {signaturesScanned:items.length,events,nextBeforeSignature:null};
 }
 
 export function reconstructTrades(walletAddress:string,events:ResearchEvent[]){
