@@ -25,7 +25,7 @@ export async function middleware(request: NextRequest) {
   const host = request.headers.get("host")?.toLowerCase() ?? "";
 
   const pathname = request.nextUrl.pathname;
-  if (pathname === "/login" || pathname === "/api/auth/login") {
+  if (pathname === "/login" || pathname === "/api/auth/login" || pathname === "/api/viewer-login" || pathname === "/trade-research" || pathname === "/api/trade-research") {
     return privateHeaders(NextResponse.next());
   }
 
