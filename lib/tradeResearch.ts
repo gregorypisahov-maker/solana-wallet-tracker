@@ -32,9 +32,9 @@ function tokenDelta(tx:ParsedTransactionWithMeta,wallet:string){
   return best;
 }
 
-function parseEvent(tx:ParsedTransactionWithMeta,wallet:string,signature:string):ResearchEvent|null{
+function parseEvent(tx:any,wallet:string,signature:string):ResearchEvent|null{
   if(!tx.meta||!tx.blockTime)return null;
-  const keys=tx.transaction.message.accountKeys.map(k=>k.pubkey.toBase58());
+  const keys=tx.transaction.message.accountKeys.map((k:any)=>typeof k.pubkey==="string"?k.pubkey:k.pubkey.toBase58());
   const idx=keys.indexOf(wallet); if(idx<0)return null;
   const solDelta=((tx.meta.postBalances[idx]??0)-(tx.meta.preBalances[idx]??0))/1e9;
   const token=tokenDelta(tx,wallet); if(!token||!token.delta)return null;
@@ -42,6 +42,17 @@ function parseEvent(tx:ParsedTransactionWithMeta,wallet:string,signature:string)
   if(token.delta>0&&solDelta<-fee)return {signature,tokenMint:token.mint,side:"buy",solAmount:Math.abs(solDelta),tokenAmount:token.delta,txTime:new Date(tx.blockTime*1000)};
   if(token.delta<0&&solDelta>0)return {signature,tokenMint:token.mint,side:"sell",solAmount:Math.abs(solDelta),tokenAmount:Math.abs(token.delta),txTime:new Date(tx.blockTime*1000)};
   return null;
+}
+
+async function fetchV1Transactions(url:string,signatures:string[]){
+  const results=await Promise.all(signatures.map(async signature=>{
+    const response=await fetch(url,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({jsonrpc:"2.0",id:signature,method:"getTransaction",params:[signature,{encoding:"jsonParsed",commitment:"confirmed",maxSupportedTransactionVersion:1}]}),cache:"no-store"});
+    if(!response.ok) throw new Error(`Solana RPC HTTP ${response.status}`);
+    const body=await response.json();
+    if(body.error) throw new Error(body.error.message||"Solana RPC transaction error");
+    return body.result;
+  }));
+  return results;
 }
 
 export async function scanResearchEvents(wallet=getResearchWallet(),maxSignatures=Number(process.env.TRADE_RESEARCH_MAX_SIGNATURES??5000),beforeSignature?:string|null){
@@ -57,7 +68,14 @@ export async function scanResearchEvents(wallet=getResearchWallet(),maxSignature
   const events:ResearchEvent[]=[];
   for(let i=0;i<signatures.length;i+=50){
     const batch=signatures.slice(i,i+50);
-    const txs=await connection.getParsedTransactions(batch,{maxSupportedTransactionVersion:0,commitment:"confirmed"});
+    let txs:any[];
+    try {
+      txs=await connection.getParsedTransactions(batch,{maxSupportedTransactionVersion:0,commitment:"confirmed"}) as any[];
+    } catch {
+      // Some wallets contain Solana v1 transactions. The installed web3.js type/schema
+      // only accepts v0 here, so fall back to the raw JSON-RPC API, which supports v1.
+      txs=await fetchV1Transactions(connection.rpcEndpoint,batch);
+    }
     for(let j=0;j<txs.length;j++){const tx=txs[j];if(!tx)continue;const event=parseEvent(tx,wallet,batch[j]);if(event)events.push(event);}
   }
   return {signaturesScanned:signatures.length,events,nextBeforeSignature:before??null};
