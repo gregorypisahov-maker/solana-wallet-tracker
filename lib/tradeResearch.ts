@@ -3,209 +3,93 @@ import { Connection, PublicKey, ParsedTransactionWithMeta } from "@solana/web3.j
 const WSOL = "So11111111111111111111111111111111111111112";
 const DEFAULT_WALLET = "xR4kCX6N2MNqxbY78VGxUKmTBwvweHT85bvxYBn32Dx";
 
-export type ResearchEvent = {
-  signature: string;
-  tokenMint: string;
-  side: "buy" | "sell";
-  solAmount: number;
-  tokenAmount: number;
-  txTime: Date;
-};
-
+export type ResearchEvent = { signature:string; tokenMint:string; side:"buy"|"sell"; solAmount:number; tokenAmount:number; txTime:Date; };
 export type ResearchTrade = {
-  walletAddress: string;
-  tokenMint: string;
-  entryTime: Date;
-  exitTime: Date;
-  holdSeconds: number;
-  entrySol: number;
-  exitSol: number;
-  pnlSol: number;
-  roiPct: number | null;
-  initialPositionUsd: number | null;
-  entryMarketCapUsd: number | null;
-  exitMarketCapUsd: number | null;
-  maxDrawdownPct: number | null;
-  maxRunupPct: number | null;
-  outcome: "win" | "loss" | "flat";
-  metadata: Record<string, unknown>;
+  walletAddress:string; tokenMint:string; entryTime:Date; exitTime:Date; holdSeconds:number;
+  entrySol:number; exitSol:number; pnlSol:number; roiPct:number|null; initialPositionUsd:number|null;
+  entryMarketCapUsd:number|null; exitMarketCapUsd:number|null; maxDrawdownPct:number|null; maxRunupPct:number|null;
+  outcome:"win"|"loss"|"flat"; metadata:Record<string,unknown>;
 };
 
-export function getResearchWallet() {
-  return process.env.TRADE_RESEARCH_WALLET?.trim() || DEFAULT_WALLET;
+export function getResearchWallet(){ return process.env.TRADE_RESEARCH_WALLET?.trim() || DEFAULT_WALLET; }
+
+function getConnection(){
+  const url=process.env.SOLANA_RPC_URL?.trim()||process.env.HELIUS_RPC_URL?.trim()||process.env.ALCHEMY_RPC_URL?.trim();
+  if(!url) throw new Error("Missing SOLANA_RPC_URL, HELIUS_RPC_URL, or ALCHEMY_RPC_URL");
+  return new Connection(url,{commitment:"confirmed",disableRetryOnRateLimit:true});
 }
 
-function getConnection() {
-  const url =
-    process.env.SOLANA_RPC_URL?.trim() ||
-    process.env.HELIUS_RPC_URL?.trim() ||
-    process.env.ALCHEMY_RPC_URL?.trim();
-  if (!url) throw new Error("Missing SOLANA_RPC_URL, HELIUS_RPC_URL, or ALCHEMY_RPC_URL");
-  return new Connection(url, { commitment: "confirmed", disableRetryOnRateLimit: true });
-}
-
-function tokenDelta(tx: ParsedTransactionWithMeta, wallet: string) {
-  const pre = (tx.meta?.preTokenBalances ?? []).filter(
-    (b) => b.owner === wallet && b.mint !== WSOL
-  );
-  const post = (tx.meta?.postTokenBalances ?? []).filter(
-    (b) => b.owner === wallet && b.mint !== WSOL
-  );
-  const mints = new Set([...pre.map((x) => x.mint), ...post.map((x) => x.mint)]);
-  let best: { mint: string; delta: number } | null = null;
-  for (const mint of mints) {
-    const a = pre.find((x) => x.mint === mint);
-    const b = post.find((x) => x.mint === mint);
-    const av = Number(a?.uiTokenAmount.uiAmount ?? 0);
-    const bv = Number(b?.uiTokenAmount.uiAmount ?? 0);
-    const delta = bv - av;
-    if (!best || Math.abs(delta) > Math.abs(best.delta)) best = { mint, delta };
+function tokenDelta(tx:ParsedTransactionWithMeta,wallet:string){
+  const pre=(tx.meta?.preTokenBalances??[]).filter(b=>b.owner===wallet&&b.mint!==WSOL);
+  const post=(tx.meta?.postTokenBalances??[]).filter(b=>b.owner===wallet&&b.mint!==WSOL);
+  const mints=new Set([...pre.map(x=>x.mint),...post.map(x=>x.mint)]);
+  let best:{mint:string;delta:number}|null=null;
+  for(const mint of mints){
+    const a=pre.find(x=>x.mint===mint), b=post.find(x=>x.mint===mint);
+    const delta=Number(b?.uiTokenAmount.uiAmount??0)-Number(a?.uiTokenAmount.uiAmount??0);
+    if(!best||Math.abs(delta)>Math.abs(best.delta)) best={mint,delta};
   }
   return best;
 }
 
-function parseEvent(
-  tx: ParsedTransactionWithMeta,
-  wallet: string,
-  signature: string
-): ResearchEvent | null {
-  if (!tx.meta || !tx.blockTime) return null;
-  const keys = tx.transaction.message.accountKeys.map((k) => k.pubkey.toBase58());
-  const idx = keys.indexOf(wallet);
-  if (idx < 0) return null;
-
-  const solDelta = ((tx.meta.postBalances[idx] ?? 0) - (tx.meta.preBalances[idx] ?? 0)) / 1e9;
-  const token = tokenDelta(tx, wallet);
-  if (!token || !token.delta) return null;
-
-  const fee = (tx.meta.fee ?? 0) / 1e9;
-  if (token.delta > 0 && solDelta < -fee) {
-    return {
-      signature,
-      tokenMint: token.mint,
-      side: "buy",
-      solAmount: Math.abs(solDelta),
-      tokenAmount: token.delta,
-      txTime: new Date(tx.blockTime * 1000),
-    };
-  }
-  if (token.delta < 0 && solDelta > 0) {
-    return {
-      signature,
-      tokenMint: token.mint,
-      side: "sell",
-      solAmount: Math.abs(solDelta),
-      tokenAmount: Math.abs(token.delta),
-      txTime: new Date(tx.blockTime * 1000),
-    };
-  }
+function parseEvent(tx:ParsedTransactionWithMeta,wallet:string,signature:string):ResearchEvent|null{
+  if(!tx.meta||!tx.blockTime)return null;
+  const keys=tx.transaction.message.accountKeys.map(k=>k.pubkey.toBase58());
+  const idx=keys.indexOf(wallet); if(idx<0)return null;
+  const solDelta=((tx.meta.postBalances[idx]??0)-(tx.meta.preBalances[idx]??0))/1e9;
+  const token=tokenDelta(tx,wallet); if(!token||!token.delta)return null;
+  const fee=(tx.meta.fee??0)/1e9;
+  if(token.delta>0&&solDelta<-fee)return {signature,tokenMint:token.mint,side:"buy",solAmount:Math.abs(solDelta),tokenAmount:token.delta,txTime:new Date(tx.blockTime*1000)};
+  if(token.delta<0&&solDelta>0)return {signature,tokenMint:token.mint,side:"sell",solAmount:Math.abs(solDelta),tokenAmount:Math.abs(token.delta),txTime:new Date(tx.blockTime*1000)};
   return null;
 }
 
-export async function scanResearchEvents(
-  wallet = getResearchWallet(),
-  maxSignatures = Number(process.env.TRADE_RESEARCH_MAX_SIGNATURES ?? 5000)
-) {
-  const connection = getConnection();
-  new PublicKey(wallet);
-  const signatures: string[] = [];
-  let before: string | undefined;
-
-  while (signatures.length < maxSignatures) {
-    const page = await connection.getSignaturesForAddress(
-      new PublicKey(wallet),
-      { limit: Math.min(1000, maxSignatures - signatures.length), before },
-      "confirmed"
-    );
-    if (!page.length) break;
-    signatures.push(...page.filter((x) => !x.err).map((x) => x.signature));
-    before = page[page.length - 1]?.signature;
-    if (page.length < 1000 || !before) break;
+export async function scanResearchEvents(wallet=getResearchWallet(),maxSignatures=Number(process.env.TRADE_RESEARCH_MAX_SIGNATURES??5000),beforeSignature?:string|null){
+  const connection=getConnection(); const publicKey=new PublicKey(wallet); const signatures:string[]=[];
+  let before=beforeSignature||undefined;
+  while(signatures.length<maxSignatures){
+    const page=await connection.getSignaturesForAddress(publicKey,{limit:Math.min(1000,maxSignatures-signatures.length),before},"confirmed");
+    if(!page.length)break;
+    signatures.push(...page.filter(x=>!x.err).map(x=>x.signature));
+    before=page[page.length-1]?.signature;
+    if(page.length<1000||!before)break;
   }
-
-  const events: ResearchEvent[] = [];
-  for (let i = 0; i < signatures.length; i += 50) {
-    const batch = signatures.slice(i, i + 50);
-    const txs = await connection.getParsedTransactions(batch, {
-      maxSupportedTransactionVersion: 0,
-      commitment: "confirmed",
-    });
-    for (let j = 0; j < txs.length; j += 1) {
-      const tx = txs[j];
-      if (!tx) continue;
-      const event = parseEvent(tx, wallet, batch[j]);
-      if (event) events.push(event);
-    }
+  const events:ResearchEvent[]=[];
+  for(let i=0;i<signatures.length;i+=50){
+    const batch=signatures.slice(i,i+50);
+    const txs=await connection.getParsedTransactions(batch,{maxSupportedTransactionVersion:0,commitment:"confirmed"});
+    for(let j=0;j<txs.length;j++){const tx=txs[j];if(!tx)continue;const event=parseEvent(tx,wallet,batch[j]);if(event)events.push(event);}
   }
-  return { signaturesScanned: signatures.length, events };
+  return {signaturesScanned:signatures.length,events,nextBeforeSignature:before??null};
 }
 
-export function reconstructTrades(walletAddress: string, events: ResearchEvent[]) {
-  const byToken = new Map<string, ResearchEvent[]>();
-  for (const event of events) {
-    const list = byToken.get(event.tokenMint) ?? [];
-    list.push(event);
-    byToken.set(event.tokenMint, list);
-  }
-
-  const trades: ResearchTrade[] = [];
-
-  for (const [tokenMint, list] of byToken) {
-    list.sort((a, b) => a.txTime.getTime() - b.txTime.getTime());
-    const lots: { time: Date; sol: number; tokens: number }[] = [];
-
-    for (const event of list) {
-      if (event.side === "buy") {
-        lots.push({ time: event.txTime, sol: event.solAmount, tokens: event.tokenAmount });
-        continue;
+export function reconstructTrades(walletAddress:string,events:ResearchEvent[]){
+  const byToken=new Map<string,ResearchEvent[]>();
+  for(const event of events){const list=byToken.get(event.tokenMint)??[];list.push(event);byToken.set(event.tokenMint,list);}
+  const trades:ResearchTrade[]=[];
+  for(const [tokenMint,list] of byToken){
+    list.sort((a,b)=>a.txTime.getTime()-b.txTime.getTime());
+    const lots:{time:Date;sol:number;tokens:number}[]=[];
+    for(const event of list){
+      if(event.side==="buy"){lots.push({time:event.txTime,sol:event.solAmount,tokens:event.tokenAmount});continue;}
+      let remaining=event.tokenAmount,allocatedSol=0,allocatedTokens=0,firstEntry:Date|null=null;
+      while(remaining>0&&lots.length){
+        const lot=lots[0],originalTokens=lot.tokens,take=Math.min(remaining,originalTokens);
+        allocatedSol+=lot.sol*(take/originalTokens);allocatedTokens+=take;firstEntry=firstEntry??lot.time;
+        lot.tokens-=take;lot.sol-=lot.sol*(take/originalTokens);remaining-=take;
+        if(lot.tokens<=1e-12)lots.shift();
       }
-
-      let remaining = event.tokenAmount;
-      let allocatedSol = 0;
-      let allocatedTokens = 0;
-      let firstEntry: Date | null = null;
-
-      while (remaining > 0 && lots.length) {
-        const lot = lots[0];
-        const take = Math.min(remaining, lot.tokens);
-        allocatedSol += lot.sol * (take / lot.tokens);
-        allocatedTokens += take;
-        firstEntry = firstEntry ?? lot.time;
-        lot.tokens -= take;
-        lot.sol -= lot.sol * (take / (lot.tokens + take));
-        remaining -= take;
-        if (lot.tokens <= 1e-12) lots.shift();
-      }
-
-      if (allocatedTokens <= 0 || !firstEntry) continue;
-      const pnlSol = event.solAmount * (allocatedTokens / event.tokenAmount) - allocatedSol;
-      const roiPct = allocatedSol > 0 ? (pnlSol / allocatedSol) * 100 : null;
-      const holdSeconds = Math.max(0, Math.round((event.txTime.getTime() - firstEntry.getTime()) / 1000));
-
+      if(allocatedTokens<=0||!firstEntry)continue;
+      const exitSol=event.solAmount*(allocatedTokens/event.tokenAmount),pnlSol=exitSol-allocatedSol;
       trades.push({
-        walletAddress,
-        tokenMint,
-        entryTime: firstEntry,
-        exitTime: event.txTime,
-        holdSeconds,
-        entrySol: allocatedSol,
-        exitSol: event.solAmount * (allocatedTokens / event.tokenAmount),
-        pnlSol,
-        roiPct,
-        initialPositionUsd: null,
-        entryMarketCapUsd: null,
-        exitMarketCapUsd: null,
-        maxDrawdownPct: null,
-        maxRunupPct: null,
-        outcome: pnlSol > 1e-9 ? "win" : pnlSol < -1e-9 ? "loss" : "flat",
-        metadata: {
-          allocation: "FIFO",
-          unmatchedTokenAmount: remaining,
-          source: "solana_rpc",
-        },
+        walletAddress,tokenMint,entryTime:firstEntry,exitTime:event.txTime,
+        holdSeconds:Math.max(0,Math.round((event.txTime.getTime()-firstEntry.getTime())/1000)),
+        entrySol:allocatedSol,exitSol,pnlSol,roiPct:allocatedSol>0?(pnlSol/allocatedSol)*100:null,
+        initialPositionUsd:null,entryMarketCapUsd:null,exitMarketCapUsd:null,maxDrawdownPct:null,maxRunupPct:null,
+        outcome:pnlSol>1e-9?"win":pnlSol< -1e-9?"loss":"flat",
+        metadata:{allocation:"FIFO",unmatchedTokenAmount:remaining,source:"solana_rpc",sourceSignature:event.signature}
       });
     }
   }
-
-  return trades.sort((a, b) => a.exitTime.getTime() - b.exitTime.getTime());
+  return trades.sort((a,b)=>b.exitTime.getTime()-a.exitTime.getTime());
 }
