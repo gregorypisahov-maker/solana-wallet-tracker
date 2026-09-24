@@ -1,5 +1,6 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
+import { createViewerSessionToken, VIEWER_COOKIE, VIEWER_SESSION_TTL_SECONDS } from "@/lib/dashboardAuth";
 
 export const dynamic = "force-dynamic";
 const COOKIE = "private_dashboard_session";
@@ -39,6 +40,9 @@ export async function POST(request: NextRequest) {
     return NextResponse.redirect(url, 303);
   }
 
+  const viewerToken = createViewerSessionToken();
+  if (!viewerToken) return NextResponse.redirect(new URL("/login?error=config", origin), 303);
+
   const response = NextResponse.redirect(new URL(next, origin), 303);
   response.cookies.set(COOKIE, sessionValue(expected), {
     httpOnly: true,
@@ -46,6 +50,13 @@ export async function POST(request: NextRequest) {
     sameSite: "lax",
     path: "/",
     maxAge: MAX_AGE,
+  });
+  response.cookies.set(VIEWER_COOKIE, viewerToken, {
+    httpOnly: true,
+    secure: true,
+    sameSite: "lax",
+    path: "/",
+    maxAge: VIEWER_SESSION_TTL_SECONDS,
   });
   response.headers.set("Cache-Control", "no-store, private");
   return response;
