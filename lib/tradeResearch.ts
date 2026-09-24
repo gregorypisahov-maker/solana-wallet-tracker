@@ -44,14 +44,29 @@ function parseEvent(tx:any,wallet:string,signature:string):ResearchEvent|null{
   return null;
 }
 
+async function sleep(ms:number){return new Promise(resolve=>setTimeout(resolve,ms));}
+
 async function fetchV1Transactions(url:string,signatures:string[]){
-  const results=await Promise.all(signatures.map(async signature=>{
-    const response=await fetch(url,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({jsonrpc:"2.0",id:signature,method:"getTransaction",params:[signature,{encoding:"jsonParsed",commitment:"confirmed",maxSupportedTransactionVersion:1}]}),cache:"no-store"});
-    if(!response.ok) throw new Error(`Solana RPC HTTP ${response.status}`);
-    const body=await response.json();
-    if(body.error) throw new Error(body.error.message||"Solana RPC transaction error");
-    return body.result;
-  }));
+  const results:any[]=[];
+  for(let i=0;i<signatures.length;i+=5){
+    const group=signatures.slice(i,i+5);
+    const groupResults=await Promise.all(group.map(async signature=>{
+      for(let attempt=0;attempt<5;attempt++){
+        const response=await fetch(url,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({jsonrpc:"2.0",id:signature,method:"getTransaction",params:[signature,{encoding:"jsonParsed",commitment:"confirmed",maxSupportedTransactionVersion:1}]}),cache:"no-store"});
+        if(response.status===429){await sleep(750*(attempt+1));continue;}
+        if(!response.ok) throw new Error(`Solana RPC HTTP ${response.status}`);
+        const body=await response.json();
+        if(body.error){
+          if(body.error.code===429||/compute units per second|too many requests/i.test(body.error.message||"")){await sleep(750*(attempt+1));continue;}
+          throw new Error(body.error.message||"Solana RPC transaction error");
+        }
+        return body.result;
+      }
+      throw new Error("Solana RPC rate limit persisted after retries");
+    }));
+    results.push(...groupResults);
+    if(i+5<signatures.length) await sleep(500);
+  }
   return results;
 }
 
@@ -66,7 +81,7 @@ export async function scanResearchEvents(wallet=getResearchWallet(),maxSignature
     if(page.length<1000||!before)break;
   }
   const events:ResearchEvent[]=[];
-  for(let i=0;i<signatures.length;i+=50){
+  for(let i=0;i<signatures.length;i+=10){
     const batch=signatures.slice(i,i+50);
     let txs:any[];
     try {
