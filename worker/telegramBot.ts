@@ -352,33 +352,30 @@ async function getUpdates(): Promise<TelegramUpdate[]> {
 async function handleBuyerFlow(): Promise<string> {
   const supabase = getSupabaseAdmin();
   const { data, error } = await supabase
-    .from("champion_candidates")
-    .select("token_symbol,mint,market_cap_usd,score,detected_at,features")
-    .eq("strategy_version", "champion_research_v1_2026_08_05")
-    .order("detected_at", { ascending: false })
-    .limit(20);
+    .from("buyer_acceleration_alerts")
+    .select("token_symbol,mint,market_cap_usd,liquidity_usd,unique_buyers_5m,buyer_delta,buyer_delta_delta,buyer_acceleration_pct,alerted_at")
+    .order("alerted_at", { ascending: false })
+    .limit(8);
   if (error) throw new Error(error.message);
-  const rows = (data ?? []).filter((row: any) => row?.features?.buyerAccelerationSignal === true).slice(0, 8);
-  if (!rows.length) return "👥 <b>UNIQUE BUYER FLOW</b>\\n\\nNo active buyer-acceleration signals in the latest research window.";
+  if (!data?.length) return "👥 <b>UNIQUE BUYER FLOW</b>\n\nNo buyer-acceleration alerts recorded yet.";
   const lines = ["👥 <b>UNIQUE BUYER ACCELERATION</b>", ""];
-  for (const row of rows) {
-    const f = row.features ?? {};
+  for (const row of data) {
     const symbol = String(row.token_symbol ?? "UNKNOWN").replace(/[<>&]/g, "");
-    const delta = Number(f.uniqueBuyerDelta5m);
-    const accel = Number(f.uniqueBuyerAccelerationPct);
-    const buyers = Number(f.uniqueBuyers);
-    const mc = Number(row.market_cap_usd);
+    const buyers = Number(row.unique_buyers_5m ?? 0);
+    const delta = Number(row.buyer_delta ?? 0);
+    const accel = row.buyer_acceleration_pct == null ? null : Number(row.buyer_acceleration_pct);
+    const mc = Number(row.market_cap_usd ?? 0);
+    const liq = Number(row.liquidity_usd ?? 0);
     lines.push(
-      `🪙 <b>${symbol}</b> — MC ${Math.round(mc || 0).toLocaleString()}`,
-      `👥 5m buyers: <b>${buyers}</b> | Δ <b>+${delta}</b> | accel <b>+${accel.toFixed(0)}%</b>`,
-      `⭐ Score: <b>${Number(row.score ?? 0).toFixed(0)}/100</b>`,
-      `⚡ <a href="https://gmgn.ai/sol/token/${row.mint}">GMGN</a> | <a href="https://dexscreener.com/solana/${row.mint}">DexScreener</a>`,
+      `🪙 <b>${symbol}</b> — MC $${Math.round(mc).toLocaleString()}`,
+      `👥 5m buyers: <b>${buyers}</b> | Δ <b>+${delta}</b>`,
+      `⚡ Acceleration: <b>${accel == null ? "n/a" : "+" + accel.toFixed(0) + "%"}</b> | 💧 $${Math.round(liq).toLocaleString()}`,
+      `🔗 <a href="https://gmgn.ai/sol/token/${row.mint}">GMGN</a> | <a href="https://dexscreener.com/solana/${row.mint}">DexScreener</a>`,
       "",
     );
   }
-  return lines.join("\\n");
+  return lines.join("\n");
 }
-
 async function handleResumeScalper(): Promise<string> {
   const result = await resumeScalper();
   if (!result.success) throw new Error(result.message);
