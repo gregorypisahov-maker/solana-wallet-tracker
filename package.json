@@ -12,7 +12,7 @@
     "worker": "node scripts/retired-service.mjs worker",
     "paper-trader": "node scripts/retired-service.mjs paper-trader",
     "worker:dev": "node scripts/retired-service.mjs worker-dev",
-    "telegram-bot": "node scripts/retired-service.mjs telegram-bot",
+    "telegram-bot": "tsx worker/telegramBot.ts",
     "moonshot-scanner": "node scripts/retired-service.mjs moonshot-scanner",
     "live-executor": "node scripts/retired-service.mjs live-executor",
     "sol-spot-paper": "node scripts/retired-service.mjs sol-spot-paper",
