@@ -72,6 +72,10 @@ type Candidate = {
   buys5m: number;
   sells5m: number;
   uniqueBuyers: number | null;
+  previousUniqueBuyers?: number | null;
+  uniqueBuyerDelta5m?: number | null;
+  uniqueBuyerAccelerationPct?: number | null;
+  uniqueBuyerSecondDerivative?: number | null;
 };
 
 type StoredCandidate = {
@@ -374,6 +378,7 @@ async function storeCandidate(candidate: Candidate): Promise<void> {
       unique_buyers_5m: candidate.uniqueBuyers,
     },
   });
+}
 
 async function runScan(): Promise<void> {
   if (scanRunning) return;
