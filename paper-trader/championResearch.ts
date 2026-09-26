@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { getSupabaseAdmin } from "../lib/supabase";
+import { sendTelegramAlert } from "../lib/telegram";
 import {
   recordCandidateObservation,
   startCandidateOutcomeScheduler,
@@ -31,7 +32,20 @@ const CONFIG = {
   targetPct: envNumber("CHAMPION_RESEARCH_TARGET_PCT", 10, 0.5, 100),
   stopPct: envNumber("CHAMPION_RESEARCH_STOP_PCT", 4, 0.5, 100),
   minScore: envNumber("CHAMPION_MIN_SCORE", 60, 0, 100),
+  buyerAccelerationEnabled: envBool("BUYER_ACCELERATION_ENABLED", true),
+  buyerAccelerationMinUnique: Math.floor(envNumber("BUYER_ACCELERATION_MIN_UNIQUE", 8, 3, 10_000)),
+  buyerAccelerationMinDelta: Math.floor(envNumber("BUYER_ACCELERATION_MIN_DELTA", 3, 1, 10_000)),
+  buyerAccelerationMinDeltaDelta: Math.floor(envNumber("BUYER_ACCELERATION_MIN_DELTA_DELTA", 2, 1, 10_000)),
+  buyerAccelerationMaxMarketCapUsd: envNumber("BUYER_ACCELERATION_MAX_MARKET_CAP_USD", 5_000_000, 50_000, 100_000_000_000),
+  buyerAccelerationMinLiquidityUsd: envNumber("BUYER_ACCELERATION_MIN_LIQUIDITY_USD", 20_000, 1_000, 100_000_000),
+  buyerAccelerationAlertCooldownMs: envNumber("BUYER_ACCELERATION_ALERT_COOLDOWN_MS", 20 * 60_000, 60_000, 24 * 60 * 60_000),
 } as const;
+
+function envBool(name: string, fallback: boolean): boolean {
+  const value = process.env[name];
+  if (value == null || value.trim() === "") return fallback;
+  return !["0", "false", "off", "no"].includes(value.trim().toLowerCase());
+}
 
 const BLOCKED_SYMBOLS = new Set([
   "USD", "USDC", "USDT", "SOL", "WSOL", "BTC", "WBTC", "ETH", "WETH", "BNB",
@@ -176,6 +190,109 @@ async function discover(): Promise<Candidate[]> {
     .slice(0, CONFIG.maxPerScan);
 }
 
+async function trackBuyerAcceleration(candidates: Candidate[]): Promise<void> {
+  if (!CONFIG.buyerAccelerationEnabled) return;
+
+  for (const candidate of candidates) {
+    if (candidate.uniqueBuyers == null) continue;
+
+    try {
+      const { data: previousRows, error: previousError } = await supabase
+        .from("buyer_flow_snapshots")
+        .select("unique_buyers_5m,observed_at")
+        .eq("mint", candidate.mint)
+        .order("observed_at", { ascending: false })
+        .limit(3);
+      if (previousError) throw previousError;
+
+      const previous = previousRows?.[0]?.unique_buyers_5m == null ? null : n(previousRows[0].unique_buyers_5m, 0);
+      const previousPrevious = previousRows?.[1]?.unique_buyers_5m == null ? null : n(previousRows[1].unique_buyers_5m, 0);
+      const buyerDelta = previous == null ? null : candidate.uniqueBuyers - previous;
+      const previousDelta = previous != null && previousPrevious != null ? previous - previousPrevious : null;
+      const buyerDeltaDelta = buyerDelta != null && previousDelta != null ? buyerDelta - previousDelta : null;
+      const buyerAccelerationPct = buyerDeltaDelta != null && previousDelta > 0 ? (buyerDeltaDelta / previousDelta) * 100 : null;
+
+      const { error: snapshotError } = await supabase.from("buyer_flow_snapshots").insert({
+        mint: candidate.mint,
+        pair_address: candidate.pairAddress,
+        token_symbol: candidate.symbol,
+        observed_at: new Date().toISOString(),
+        market_cap_usd: candidate.marketCapUsd,
+        liquidity_usd: candidate.liquidityUsd,
+        unique_buyers_5m: candidate.uniqueBuyers,
+        buys_5m: candidate.buys5m,
+        sells_5m: candidate.sells5m,
+        buyers_per_min: candidate.uniqueBuyers / 5,
+        buyer_delta: buyerDelta,
+        buyer_delta_delta: buyerDeltaDelta,
+        buyer_acceleration_pct: buyerAccelerationPct,
+        snapshot: { change_5m_pct: candidate.change5mPct, volume_5m_usd: candidate.volume5mUsd, volume_1h_usd: candidate.volume1hUsd },
+      });
+      if (snapshotError) throw snapshotError;
+
+      const qualifies =
+        candidate.marketCapUsd <= CONFIG.buyerAccelerationMaxMarketCapUsd &&
+        candidate.liquidityUsd >= CONFIG.buyerAccelerationMinLiquidityUsd &&
+        candidate.uniqueBuyers >= CONFIG.buyerAccelerationMinUnique &&
+        (buyerDelta ?? 0) >= CONFIG.buyerAccelerationMinDelta &&
+        (buyerDeltaDelta ?? 0) >= CONFIG.buyerAccelerationMinDeltaDelta &&
+        candidate.buys5m > candidate.sells5m;
+      if (!qualifies) continue;
+
+      const cutoff = new Date(Date.now() - CONFIG.buyerAccelerationAlertCooldownMs).toISOString();
+      const { data: recentAlert, error: alertLookupError } = await supabase
+        .from("buyer_acceleration_alerts")
+        .select("id")
+        .eq("mint", candidate.mint)
+        .gte("alerted_at", cutoff)
+        .limit(1);
+      if (alertLookupError) throw alertLookupError;
+      if (recentAlert?.length) continue;
+
+      const accelText = buyerAccelerationPct == null
+        ? `${buyerDeltaDelta} buyers/5m acceleration`
+        : `+${buyerAccelerationPct.toFixed(0)}% acceleration`;
+      const message = [
+        "🚀 <b>UNIQUE BUYER ACCELERATION</b>",
+        "",
+        `🪙 <b>${candidate.symbol}</b>`,
+        `👥 Unique buyers/5m: <b>${candidate.uniqueBuyers}</b>`,
+        `📈 Buyer change: <b>+${buyerDelta}</b>`,
+        `⚡ ${accelText}`,
+        `🟢 Buys/Sells: <b>${candidate.buys5m}/${candidate.sells5m}</b>`,
+        `💰 MC: <b>${Math.round(candidate.marketCapUsd).toLocaleString()}</b>`,
+        `💧 Liquidity: <b>${Math.round(candidate.liquidityUsd).toLocaleString()}</b>`,
+        "",
+        "Paper/research signal only — not an automatic trade.",
+        "",
+        `📈 https://dexscreener.com/solana/${candidate.mint}`,
+        `⚡ https://gmgn.ai/sol/token/${candidate.mint}`,
+        "",
+        `<code>${candidate.mint}</code>`,
+      ].join("\n");
+
+      const { error: alertInsertError } = await supabase.from("buyer_acceleration_alerts").insert({
+        mint: candidate.mint,
+        token_symbol: candidate.symbol,
+        pair_address: candidate.pairAddress,
+        alerted_at: new Date().toISOString(),
+        market_cap_usd: candidate.marketCapUsd,
+        liquidity_usd: candidate.liquidityUsd,
+        unique_buyers_5m: candidate.uniqueBuyers,
+        buyer_delta: buyerDelta,
+        buyer_delta_delta: buyerDeltaDelta,
+        buyer_acceleration_pct: buyerAccelerationPct,
+        message,
+      });
+      if (alertInsertError) throw alertInsertError;
+      await sendTelegramAlert(message, { forceOperational: true });
+      console.log(`[buyer-acceleration] alert ${candidate.symbol} buyers=${candidate.uniqueBuyers} delta=${buyerDelta} acceleration=${buyerDeltaDelta}`);
+    } catch (error) {
+      console.warn(`[buyer-acceleration] failed ${candidate.mint}`, error);
+    }
+  }
+}
+
 async function storeCandidate(candidate: Candidate): Promise<void> {
   const cutoff = new Date(Date.now() - CONFIG.scanMs * 0.9).toISOString();
   const { data: existing, error: existingError } = await supabase
@@ -249,6 +366,7 @@ async function runScan(): Promise<void> {
   scanRunning = true;
   try {
     const candidates = await discover();
+    await trackBuyerAcceleration(candidates);
     for (const candidate of candidates) await storeCandidate(candidate);
     await supabase.from("champion_strategy_state").update({
       last_scan_at: new Date().toISOString(),
@@ -367,7 +485,7 @@ async function runOutcomes(): Promise<void> {
 }
 
 export function startChampionResearchScheduler(): void {
-  console.log(`[champion-research] loaded version=${VERSION} paperOnly=true trading=false`);
+  console.log(`[champion-research] loaded version=${VERSION} paperOnly=true trading=false buyerAcceleration=${CONFIG.buyerAccelerationEnabled}`);
   startCandidateOutcomeScheduler();
   void runScan().catch((error) => console.error("[champion-research] initial scan failed", error));
   void runOutcomes().catch((error) => console.error("[champion-research] initial outcomes failed", error));
