@@ -501,11 +501,15 @@ async function storeCandidate(candidate: Candidate): Promise<void> {
 }
 
 async function runScan(): Promise<void> {
-  if (scanRunning || !(await stateEnabled())) return;
+  if (scanRunning) return;
   scanRunning = true;
   try {
     const candidates = await discover();
+    // Buyer-flow intelligence runs independently of the paper-only champion
+    // experiment so the Telegram scout remains active even when that experiment
+    // is disabled in Supabase.
     await trackBuyerAcceleration(candidates);
+    if (!(await stateEnabled())) return;
     for (const candidate of candidates) await storeCandidate(candidate);
     await supabase.from("champion_strategy_state").update({
       last_scan_at: new Date().toISOString(),
