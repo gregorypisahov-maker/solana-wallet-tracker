@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { getSupabaseAdmin } from "../lib/supabase";
 import { sendTelegramAlert } from "../lib/telegram";
+import { sendTelegramAlert } from "../lib/telegram";
 import {
   recordCandidateObservation,
   startCandidateOutcomeScheduler,
@@ -72,6 +73,10 @@ type Candidate = {
   buys5m: number;
   sells5m: number;
   uniqueBuyers: number | null;
+  previousUniqueBuyers: number | null;
+  uniqueBuyerDelta5m: number | null;
+  uniqueBuyerAccelerationPct: number | null;
+  uniqueBuyerSecondDerivative: number | null;
 };
 
 type StoredCandidate = {
@@ -142,13 +147,111 @@ function parsePool(row: any): Candidate | null {
 
 function score(c: Candidate): number {
   const liquidity = Math.min(20, c.liquidityUsd / 500_000 * 20);
-  const acceleration = c.volume1hUsd > 0
-    ? Math.min(20, c.volume5mUsd / Math.max(1, c.volume1hUsd / 12) * 10)
+  const volumeAcceleration = c.volume1hUsd > 0
+    ? Math.min(15, c.volume5mUsd / Math.max(1, c.volume1hUsd / 12) * 7.5)
     : 0;
-  const momentum5m = Math.max(0, Math.min(20, c.change5mPct * 3));
-  const momentum1h = Math.max(0, Math.min(15, c.change1hPct));
-  const flow = Math.min(25, c.buys5m / Math.max(1, c.sells5m) * 12.5);
-  return Math.round(Math.min(100, liquidity + acceleration + momentum5m + momentum1h + flow));
+  const momentum5m = Math.max(0, Math.min(15, c.change5mPct * 3));
+  const momentum1h = Math.max(0, Math.min(10, c.change1hPct));
+  const flow = Math.min(20, c.buys5m / Math.max(1, c.sells5m) * 10);
+
+  // Unique-buyer acceleration is deliberately a separate signal from raw volume.
+  // It rewards a growing population of buyers, not repeated transactions by the
+  // same participants. GeckoTerminal's m5 buyers field is the unique buyer count.
+  const buyerAcceleration = c.uniqueBuyerAccelerationPct != null
+    ? Math.min(20, Math.max(0, c.uniqueBuyerAccelerationPct) / 10)
+    : 0;
+
+  return Math.round(Math.min(
+    100,
+    liquidity + volumeAcceleration + momentum5m + momentum1h + flow + buyerAcceleration,
+  ));
+}
+
+function reasons(c: Candidate, candidateScore: number): string[] {
+  const result: string[] = [];
+  if (c.liquidityUsd < CONFIG.minLiquidityUsd) result.push("liquidity_below_minimum");
+  if (c.marketCapUsd < CONFIG.minMarketCapUsd) result.push("market_cap_below_minimum");
+  if (c.marketCapUsd > CONFIG.maxMarketCapUsd) result.push("market_cap_above_maximum");
+  if (c.poolAgeMinutes < CONFIG.minPoolAgeMinutes) result.push("pool_too_new");
+  if (c.change5mPct <= 0) result.push("five_minute_momentum_not_positive");
+  if (c.buys5m <= c.sells5m) result.push("buy_flow_not_dominant");
+  if (candidateScore < CONFIG.minScore) result.push("score_below_minimum");
+  return result;
+}
+
+async function previousBuyerSnapshots(mint: string): Promise<{
+  previousUniqueBuyers: number | null;
+  previousPreviousUniqueBuyers: number | null;
+  previousAlerted: boolean;
+}> {
+  const { data, error } = await supabase
+    .from("champion_candidates")
+    .select("features,detected_at")
+    .eq("strategy_version", VERSION)
+    .eq("mint", mint)
+    .order("detected_at", { ascending: false })
+    .limit(2);
+
+  if (error) throw error;
+
+  const rows = Array.isArray(data) ? data : [];
+  const first = rows[0]?.features ?? {};
+  const second = rows[1]?.features ?? {};
+
+  const previousUniqueBuyers = Number.isFinite(Number(first.uniqueBuyers))
+    ? Number(first.uniqueBuyers)
+    : null;
+  const previousPreviousUniqueBuyers = Number.isFinite(Number(second.uniqueBuyers))
+    ? Number(second.uniqueBuyers)
+    : null;
+
+  return {
+    previousUniqueBuyers,
+    previousPreviousUniqueBuyers,
+    previousAlerted: first.buyerAccelerationAlertSent === true,
+  };
+}
+
+function buyerAcceleration(candidate: Candidate, history: {
+  previousUniqueBuyers: number | null;
+  previousPreviousUniqueBuyers: number | null;
+}): Candidate {
+  const current = candidate.uniqueBuyers;
+  const previous = history.previousUniqueBuyers;
+  const previousPrevious = history.previousPreviousUniqueBuyers;
+
+  if (current == null || previous == null) return {
+    ...candidate,
+    previousUniqueBuyers: previous,
+    uniqueBuyerDelta5m: null,
+    uniqueBuyerAccelerationPct: null,
+    uniqueBuyerSecondDerivative: null,
+  };
+
+  const delta = current - previous;
+  const accelerationPct = previous > 0 ? (delta / previous) * 100 : (delta > 0 ? 100 : 0);
+  const priorDelta = previousPrevious != null ? previous - previousPrevious : null;
+  const secondDerivative = priorDelta != null ? delta - priorDelta : null;
+
+  return {
+    ...candidate,
+    previousUniqueBuyers: previous,
+    uniqueBuyerDelta5m: delta,
+    uniqueBuyerAccelerationPct: accelerationPct,
+    uniqueBuyerSecondDerivative: secondDerivative,
+  };
+}
+
+function isBuyerAccelerationSignal(c: Candidate): boolean {
+  return (
+    c.uniqueBuyers != null &&
+    c.uniqueBuyers >= 10 &&
+    c.uniqueBuyerDelta5m != null &&
+    c.uniqueBuyerDelta5m >= 3 &&
+    c.uniqueBuyerAccelerationPct != null &&
+    c.uniqueBuyerAccelerationPct >= 50 &&
+    (c.uniqueBuyerSecondDerivative == null || c.uniqueBuyerSecondDerivative > 0)
+  );
 }
 
 function reasons(c: Candidate, candidateScore: number): string[] {
@@ -305,8 +408,13 @@ async function storeCandidate(candidate: Candidate): Promise<void> {
   if (existingError) throw existingError;
   if (existing?.length) return;
 
+  const history = await previousBuyerSnapshots(candidate.mint);
+  candidate = buyerAcceleration(candidate, history);
+
   const candidateScore = score(candidate);
   const decisionReasons = reasons(candidate, candidateScore);
+  const buyerSignal = isBuyerAccelerationSignal(candidate);
+  const buyerAccelerationAlertSent = history.previousAlerted || !buyerSignal;
   const decision = decisionReasons.length ? "rejected" : "accepted";
   const candidateId = randomUUID();
   const detectedAt = new Date().toISOString();
@@ -327,7 +435,12 @@ async function storeCandidate(candidate: Candidate): Promise<void> {
     liquidity_usd: candidate.liquidityUsd,
     market_cap_usd: candidate.marketCapUsd,
     pool_age_minutes: candidate.poolAgeMinutes,
-    features: candidate,
+    features: {
+      ...candidate,
+      buyerAccelerationSignal: buyerSignal,
+      buyerAccelerationAlertSent,
+      buyerAccelerationVersion: "v1_2026_09_26",
+    },
     quote_snapshot: {},
   });
   if (error) throw error;
@@ -357,8 +470,34 @@ async function storeCandidate(candidate: Candidate): Promise<void> {
       volume_1h_usd: candidate.volume1hUsd,
       buys_5m: candidate.buys5m,
       sells_5m: candidate.sells5m,
+      unique_buyers_5m: candidate.uniqueBuyers,
+      previous_unique_buyers_5m: candidate.previousUniqueBuyers,
+      unique_buyer_delta_5m: candidate.uniqueBuyerDelta5m,
+      unique_buyer_acceleration_pct: candidate.uniqueBuyerAccelerationPct,
+      unique_buyer_second_derivative: candidate.uniqueBuyerSecondDerivative,
+      buyer_acceleration_signal: buyerSignal,
     },
   });
+
+  if (buyerSignal && !history.previousAlerted) {
+    const dex = `https://dexscreener.com/solana/${candidate.mint}`;
+    const gmgn = `https://gmgn.ai/sol/token/${candidate.mint}`;
+    await sendTelegramAlert([
+      "🔥 <b>UNIQUE BUYER ACCELERATION</b>",
+      "",
+      `🪙 <b>${candidate.symbol}</b>`,
+      `💰 MC: <b>${Math.round(candidate.marketCapUsd).toLocaleString()}</b>`,
+      `👥 Unique buyers / 5m: <b>${candidate.uniqueBuyers}</b>`,
+      `📈 Previous 5m: <b>${candidate.previousUniqueBuyers ?? "n/a"}</b>`,
+      `🚀 Delta: <b>+${candidate.uniqueBuyerDelta5m}</b>`,
+      `⚡ Acceleration: <b>+${candidate.uniqueBuyerAccelerationPct?.toFixed(0)}%</b>`,
+      `🧮 2nd derivative: <b>${candidate.uniqueBuyerSecondDerivative ?? "n/a"}</b>`,
+      `💧 Liquidity: <b>${Math.round(candidate.liquidityUsd).toLocaleString()}</b>`,
+      `📊 Score: <b>${candidateScore}/100</b>`,
+      "",
+      `📈 <a href="${dex}">DexScreener</a>  |  ⚡ <a href="${gmgn}">GMGN</a>`,
+    ].join("\n"), { forceOperational: true });
+  }
 }
 
 async function runScan(): Promise<void> {
