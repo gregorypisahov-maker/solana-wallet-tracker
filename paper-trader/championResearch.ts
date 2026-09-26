@@ -318,8 +318,6 @@ async function storeCandidate(candidate: Candidate): Promise<void> {
 
   const candidateScore = score(candidate);
   const decisionReasons = reasons(candidate, candidateScore);
-  const buyerSignal = isBuyerAccelerationSignal(candidate);
-  const buyerAccelerationAlertSent = history.previousAlerted || !buyerSignal;
   const decision = decisionReasons.length ? "rejected" : "accepted";
   const candidateId = randomUUID();
   const detectedAt = new Date().toISOString();
