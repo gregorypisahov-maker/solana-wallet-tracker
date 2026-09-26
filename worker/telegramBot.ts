@@ -1,4 +1,5 @@
 import "dotenv/config";
+import { getSupabaseAdmin } from "../lib/supabase";
 
 import { loadState } from "../paper-trader/storage";
 import {
@@ -72,7 +73,7 @@ const CONFLICT_BACKOFF_JITTER_MS = 30_000;
 const TELEGRAM_FETCH_TIMEOUT_MS = 10_000;
 const TELEGRAM_FETCH_MAX_ATTEMPTS = 5;
 const TELEGRAM_WARNING_INTERVAL_MS = 30_000;
-const TELEGRAM_WORKER_VERSION = "2026-07-30-network-resilient-ai-pnl";
+const TELEGRAM_WORKER_VERSION = "2026-09-26-buyer-acceleration";
 
 if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
   console.error("[telegram-bot] TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID must be set. Exiting.");
@@ -347,6 +348,37 @@ async function getUpdates(): Promise<TelegramUpdate[]> {
   return Array.isArray(body.result) ? body.result : [];
 }
 
+
+async function handleBuyerFlow(): Promise<string> {
+  const supabase = getSupabaseAdmin();
+  const { data, error } = await supabase
+    .from("champion_candidates")
+    .select("token_symbol,mint,market_cap_usd,score,detected_at,features")
+    .eq("strategy_version", "champion_research_v1_2026_08_05")
+    .order("detected_at", { ascending: false })
+    .limit(20);
+  if (error) throw new Error(error.message);
+  const rows = (data ?? []).filter((row: any) => row?.features?.buyerAccelerationSignal === true).slice(0, 8);
+  if (!rows.length) return "👥 <b>UNIQUE BUYER FLOW</b>\\n\\nNo active buyer-acceleration signals in the latest research window.";
+  const lines = ["👥 <b>UNIQUE BUYER ACCELERATION</b>", ""];
+  for (const row of rows) {
+    const f = row.features ?? {};
+    const symbol = String(row.token_symbol ?? "UNKNOWN").replace(/[<>&]/g, "");
+    const delta = Number(f.uniqueBuyerDelta5m);
+    const accel = Number(f.uniqueBuyerAccelerationPct);
+    const buyers = Number(f.uniqueBuyers);
+    const mc = Number(row.market_cap_usd);
+    lines.push(
+      `🪙 <b>\${symbol}</b> — MC $\${Math.round(mc || 0).toLocaleString()}`,
+      `👥 5m buyers: <b>\${buyers}</b> | Δ <b>+\${delta}</b> | accel <b>+\${accel.toFixed(0)}%</b>`,
+      `⭐ Score: <b>\${Number(row.score ?? 0).toFixed(0)}/100</b>`,
+      `⚡ <a href="https://gmgn.ai/sol/token/\${row.mint}">GMGN</a> | <a href="https://dexscreener.com/solana/\${row.mint}">DexScreener</a>`,
+      "",
+    );
+  }
+  return lines.join("\\n");
+}
+
 async function handleResumeScalper(): Promise<string> {
   const result = await resumeScalper();
   if (!result.success) throw new Error(result.message);
@@ -378,6 +410,7 @@ async function handleHelp(): Promise<string> {
     "/ai_pnl [14d|30d|72h] — AI paper P&L scoreboard",
     "/binancestats — BTCUSDT futures paper bot",
     "/readiness — Bot readiness check",
+    "/buyerflow — Latest unique-buyer acceleration signals",
     "/heliusstats — Existing Helius monitor usage", "",
     "<b>🧠 Helius flow paper</b>",
     "/helius_stats — Intelligence worker and paper status",
@@ -414,7 +447,7 @@ function helpKeyboard(): InlineKeyboard {
     [{ text: "🧠 AI Stats", callback_data: "/aistats" }, { text: "💰 AI PnL", callback_data: "/ai_pnl" }],
     [{ text: "📉 Binance Paper", callback_data: "/binancestats" }],
     [{ text: "🧠 Helius Flow", callback_data: "/helius_stats" }, { text: "💰 Helius PnL", callback_data: "/helius_pnl" }],
-    [{ text: "✅ Readiness", callback_data: "/readiness" }],
+    [{ text: "✅ Readiness", callback_data: "/readiness" }, { text: "👥 Buyer Flow", callback_data: "/buyerflow" }],
     [{ text: "▶️ Resume Paper", callback_data: "/resume" }, { text: "⚡ Resume Scalp", callback_data: "/resume_scalp" }],
     [{ text: "🧠 Auto Wallets", callback_data: "/auto_wallets" }, { text: "🔄 Wallet Scan", callback_data: "/walletscan" }],
   );
@@ -458,6 +491,8 @@ const COMMAND_HANDLERS: Record<string, CommandHandler> = {
   "/helius_resume": handleHeliusResume,
   "/heliusresume": handleHeliusResume,
   "/readiness": handleReadiness,
+  "/buyerflow": handleBuyerFlow,
+  "/buyer_flow": handleBuyerFlow,
   "/resume": handleResume,
   "/resume_scalp": handleResumeScalper,
   "/resumescalp": handleResumeScalper,
