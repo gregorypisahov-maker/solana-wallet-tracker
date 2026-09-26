@@ -369,10 +369,10 @@ async function handleBuyerFlow(): Promise<string> {
     const buyers = Number(f.uniqueBuyers);
     const mc = Number(row.market_cap_usd);
     lines.push(
-      `🪙 <b>\${symbol}</b> — MC $\${Math.round(mc || 0).toLocaleString()}`,
-      `👥 5m buyers: <b>\${buyers}</b> | Δ <b>+\${delta}</b> | accel <b>+\${accel.toFixed(0)}%</b>`,
-      `⭐ Score: <b>\${Number(row.score ?? 0).toFixed(0)}/100</b>`,
-      `⚡ <a href="https://gmgn.ai/sol/token/\${row.mint}">GMGN</a> | <a href="https://dexscreener.com/solana/\${row.mint}">DexScreener</a>`,
+      `🪙 <b>${symbol}</b> — MC ${Math.round(mc || 0).toLocaleString()}`,
+      `👥 5m buyers: <b>${buyers}</b> | Δ <b>+${delta}</b> | accel <b>+${accel.toFixed(0)}%</b>`,
+      `⭐ Score: <b>${Number(row.score ?? 0).toFixed(0)}/100</b>`,
+      `⚡ <a href="https://gmgn.ai/sol/token/${row.mint}">GMGN</a> | <a href="https://dexscreener.com/solana/${row.mint}">DexScreener</a>`,
       "",
     );
   }
